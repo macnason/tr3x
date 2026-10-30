@@ -67,7 +67,9 @@ pub enum Lifecycle {
 pub fn command(thread_id: &str, action: &Lifecycle) -> Value {
     let id = format!("t3rex:{}", uuid::Uuid::new_v4());
     match action {
-        Lifecycle::Settle => json!({"type": "thread.settle", "commandId": id, "threadId": thread_id}),
+        Lifecycle::Settle => {
+            json!({"type": "thread.settle", "commandId": id, "threadId": thread_id})
+        }
         Lifecycle::Unsettle => {
             json!({"type": "thread.unsettle", "commandId": id, "threadId": thread_id, "reason": "user"})
         }
@@ -80,7 +82,9 @@ pub fn command(thread_id: &str, action: &Lifecycle) -> Value {
         }
         Lifecycle::Pin => json!({"type": "thread.pin", "commandId": id, "threadId": thread_id}),
         Lifecycle::Unpin => json!({"type": "thread.unpin", "commandId": id, "threadId": thread_id}),
-        Lifecycle::Archive => json!({"type": "thread.archive", "commandId": id, "threadId": thread_id}),
+        Lifecycle::Archive => {
+            json!({"type": "thread.archive", "commandId": id, "threadId": thread_id})
+        }
     }
 }
 

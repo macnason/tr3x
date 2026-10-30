@@ -11,7 +11,8 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-const BUNDLED: &str = "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+const BUNDLED: &str =
+    "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
 
 #[derive(Clone, Debug)]
 pub struct Rex {
@@ -40,7 +41,11 @@ impl Rex {
         let mut command = Command::new(&self.bin);
         command
             .args(args)
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -77,12 +82,15 @@ impl Rex {
 
     /// The session's windows and blocks, as `session inspect --json` prints them.
     pub async fn inspect(&self, session: &str) -> Result<Value> {
-        self.json(&["session", "inspect", session, "--json"], None).await
+        self.json(&["session", "inspect", session, "--json"], None)
+            .await
     }
 
     pub async fn create_session(&self, label: &str) -> Result<String> {
         let args = serde_json::json!({ "label": label }).to_string();
-        let made = self.json(&["api", "call", "session.create", &args], None).await?;
+        let made = self
+            .json(&["api", "call", "session.create", &args], None)
+            .await?;
         made["session_id"]
             .as_str()
             .map(str::to_string)
@@ -90,9 +98,12 @@ impl Rex {
     }
 
     pub async fn move_session(&self, session: &str, index: usize) -> Result<()> {
-        self.run(&["session", "move", session, "--index", &index.to_string()], None)
-            .await
-            .map(drop)
+        self.run(
+            &["session", "move", session, "--index", &index.to_string()],
+            None,
+        )
+        .await
+        .map(drop)
     }
 
     /// Runs a Lua script against `session` and returns what it returned.
@@ -106,7 +117,9 @@ impl Rex {
         let clients = self.json(&["client", "ls", "--json"], None).await?;
         let apps = clients["clients"].as_array().cloned().unwrap_or_default();
         for app in apps.iter().filter(|c| c["info"]["kind"] == "app") {
-            let Some(id) = app["client_id"].as_str() else { continue };
+            let Some(id) = app["client_id"].as_str() else {
+                continue;
+            };
             let mut args = vec!["-C", id, "do", action];
             let kv: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
             args.extend(kv.iter().map(String::as_str));

@@ -28,7 +28,9 @@ pub fn dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("T3REX_STATE_DIR") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join(".local/state/t3rex")
 }
 

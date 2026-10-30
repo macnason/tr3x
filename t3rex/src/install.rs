@@ -14,7 +14,9 @@ const LUA: &str = include_str!("../../rex/t3rex.lua");
 const REQUIRE: &str = "require(\"t3rex\") -- T3 Code in Rex, added by t3rex install";
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 fn bin_path() -> PathBuf {
@@ -29,7 +31,9 @@ fn config_dir() -> PathBuf {
 }
 
 fn plist_path() -> PathBuf {
-    home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    home()
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist"))
 }
 
 fn uid() -> String {
@@ -41,12 +45,24 @@ fn uid() -> String {
 }
 
 fn step(ok: bool, what: &str, detail: &str) {
-    let mark = if ok { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+    let mark = if ok {
+        "\x1b[32m✓\x1b[0m"
+    } else {
+        "\x1b[31m✗\x1b[0m"
+    };
     if detail.is_empty() {
         println!("{mark} {what}");
     } else {
         println!("{mark} {what}  \x1b[2m{detail}\x1b[0m");
     }
+}
+
+fn path_var() -> String {
+    let bin = home().join(".local/bin");
+    format!(
+        "{}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        bin.display()
+    )
 }
 
 fn plist(bin: &Path, rex: &Path) -> String {
@@ -73,7 +89,7 @@ fn plist(bin: &Path, rex: &Path) -> String {
 "#,
         bin = bin.display(),
         rex = rex.display(),
-        path = format!("{}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", home().join(".local/bin").display()),
+        path = path_var(),
         log = log.display(),
     )
 }
@@ -82,7 +98,10 @@ fn plist(bin: &Path, rex: &Path) -> String {
 fn add_require(dir: &Path) -> Result<&'static str> {
     let init = dir.join("init.lua");
     let text = std::fs::read_to_string(&init).unwrap_or_default();
-    if text.lines().any(|l| l.trim_start().starts_with("require(\"t3rex\")")) {
+    if text
+        .lines()
+        .any(|l| l.trim_start().starts_with("require(\"t3rex\")"))
+    {
         return Ok("already loads t3rex");
     }
     if init.exists() {
@@ -98,13 +117,22 @@ fn add_require(dir: &Path) -> Result<&'static str> {
     new.push_str(REQUIRE);
     new.push('\n');
     std::fs::write(&init, new)?;
-    Ok(if text.is_empty() { "created init.lua" } else { "added one line to init.lua (backup: init.lua.before-t3rex)" })
+    Ok(if text.is_empty() {
+        "created init.lua"
+    } else {
+        "added one line to init.lua (backup: init.lua.before-t3rex)"
+    })
 }
 
 fn remove_require(dir: &Path) -> Result<()> {
     let init = dir.join("init.lua");
-    let Ok(text) = std::fs::read_to_string(&init) else { return Ok(()) };
-    let kept: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("require(\"t3rex\")")).collect();
+    let Ok(text) = std::fs::read_to_string(&init) else {
+        return Ok(());
+    };
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("require(\"t3rex\")"))
+        .collect();
     if kept.iter().all(|l| l.trim().is_empty()) && !dir.join("init.lua.before-t3rex").exists() {
         std::fs::remove_file(&init)?;
     } else {
@@ -124,12 +152,25 @@ async fn launchctl(args: &[&str]) -> bool {
 pub async fn install() -> Result<()> {
     let rex = Rex::find();
     if rex.sessions().await.is_err() {
-        step(false, "Rex", &format!("couldn't reach the Rex server with {}", rex.bin.display()));
+        step(
+            false,
+            "Rex",
+            &format!("couldn't reach the Rex server with {}", rex.bin.display()),
+        );
         bail!("open Rex first, then run t3rex install again");
     }
     step(true, "Rex", &rex.bin.display().to_string());
-    let client = crate::t3::connect(false).await.context("couldn't reach T3 Code; is it running?")?;
-    step(true, "T3 Code", &format!("{} at {}", client.runtime.server_version, client.runtime.origin));
+    let client = crate::t3::connect(false)
+        .await
+        .context("couldn't reach T3 Code; is it running?")?;
+    step(
+        true,
+        "T3 Code",
+        &format!(
+            "{} at {}",
+            client.runtime.server_version, client.runtime.origin
+        ),
+    );
 
     let bin = bin_path();
     std::fs::create_dir_all(bin.parent().unwrap())?;
@@ -144,11 +185,25 @@ pub async fn install() -> Result<()> {
 
     let dir = config_dir();
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("t3rex.lua"), LUA.replace("@T3REX@", &bin.to_string_lossy()))?;
+    std::fs::write(
+        dir.join("t3rex.lua"),
+        LUA.replace("@T3REX@", &bin.to_string_lossy()),
+    )?;
     let what = add_require(&dir)?;
-    step(true, "Rex actions", &format!("{}/t3rex.lua, {what}", dir.display()));
-    let reloaded = tokio::process::Command::new(&rex.bin).args(["config", "reload"]).output().await;
-    step(reloaded.is_ok_and(|o| o.status.success()), "Reloaded Rex config", "");
+    step(
+        true,
+        "Rex actions",
+        &format!("{}/t3rex.lua, {what}", dir.display()),
+    );
+    let reloaded = tokio::process::Command::new(&rex.bin)
+        .args(["config", "reload"])
+        .output()
+        .await;
+    step(
+        reloaded.is_ok_and(|o| o.status.success()),
+        "Reloaded Rex config",
+        "",
+    );
 
     std::fs::create_dir_all(state::dir())?;
     let plist_file = plist_path();
@@ -165,14 +220,32 @@ pub async fn install() -> Result<()> {
         let state = State::load();
         if let Some(session) = state.session_id.filter(|_| !state.windows.is_empty()) {
             let count = state.windows.len();
-            step(true, "Synced", &format!("{count} thread(s) in the \"{}\" session", crate::sync::SESSION_LABEL));
-            let _ = rex.client_do("session.select", &[("session_id", &session)]).await;
-            println!("\nKeys: ⌃⌘I next thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3");
+            step(
+                true,
+                "Synced",
+                &format!(
+                    "{count} thread(s) in the \"{}\" session",
+                    crate::sync::SESSION_LABEL
+                ),
+            );
+            let _ = rex
+                .client_do("session.select", &[("session_id", &session)])
+                .await;
+            println!(
+                "\nKeys: ⌃⌘I next thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3"
+            );
             println!("Every action is also in Rex's command palette under T3 Code.");
             return Ok(());
         }
     }
-    step(false, "Synced", &format!("no session yet; see {}", state::dir().join("sync.log").display()));
+    step(
+        false,
+        "Synced",
+        &format!(
+            "no session yet; see {}",
+            state::dir().join("sync.log").display()
+        ),
+    );
     Ok(())
 }
 
@@ -184,13 +257,23 @@ pub async fn uninstall() -> Result<()> {
     let state = State::load();
     if let Some(session) = &state.session_id {
         let rex = Rex::find();
-        let gone = tokio::process::Command::new(&rex.bin).args(["kill", session]).output().await;
-        step(gone.is_ok_and(|o| o.status.success()), "Closed the T3 Code session", "");
+        let gone = tokio::process::Command::new(&rex.bin)
+            .args(["kill", session])
+            .output()
+            .await;
+        step(
+            gone.is_ok_and(|o| o.status.success()),
+            "Closed the T3 Code session",
+            "",
+        );
     }
     let dir = config_dir();
     remove_require(&dir)?;
     let _ = std::fs::remove_file(dir.join("t3rex.lua"));
-    let _ = tokio::process::Command::new(Rex::find().bin).args(["config", "reload"]).output().await;
+    let _ = tokio::process::Command::new(Rex::find().bin)
+        .args(["config", "reload"])
+        .output()
+        .await;
     step(true, "Removed the Rex actions", "");
     let _ = std::fs::remove_dir_all(state::dir());
     let _ = std::fs::remove_file(bin_path());
@@ -201,12 +284,27 @@ pub async fn uninstall() -> Result<()> {
 pub async fn doctor() -> Result<()> {
     let rex = Rex::find();
     let sessions = rex.sessions().await;
-    step(sessions.is_ok(), "Rex server", &rex.bin.display().to_string());
+    step(
+        sessions.is_ok(),
+        "Rex server",
+        &rex.bin.display().to_string(),
+    );
     match crate::t3::connect(false).await {
         Ok(client) => {
-            step(true, "T3 server", &format!("{} at {}", client.runtime.server_version, client.runtime.origin));
+            step(
+                true,
+                "T3 server",
+                &format!(
+                    "{} at {}",
+                    client.runtime.server_version, client.runtime.origin
+                ),
+            );
             let shell = client.shell().await?;
-            step(true, "T3 threads", &format!("{} in the shell", shell.threads.len()));
+            step(
+                true,
+                "T3 threads",
+                &format!("{} in the shell", shell.threads.len()),
+            );
         }
         Err(e) => step(false, "T3 server", &format!("{e:#}")),
     }
@@ -215,14 +313,22 @@ pub async fn doctor() -> Result<()> {
         (Some(id), Ok(list)) => list.iter().any(|s| s["session_id"].as_str() == Some(id)),
         _ => false,
     };
-    step(session_ok, "T3 Code session", &format!("{} window(s)", state.windows.len()));
+    step(
+        session_ok,
+        "T3 Code session",
+        &format!("{} window(s)", state.windows.len()),
+    );
     let running = tokio::process::Command::new("launchctl")
         .args(["print", &format!("gui/{}/{LABEL}", uid())])
         .output()
         .await
         .is_ok_and(|o| o.status.success());
     step(running, "Background sync", LABEL);
-    step(config_dir().join("t3rex.lua").exists(), "Rex actions", &config_dir().join("t3rex.lua").display().to_string());
+    step(
+        config_dir().join("t3rex.lua").exists(),
+        "Rex actions",
+        &config_dir().join("t3rex.lua").display().to_string(),
+    );
     Ok(())
 }
 
@@ -231,7 +337,10 @@ pub async fn open_in_t3(thread: &str) -> Result<()> {
     let client = crate::t3::connect(false).await?;
     let runtime = &client.runtime;
     let url = format!("t3code://threads/{}/{}", runtime.environment_id, thread);
-    let opened = tokio::process::Command::new("/usr/bin/open").arg(&url).output().await?;
+    let opened = tokio::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .output()
+        .await?;
     if !opened.status.success() {
         bail!("couldn't open {url}");
     }
@@ -244,7 +353,11 @@ pub async fn inbox() -> Result<()> {
     let state = State::load();
     let session = state.session_id.context("t3rex hasn't synced yet")?;
     let view = Rex::find().inspect(&session).await?;
-    let mine: std::collections::HashSet<&str> = state.windows.values().map(|w| w.window_id.as_str()).collect();
+    let mine: std::collections::HashSet<&str> = state
+        .windows
+        .values()
+        .map(|w| w.window_id.as_str())
+        .collect();
     let first = view["windows"]
         .as_array()
         .into_iter()

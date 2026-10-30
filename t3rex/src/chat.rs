@@ -18,6 +18,11 @@ use t3term::client::WatchEvent;
 use t3term::projection::{ShellState, ThreadState};
 use t3term::transcript::{self, Block, BlockKind};
 
+use std::collections::HashMap;
+
+use tokio::sync::mpsc;
+
+use crate::media::{self, Embed, Media};
 use crate::render::{self, visible_width};
 use crate::t3;
 
@@ -50,6 +55,10 @@ struct Pane {
     reflow: bool,
     frame: usize,
     offset_minutes: i64,
+    media: Media,
+    /// `t3code://threads/<environment>/<thread>`, which opens the thread in T3 Code.
+    link: String,
+    snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
 }
 
 fn out(text: &str) {
@@ -68,7 +77,10 @@ pub fn local_offset_minutes() -> i64 {
             let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
             let sign = if text.starts_with('-') { -1 } else { 1 };
             let digits = text.trim_start_matches(['+', '-']);
-            let (h, m) = (digits.get(..2)?.parse::<i64>().ok()?, digits.get(2..4)?.parse::<i64>().ok()?);
+            let (h, m) = (
+                digits.get(..2)?.parse::<i64>().ok()?,
+                digits.get(2..4)?.parse::<i64>().ok()?,
+            );
             Some(sign * (h * 60 + m))
         })
         .unwrap_or(0)
@@ -117,13 +129,22 @@ pub fn fit(text: &str, width: usize) -> String {
 }
 
 fn one_line(text: &str) -> String {
-    transcript::plain(text).split_whitespace().collect::<Vec<_>>().join(" ")
+    transcript::plain(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn pad(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
-        .map(|l| if l.is_empty() { l } else { format!("{}{l}", " ".repeat(PAD)) })
+        .map(|l| {
+            if l.is_empty() {
+                l
+            } else {
+                format!("{}{l}", " ".repeat(PAD))
+            }
+        })
         .collect()
 }
 
@@ -161,7 +182,13 @@ fn short_path(word: &str) -> String {
 
 fn shorten_paths(text: &str) -> String {
     text.split(' ')
-        .map(|w| if w.starts_with('/') || w.starts_with("~/") { short_path(w) } else { w.to_string() })
+        .map(|w| {
+            if w.starts_with('/') || w.starts_with("~/") {
+                short_path(w)
+            } else {
+                w.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -171,7 +198,11 @@ fn tool_text(block: &Block) -> String {
     let first = |t: &str| one_line(t.lines().next().unwrap_or(""));
     let text = match block.item_type.as_str() {
         "command_execution" => {
-            let mut cmd = first(if block.detail.is_empty() { &block.header } else { &block.detail });
+            let mut cmd = first(if block.detail.is_empty() {
+                &block.header
+            } else {
+                &block.detail
+            });
             // `cd somewhere && real command` says more as `real command`.
             if let Some(rest) = cmd.strip_prefix("cd ")
                 && let Some(at) = rest.find(" && ").or_else(|| rest.find("; "))
@@ -200,22 +231,104 @@ fn tool_text(block: &Block) -> String {
 }
 
 fn is_running(block: &Block) -> bool {
-    block.streaming || matches!(block.status.as_str(), "running" | "inProgress" | "in_progress" | "pending" | "started")
+    block.streaming
+        || matches!(
+            block.status.as_str(),
+            "running" | "inProgress" | "in_progress" | "pending" | "started"
+        )
 }
 
 fn failed(block: &Block) -> bool {
-    matches!(block.status.as_str(), "failed" | "error" | "declined") || block.exit_code.is_some_and(|c| c != 0)
+    matches!(block.status.as_str(), "failed" | "error" | "declined")
+        || block.exit_code.is_some_and(|c| c != 0)
 }
 
-/// What one block looks like, at `width` columns before the left padding.
-fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<String> {
+/// What a block needs besides itself to draw.
+struct Ctx<'a> {
+    width: usize,
+    frame: usize,
+    offset: i64,
+    embeds: &'a HashMap<String, Embed>,
+    /// Pictures draw only in output that prints for good, never in the live tail.
+    media: Option<&'a Media>,
+    /// Opens the thread in T3 Code.
+    link: &'a str,
+}
+
+/// A picture's lines: its kitty sequence on the first, then a blank row for each row it covers.
+fn picture_lines(media: &Media, path: &std::path::Path, cols: usize) -> Option<Vec<String>> {
+    let (seq, rows) = media.picture(path, cols)?;
+    let mut lines = vec![seq];
+    lines.extend(std::iter::repeat_n(String::new(), rows.saturating_sub(1)));
+    // A row of its own after it, so the text below never touches it.
+    lines.push(String::new());
+    Some(lines)
+}
+
+/// Markdown with its standalone local images drawn as pictures.
+fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
+    let Some(media) = ctx.media else {
+        return render::markdown(text, ctx.width).lines;
+    };
     let mut lines = Vec::new();
+    let mut chunk = String::new();
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && let Some((_, path)) = media::local_image(line) {
+            let pictures = picture_lines(media, &path, ctx.width.min(96));
+            if let Some(pictures) = pictures {
+                if !chunk.trim().is_empty() {
+                    lines.extend(render::markdown(&chunk, ctx.width).lines);
+                    lines.push(String::new());
+                }
+                chunk.clear();
+                lines.extend(pictures);
+                continue;
+            }
+        }
+        chunk.push_str(line);
+    }
+    if !chunk.trim().is_empty() {
+        lines.extend(render::markdown(&chunk, ctx.width).lines);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+/// What one block looks like, at `ctx.width` columns before the left padding.
+fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
+    let (width, frame, offset) = (ctx.width, ctx.frame, ctx.offset);
+    let mut lines = Vec::new();
+    if let Some(embed) = ctx.embeds.get(&block.item_id) {
+        lines.push(String::new());
+        let open = format!("\x1b]8;;{}\x1b\\Open in T3 Code ↗\x1b]8;;\x1b\\", ctx.link);
+        lines.push(format!(
+            "{BOLD}◇ {}{RESET}  {DIM}{open}{RESET}",
+            fit(&one_line(&embed.title), width.saturating_sub(22))
+        ));
+        if let Some(media) = ctx.media
+            && let Some(png) = media.snapshots.get(&embed.attachment)
+            && let Some(pictures) = picture_lines(media, png, width.min(100))
+        {
+            lines.extend(pictures);
+        }
+        return lines;
+    }
     match block.kind {
         BlockKind::User => {
             lines.push(String::new());
             let text = render::markdown(&block.body, width.saturating_sub(2));
             for (i, line) in text.lines.into_iter().enumerate() {
-                let bar = if i == 0 { format!("{BLUE}{BOLD}›{RESET} ") } else { "  ".to_string() };
+                let bar = if i == 0 {
+                    format!("{BLUE}{BOLD}›{RESET} ")
+                } else {
+                    "  ".to_string()
+                };
                 lines.push(format!("{bar}{line}"));
             }
             if let Some(at) = clock(&block.updated_at, offset) {
@@ -224,7 +337,7 @@ fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<St
         }
         BlockKind::Assistant => {
             lines.push(String::new());
-            lines.extend(render::markdown(&block.body, width).lines);
+            lines.extend(markdown_with_pictures(&block.body, ctx));
             if block.streaming {
                 lines.push(format!("{DIM}{}{RESET}", SPINNER[frame % SPINNER.len()]));
             }
@@ -244,17 +357,34 @@ fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<St
                 String::new()
             };
             let room = width.saturating_sub(6);
-            lines.push(format!("  {DIM}{} {}{RESET}{mark}", tool_glyph(block), fit(&tool_text(block), room)));
+            lines.push(format!(
+                "  {DIM}{} {}{RESET}{mark}",
+                tool_glyph(block),
+                fit(&tool_text(block), room)
+            ));
             if failed(block) && !block.body.trim().is_empty() {
-                for line in block.body.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev() {
-                    lines.push(format!("    {DIM}{RED}{}{RESET}", fit(&transcript::plain(line), width.saturating_sub(6))));
+                for line in block
+                    .body
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                {
+                    lines.push(format!(
+                        "    {DIM}{RED}{}{RESET}",
+                        fit(&transcript::plain(line), width.saturating_sub(6))
+                    ));
                 }
             }
         }
         BlockKind::Request => {
             let open = matches!(block.status.as_str(), "pending" | "waiting");
             let color = if open { YELLOW } else { DIM };
-            let head = if block.item_type.contains("input") || block.header.to_lowercase().contains("question") {
+            let head = if block.item_type.contains("input")
+                || block.header.to_lowercase().contains("question")
+            {
                 "Question"
             } else {
                 "Approval"
@@ -266,7 +396,11 @@ fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<St
                 other => format!(" {DIM}· {other}{RESET}"),
             };
             lines.push(format!("{color}{BOLD}◆ {head}{RESET}{state}"));
-            let text = if block.body.trim().is_empty() { &block.header } else { &block.body };
+            let text = if block.body.trim().is_empty() {
+                &block.header
+            } else {
+                &block.body
+            };
             for line in render::markdown(text, width.saturating_sub(2)).lines {
                 lines.push(format!("  {line}"));
             }
@@ -277,7 +411,11 @@ fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<St
             lines.extend(render::markdown(&block.body, width).lines);
         }
         BlockKind::Notice => {
-            let text = one_line(if block.body.is_empty() { &block.header } else { &block.body });
+            let text = one_line(if block.body.is_empty() {
+                &block.header
+            } else {
+                &block.body
+            });
             if !text.is_empty() {
                 lines.push(String::new());
                 lines.push(format!("{DIM}{}{RESET}", fit(&text, width)));
@@ -285,7 +423,11 @@ fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<St
         }
         BlockKind::Error => {
             lines.push(String::new());
-            let text = if block.body.is_empty() { &block.header } else { &block.body };
+            let text = if block.body.is_empty() {
+                &block.header
+            } else {
+                &block.body
+            };
             for line in render::markdown(text, width.saturating_sub(2)).lines {
                 lines.push(format!("{RED}│{RESET} {line}"));
             }
@@ -317,23 +459,31 @@ fn visible_tools(blocks: &[Block]) -> Vec<bool> {
 }
 
 /// Block `i`'s lines, with a "more" line where a hidden run of tool calls ends.
-fn lines_at(blocks: &[Block], shown: &[bool], i: usize, width: usize, frame: usize, offset: i64) -> Vec<String> {
+fn lines_at(blocks: &[Block], shown: &[bool], i: usize, ctx: &Ctx) -> Vec<String> {
     if !shown[i] {
         return Vec::new();
     }
     let mut lines = Vec::new();
-    let hidden = (0..i).rev().take_while(|&j| blocks[j].kind == BlockKind::Tool || blocks[j].kind == BlockKind::Reasoning).filter(|&j| !shown[j]).count();
+    let hidden = (0..i)
+        .rev()
+        .take_while(|&j| {
+            blocks[j].kind == BlockKind::Tool || blocks[j].kind == BlockKind::Reasoning
+        })
+        .filter(|&j| !shown[j])
+        .count();
     if hidden > 0 && blocks[i].kind != BlockKind::Tool {
         let s = if hidden == 1 { "" } else { "s" };
         lines.push(format!("  {DIM}⋯ {hidden} more tool call{s}{RESET}"));
     }
-    lines.extend(block_lines(&blocks[i], width, frame, offset));
+    lines.extend(block_lines(&blocks[i], ctx));
     lines
 }
 
 /// Whether a block will change no more, so it can print for good.
 fn settled(block: &Block, last: bool, run_active: bool) -> bool {
-    !is_running(block) && !(last && run_active) && !(block.kind == BlockKind::Request && matches!(block.status.as_str(), "pending" | "waiting"))
+    let waiting =
+        block.kind == BlockKind::Request && matches!(block.status.as_str(), "pending" | "waiting");
+    !(is_running(block) || (last && run_active) || waiting)
 }
 
 /// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it.
@@ -357,7 +507,11 @@ fn status_sequence(word: Option<&str>, kind: Option<&str>, title: &str) -> Strin
 }
 
 impl Pane {
-    fn new() -> Pane {
+    fn new(
+        media: Media,
+        link: String,
+        snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
+    ) -> Pane {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         Pane {
             cols: cols as usize,
@@ -370,6 +524,9 @@ impl Pane {
             reflow: false,
             frame: 0,
             offset_minutes: local_offset_minutes(),
+            media,
+            link,
+            snapshots,
         }
     }
 
@@ -390,7 +547,7 @@ impl Pane {
             .all(|((id, _), b)| id == &b.item_id);
         let mut text = String::from("\x1b[?2026h");
         if !matches || self.committed.len() > blocks.len() || std::mem::take(&mut self.reflow) {
-            text.push_str("\x1b[H\x1b[2J\x1b[3J");
+            text.push_str("\x1b_Ga=d,d=A,q=2\x1b\\\x1b[H\x1b[2J\x1b[3J");
             self.committed.clear();
             self.live_rows = 0;
             self.header = false;
@@ -405,19 +562,40 @@ impl Pane {
         }
         let width = self.width();
         let shown = visible_tools(&blocks);
+        let embeds = media::embeds(state);
+        if self.media.can_snapshot() {
+            for embed in embeds.values() {
+                self.media.ask(embed, self.snapshots.clone());
+            }
+        }
+        let fixed = Ctx {
+            width,
+            frame: 0,
+            offset: self.offset_minutes,
+            embeds: &embeds,
+            media: Some(&self.media),
+            link: &self.link,
+        };
+        let moving = Ctx {
+            frame: self.frame,
+            media: None,
+            ..fixed
+        };
         let mut index = self.committed.len();
-        while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active) {
+        while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active)
+        {
             let block = &blocks[index];
-            for line in pad(lines_at(&blocks, &shown, index, width, 0, self.offset_minutes)) {
+            for line in pad(lines_at(&blocks, &shown, index, &fixed)) {
                 text.push_str(&line);
                 text.push_str("\r\n");
             }
-            self.committed.push((block.item_id.clone(), block.updated_at.clone()));
+            self.committed
+                .push((block.item_id.clone(), block.updated_at.clone()));
             index += 1;
         }
         let mut live: Vec<String> = Vec::new();
         for i in index..blocks.len() {
-            live.extend(pad(lines_at(&blocks, &shown, i, width, self.frame, self.offset_minutes)));
+            live.extend(pad(lines_at(&blocks, &shown, i, &moving)));
         }
         if run_active {
             live.push(String::new());
@@ -489,7 +667,10 @@ impl Pane {
         }
         let mut text = String::new();
         let p = " ".repeat(PAD);
-        text.push_str(&format!("\r\n{p}{BOLD}{}{RESET}\r\n", fit(&one_line(title), width)));
+        text.push_str(&format!(
+            "\r\n{p}{BOLD}{}{RESET}\r\n",
+            fit(&one_line(title), width)
+        ));
         if !meta.is_empty() {
             text.push_str(&format!("{p}{DIM}{}{RESET}\r\n", meta.join(" · ")));
         }
@@ -518,7 +699,10 @@ impl Pane {
         }
         let title = parts.join(" · ");
         if title != self.title {
-            out(&format!("\x1b]2;{}\x07", title.replace(|c: char| c.is_control(), "")));
+            out(&format!(
+                "\x1b]2;{}\x07",
+                title.replace(|c: char| c.is_control(), "")
+            ));
             self.title = title;
         }
     }
@@ -545,12 +729,20 @@ async fn composer_block() -> Option<String> {
 
 /// Typing in the conversation goes to the composer: focus moves there with the keys typed.
 async fn hand_to_composer(text: String) {
-    let Some(block) = composer_block().await else { return };
+    let Some(block) = composer_block().await else {
+        return;
+    };
     let rex = crate::rex::Rex::find();
     let bin = rex.bin.clone();
-    let _ = tokio::process::Command::new(&bin).args(["focus", "-b", &block]).output().await;
+    let _ = tokio::process::Command::new(&bin)
+        .args(["focus", "-b", &block])
+        .output()
+        .await;
     if !text.is_empty() {
-        let _ = tokio::process::Command::new(&bin).args(["send", "-b", &block, &text]).output().await;
+        let _ = tokio::process::Command::new(&bin)
+            .args(["send", "-b", &block, &text])
+            .output()
+            .await;
     }
 }
 
@@ -576,7 +768,16 @@ async fn event_loop(
     thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
 ) -> Result<()> {
-    let mut pane = Pane::new();
+    let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
+    let link = format!(
+        "t3code://threads/{}/{}",
+        client.runtime.environment_id, thread_id
+    );
+    let mut pane = Pane::new(
+        Media::new(client.runtime.state_dir.as_deref()),
+        link,
+        snap_tx,
+    );
     let mut state: Option<ThreadState> = None;
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
@@ -628,6 +829,11 @@ async fn event_loop(
                 Some(Err(_)) | None => {}
                 _ => {}
             },
+            Some((attachment, png)) = snap_rx.recv() => {
+                pane.media.snapshots.insert(attachment, png);
+                pane.reflow = true;
+                dirty = true;
+            }
             _ = tick.tick() => {
                 if state.as_ref().is_some_and(|s| s.active_run().is_some() || transcript::blocks(s).iter().any(is_running)) {
                     pane.frame += 1;

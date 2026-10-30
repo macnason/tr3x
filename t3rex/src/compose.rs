@@ -61,10 +61,16 @@ impl Editor {
         }
     }
     fn line_start(&self) -> usize {
-        self.text[..self.cursor].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1)
+        self.text[..self.cursor]
+            .iter()
+            .rposition(|c| *c == '\n')
+            .map_or(0, |i| i + 1)
     }
     fn line_end(&self) -> usize {
-        self.text[self.cursor..].iter().position(|c| *c == '\n').map_or(self.text.len(), |i| self.cursor + i)
+        self.text[self.cursor..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map_or(self.text.len(), |i| self.cursor + i)
     }
     fn take(&mut self) -> String {
         self.cursor = 0;
@@ -113,10 +119,11 @@ impl Composer {
     }
 
     fn question<'a>(&self, item: &'a Value) -> Option<&'a Value> {
-        item["questions"]
-            .as_array()?
-            .iter()
-            .find(|q| !self.answers.contains_key(q["id"].as_str().unwrap_or_default()))
+        item["questions"].as_array()?.iter().find(|q| {
+            !self
+                .answers
+                .contains_key(q["id"].as_str().unwrap_or_default())
+        })
     }
 
     /// The header: model, effort and access, as the desktop composer's chips show them.
@@ -126,12 +133,19 @@ impl Composer {
         };
         let settings = models::thread_settings(config, state.thread());
         let mut parts: Vec<String> = Vec::new();
-        let model = settings["modelName"].as_str().or(settings["model"].as_str()).unwrap_or("Model");
+        let model = settings["modelName"]
+            .as_str()
+            .or(settings["model"].as_str())
+            .unwrap_or("Model");
         parts.push(model.to_string());
         for key in ["effort", "reasoningEffort", "thinking"] {
             if let Some(v) = settings["options"][key].as_str() {
                 let mut c = v.chars();
-                parts.push(c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default());
+                parts.push(
+                    c.next()
+                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default(),
+                );
             }
         }
         if settings["options"]["fastMode"] == true {
@@ -150,7 +164,10 @@ impl Composer {
         let title = self.header();
         let mut text = String::from("\x1b[?2026h");
         if title != self.title {
-            text.push_str(&format!("\x1b]2;{}\x07", title.replace(|c: char| c.is_control(), "")));
+            text.push_str(&format!(
+                "\x1b]2;{}\x07",
+                title.replace(|c: char| c.is_control(), "")
+            ));
             self.title = title;
         }
         text.push_str("\x1b[H\x1b[2J");
@@ -159,15 +176,27 @@ impl Composer {
         if let Some((request, item)) = self.pending() {
             if request["kind"] == "user_input" {
                 if let Some(q) = self.question(&item) {
-                    let prompt = q["question"].as_str().or(q["header"].as_str()).unwrap_or("Question");
-                    rows.push(format!("{YELLOW}{BOLD}◆{RESET} {BOLD}{}{RESET}", fit(prompt, width - 2)));
+                    let prompt = q["question"]
+                        .as_str()
+                        .or(q["header"].as_str())
+                        .unwrap_or("Question");
+                    rows.push(format!(
+                        "{YELLOW}{BOLD}◆{RESET} {BOLD}{}{RESET}",
+                        fit(prompt, width - 2)
+                    ));
                     let opts: Vec<String> = q["options"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .enumerate()
                         .take(6)
-                        .map(|(i, o)| format!("{DIM}{}{RESET} {}", i + 1, o["label"].as_str().unwrap_or("")))
+                        .map(|(i, o)| {
+                            format!(
+                                "{DIM}{}{RESET} {}",
+                                i + 1,
+                                o["label"].as_str().unwrap_or("")
+                            )
+                        })
                         .collect();
                     if !opts.is_empty() {
                         rows.push(fit_ansi(&opts.join("   "), width));
@@ -187,7 +216,10 @@ impl Composer {
                     k if k.contains("network") || k.contains("fetch") => "Fetch",
                     _ => "Allow",
                 };
-                rows.push(format!("{YELLOW}{BOLD}◆{RESET} {BOLD}{verb}{RESET} {}?", fit(&what, width.saturating_sub(8))));
+                rows.push(format!(
+                    "{YELLOW}{BOLD}◆{RESET} {BOLD}{verb}{RESET} {}?",
+                    fit(&what, width.saturating_sub(8))
+                ));
                 rows.push(format!(
                     "{BOLD}a{RESET} Accept   {BOLD}s{RESET} Accept for session   {BOLD}d{RESET} Decline"
                 ));
@@ -207,7 +239,9 @@ impl Composer {
         }
         // Keep the cursor's row on screen in a pane shorter than the text.
         let cursor_row = first_input + cursor.0;
-        let start = (cursor_row + 1).saturating_sub(self.rows).min(rows.len().saturating_sub(self.rows.min(rows.len())));
+        let start = (cursor_row + 1)
+            .saturating_sub(self.rows)
+            .min(rows.len().saturating_sub(self.rows.min(rows.len())));
         let shown: Vec<&String> = rows.iter().skip(start).take(self.rows).collect();
         for (i, row) in shown.iter().enumerate() {
             text.push_str(&format!("\x1b[{};1H {row}", i + 1));
@@ -220,7 +254,8 @@ impl Composer {
     fn note(&mut self, text: impl Into<String>, error: bool) {
         self.note = Some((text.into(), error));
         // A confirmation fades after a few seconds. An error stays until the next key.
-        self.note_until = (!error).then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(4));
+        self.note_until =
+            (!error).then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(4));
     }
 
     fn spawn<F>(&self, work: F)
@@ -238,8 +273,14 @@ impl Composer {
     }
 
     fn respond(&mut self, decision: &'static str) {
-        let Some((request, _)) = self.pending() else { return };
-        let (client, thread, id) = (self.client.clone(), self.thread_id.clone(), request["id"].as_str().unwrap_or_default().to_string());
+        let Some((request, _)) = self.pending() else {
+            return;
+        };
+        let (client, thread, id) = (
+            self.client.clone(),
+            self.thread_id.clone(),
+            request["id"].as_str().unwrap_or_default().to_string(),
+        );
         self.spawn(async move {
             client.respond(&thread, &id, decision).await?;
             Ok(match decision {
@@ -270,13 +311,22 @@ impl Composer {
                     .to_string(),
                 _ => trimmed.to_string(),
             };
-            let answer = if q["multiSelect"] == true { json!([answer]) } else { json!(answer) };
-            self.answers.insert(q["id"].as_str().unwrap_or_default().to_string(), answer);
+            let answer = if q["multiSelect"] == true {
+                json!([answer])
+            } else {
+                json!(answer)
+            };
+            self.answers
+                .insert(q["id"].as_str().unwrap_or_default().to_string(), answer);
             self.editor.take();
             let total = item["questions"].as_array().map_or(0, Vec::len);
             if self.answers.len() >= total {
                 let answers = Value::Object(std::mem::take(&mut self.answers));
-                let (client, thread, id) = (self.client.clone(), self.thread_id.clone(), request["id"].as_str().unwrap_or_default().to_string());
+                let (client, thread, id) = (
+                    self.client.clone(),
+                    self.thread_id.clone(),
+                    request["id"].as_str().unwrap_or_default().to_string(),
+                );
                 self.spawn(async move {
                     client.answer(&thread, &id, answers).await?;
                     Ok("Answered".into())
@@ -290,7 +340,9 @@ impl Composer {
             self.command(&command);
             return;
         }
-        let Some(state) = self.state.clone() else { return };
+        let Some(state) = self.state.clone() else {
+            return;
+        };
         let message = self.editor.take();
         let client = self.client.clone();
         let busy = state.active_run().is_some();
@@ -301,7 +353,9 @@ impl Composer {
     }
 
     fn command(&mut self, line: &str) {
-        let (name, arg) = line.split_once(' ').map_or((line, ""), |(a, b)| (a, b.trim()));
+        let (name, arg) = line
+            .split_once(' ')
+            .map_or((line, ""), |(a, b)| (a, b.trim()));
         let (client, thread) = (self.client.clone(), self.thread_id.clone());
         let lifecycle = |action: Lifecycle, note: &'static str| {
             let (client, thread) = (client.clone(), thread.clone());
@@ -319,10 +373,18 @@ impl Composer {
             "archive" => self.spawn(lifecycle(Lifecycle::Archive, "Archived")),
             "snooze" => match t3::snooze_ms(if arg.is_empty() { "1h" } else { arg }) {
                 Some(ms) => self.spawn(lifecycle(Lifecycle::Snooze(ms), "Snoozed")),
-                None => self.note(format!("Can't read {arg:?} as a duration, such as 2h"), true),
+                None => self.note(
+                    format!("Can't read {arg:?} as a duration, such as 2h"),
+                    true,
+                ),
             },
             "stop" => {
-                let run = self.state.as_ref().and_then(|s| s.active_run()).and_then(|r| r["id"].as_str()).map(str::to_string);
+                let run = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.active_run())
+                    .and_then(|r| r["id"].as_str())
+                    .map(str::to_string);
                 match run {
                     Some(run) => self.spawn(async move {
                         client
@@ -338,17 +400,21 @@ impl Composer {
                 Ok("Opened in T3 Code".into())
             }),
             "model" | "effort" | "mode" => {
-                let (Some(state), Some(config)) = (self.state.clone(), self.config.clone()) else { return };
+                let (Some(state), Some(config)) = (self.state.clone(), self.config.clone()) else {
+                    return;
+                };
                 let mut choice = Choice::default();
                 match name {
                     "model" => choice.model = Some(arg.to_string()),
                     "effort" => choice.effort = Some(arg.to_string()),
-                    _ => choice.runtime_mode = Some(match arg {
-                        "ask" | "supervised" | "approval" => "approval-required".to_string(),
-                        "edits" => "auto-accept-edits".to_string(),
-                        "full" => "full-access".to_string(),
-                        other => other.to_string(),
-                    }),
+                    _ => {
+                        choice.runtime_mode = Some(match arg {
+                            "ask" | "supervised" | "approval" => "approval-required".to_string(),
+                            "edits" => "auto-accept-edits".to_string(),
+                            "full" => "full-access".to_string(),
+                            other => other.to_string(),
+                        })
+                    }
                 }
                 match models::plan(&config, state.thread(), &choice) {
                     Ok(plan) => self.spawn(async move {
@@ -381,7 +447,9 @@ impl Composer {
             return;
         }
         match key.code {
-            KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => self.editor.insert("\n"),
+            KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.editor.insert("\n")
+            }
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
             KeyCode::Enter => self.submit(),
             KeyCode::Char('c') if ctrl => {
@@ -401,12 +469,17 @@ impl Composer {
             KeyCode::Home => self.editor.cursor = self.editor.line_start(),
             KeyCode::End => self.editor.cursor = self.editor.line_end(),
             KeyCode::Left => self.editor.cursor = self.editor.cursor.saturating_sub(1),
-            KeyCode::Right => self.editor.cursor = (self.editor.cursor + 1).min(self.editor.text.len()),
+            KeyCode::Right => {
+                self.editor.cursor = (self.editor.cursor + 1).min(self.editor.text.len())
+            }
             KeyCode::Up => {
                 let start = self.editor.line_start();
                 if start > 0 {
                     let col = self.editor.cursor - start;
-                    let prev_start = self.editor.text[..start - 1].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+                    let prev_start = self.editor.text[..start - 1]
+                        .iter()
+                        .rposition(|c| *c == '\n')
+                        .map_or(0, |i| i + 1);
                     self.editor.cursor = (prev_start + col).min(start - 1);
                 }
             }
@@ -414,7 +487,10 @@ impl Composer {
                 let end = self.editor.line_end();
                 if end < self.editor.text.len() {
                     let col = self.editor.cursor - self.editor.line_start();
-                    let next_end = self.editor.text[end + 1..].iter().position(|c| *c == '\n').map_or(self.editor.text.len(), |i| end + 1 + i);
+                    let next_end = self.editor.text[end + 1..]
+                        .iter()
+                        .position(|c| *c == '\n')
+                        .map_or(self.editor.text.len(), |i| end + 1 + i);
                     self.editor.cursor = (end + 1 + col).min(next_end);
                 }
             }

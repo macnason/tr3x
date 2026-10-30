@@ -6,7 +6,6 @@
 //! Every returned row is self-contained: it starts clean and, if it set
 //! anything, ends with `ESC[0m` (and closes any OSC 8 hyperlink).
 
-
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -186,7 +185,9 @@ fn push_frag(line: &mut Line, text: &str, style: &Style) {
 }
 
 fn frag_width(line: &[Frag]) -> usize {
-    line.iter().map(|(t, _)| UnicodeWidthStr::width(t.as_str())).sum()
+    line.iter()
+        .map(|(t, _)| UnicodeWidthStr::width(t.as_str()))
+        .sum()
 }
 
 fn dim(s: &str) -> String {
@@ -194,7 +195,9 @@ fn dim(s: &str) -> String {
 }
 
 fn clean_url(url: &str) -> String {
-    url.chars().filter(|c| !c.is_control() && *c != ' ').collect()
+    url.chars()
+        .filter(|c| !c.is_control() && *c != ' ')
+        .collect()
 }
 
 /// Serialise one row of styled fragments into a self-contained string.
@@ -441,7 +444,11 @@ fn split_urls(s: &str) -> Vec<(&str, bool)> {
         } else {
             continue;
         };
-        if s[..at].chars().next_back().is_some_and(char::is_alphanumeric) {
+        if s[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+        {
             continue;
         }
         let mut end = rest
@@ -450,7 +457,9 @@ fn split_urls(s: &str) -> Vec<(&str, bool)> {
             .map_or(rest.len(), |(k, _)| k);
         loop {
             let url = &rest[..end];
-            let Some(c) = url.chars().next_back() else { break };
+            let Some(c) = url.chars().next_back() else {
+                break;
+            };
             let strip = match c {
                 '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' => true,
                 ')' => url.matches(')').count() > url.matches('(').count(),
@@ -501,7 +510,8 @@ fn link_style(base: &Style, url: &str) -> Style {
 impl Inline {
     fn text(&mut self, s: &str) {
         if self.cur.link.is_some() {
-            self.pieces.push(Piece::Text(clean_text(s), self.cur.clone()));
+            self.pieces
+                .push(Piece::Text(clean_text(s), self.cur.clone()));
             return;
         }
         for (part, is_url) in split_urls(s) {
@@ -565,7 +575,8 @@ impl Inline {
             && let Some(mark) = self.image_marks.pop()
             && self.pieces.len() == mark
         {
-            self.pieces.push(Piece::Text("image".into(), self.cur.clone()));
+            self.pieces
+                .push(Piece::Text("image".into(), self.cur.clone()));
         }
         if let Some(prev) = self.saved.pop() {
             self.cur = prev;
@@ -861,7 +872,9 @@ fn render_block(b: &Block, w: usize, cx: &Ctx) -> Vec<String> {
         } => {
             let bullet = ["•", "◦", "▪"][cx.depth.min(2)];
             let num_w = start.map_or(0, |s| {
-                s.saturating_add((items.len() as u64).saturating_sub(1)).to_string().len()
+                s.saturating_add((items.len() as u64).saturating_sub(1))
+                    .to_string()
+                    .len()
             });
             let inner = Ctx {
                 base: cx.base.clone(),
@@ -1066,8 +1079,8 @@ const RULES: &[(&str, Patch)] = &[
 
 fn rule_for(scope: &str) -> Option<Patch> {
     RULES.iter().find_map(|(p, patch)| {
-        let hit = scope == *p
-            || (scope.starts_with(p) && scope.as_bytes().get(p.len()) == Some(&b'.'));
+        let hit =
+            scope == *p || (scope.starts_with(p) && scope.as_bytes().get(p.len()) == Some(&b'.'));
         hit.then_some(*patch)
     })
 }
@@ -1237,7 +1250,10 @@ fn render_table(
 
     let empty: Vec<Piece> = Vec::new();
     let mut grid: Vec<Vec<Vec<Atom>>> = Vec::new();
-    for (ri, row) in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)).enumerate() {
+    for (ri, row) in std::iter::once(head)
+        .chain(rows.iter().map(Vec::as_slice))
+        .enumerate()
+    {
         let base = if ri == 0 { &head_base } else { &cx.base };
         grid.push(
             (0..n)
@@ -1343,7 +1359,10 @@ fn table_fallback(
     head_base: &Style,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for (ri, row) in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)).enumerate() {
+    for (ri, row) in std::iter::once(head)
+        .chain(rows.iter().map(Vec::as_slice))
+        .enumerate()
+    {
         let mut pieces: Vec<Piece> = Vec::new();
         for (ci, cell) in row.iter().enumerate() {
             if ci > 0 {
@@ -1527,14 +1546,21 @@ Final line.
         for w in [10, 20, 33, 40, 80, 120] {
             let eff = w.max(20);
             for l in lines(BIG, w) {
-                assert!(visible_width(&l) <= eff, "w={w} {l:?} is {}", visible_width(&l));
+                assert!(
+                    visible_width(&l) <= eff,
+                    "w={w} {l:?} is {}",
+                    visible_width(&l)
+                );
             }
         }
     }
 
     #[test]
     fn wrapped_styles_are_reopened() {
-        let ls = lines("**aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm**", 20);
+        let ls = lines(
+            "**aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm**",
+            20,
+        );
         assert!(ls.len() >= 2);
         for l in &ls {
             assert!(l.starts_with("\x1b[1m"), "{l:?}");
@@ -1587,7 +1613,11 @@ Final line.
         let width = visible_width(&p[0]);
         assert!(p.iter().all(|l| visible_width(l) == width), "{p:?}");
         let cols = |l: &str, c: char| -> Vec<usize> {
-            l.chars().enumerate().filter(|(_, x)| *x == c).map(|(i, _)| i).collect()
+            l.chars()
+                .enumerate()
+                .filter(|(_, x)| *x == c)
+                .map(|(i, _)| i)
+                .collect()
         };
         let header = cols(&p[1], '│');
         assert_eq!(cols(&p[3], '│'), header);
@@ -1624,16 +1654,25 @@ Final line.
 
     #[test]
     fn rust_code_block_is_highlighted_with_gutter() {
-        let ls = lines("```rust\nfn main() {\n    let s = \"hi\"; // note\n}\n```", 60);
+        let ls = lines(
+            "```rust\nfn main() {\n    let s = \"hi\"; // note\n}\n```",
+            60,
+        );
         let p = plain(&ls);
         assert_eq!(p[0], "rust");
         assert!(ls[0].starts_with("\x1b[2m"));
-        assert!(p[1..].iter().all(|l| l.starts_with("│ ") || l == "│"), "{p:?}");
+        assert!(
+            p[1..].iter().all(|l| l.starts_with("│ ") || l == "│"),
+            "{p:?}"
+        );
         assert!(p[1].contains("fn main"));
         let all = ls.join("\n");
         assert!(has_color(&all, 34), "keyword blue");
         assert!(has_color(&all, 32), "string green");
-        assert!(ls[2].contains("\x1b[2;3m") || ls[2].contains("\x1b[2m"), "comment dim");
+        assert!(
+            ls[2].contains("\x1b[2;3m") || ls[2].contains("\x1b[2m"),
+            "comment dim"
+        );
         for l in &ls {
             assert_self_contained(l);
         }
@@ -1698,16 +1737,25 @@ Final line.
         }
         assert!(with_link >= 3);
         let one = &lines("[hi](https://e.com)", 40)[0];
-        assert_eq!(one, "\x1b[4;34m\x1b]8;;https://e.com\x1b\\hi\x1b]8;;\x1b\\\x1b[0m");
+        assert_eq!(
+            one,
+            "\x1b[4;34m\x1b]8;;https://e.com\x1b\\hi\x1b]8;;\x1b\\\x1b[0m"
+        );
     }
 
     #[test]
     fn bare_and_auto_links() {
-        let ls = lines("go to https://example.com/a_b_c, or <https://auto.dev/x>.", 80);
+        let ls = lines(
+            "go to https://example.com/a_b_c, or <https://auto.dev/x>.",
+            80,
+        );
         assert_eq!(ls.len(), 1);
         assert!(ls[0].contains("\x1b]8;;https://example.com/a_b_c\x1b\\"));
         assert!(ls[0].contains("\x1b]8;;https://auto.dev/x\x1b\\"));
-        assert_eq!(strip_ansi(&ls[0]), "go to https://example.com/a_b_c, or https://auto.dev/x.");
+        assert_eq!(
+            strip_ansi(&ls[0]),
+            "go to https://example.com/a_b_c, or https://auto.dev/x."
+        );
     }
 
     #[test]
@@ -1757,7 +1805,10 @@ Final line.
 
     #[test]
     fn cjk_and_emoji_wrap_on_width() {
-        for l in lines("日本語のテキストはスペースなしで折り返されます🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉", 21) {
+        for l in lines(
+            "日本語のテキストはスペースなしで折り返されます🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+            21,
+        ) {
             assert!(visible_width(&l) <= 21, "{l:?}");
         }
     }
@@ -1765,7 +1816,10 @@ Final line.
     #[test]
     fn long_word_is_hard_broken() {
         let ls = lines(&"a".repeat(55), 20);
-        assert_eq!(plain(&ls).iter().map(|l| l.len()).collect::<Vec<_>>(), vec![20, 20, 15]);
+        assert_eq!(
+            plain(&ls).iter().map(|l| l.len()).collect::<Vec<_>>(),
+            vec![20, 20, 15]
+        );
     }
 
     #[test]

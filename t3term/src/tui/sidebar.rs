@@ -1348,7 +1348,6 @@ fn heading(shelf: Shelf, count: usize, open: bool, width: usize, t: &Theme) -> L
     ])
 }
 
-/// A thread from the shell, by id.
 // ---- t3rex ----
 
 /// Where t3rex lists a thread in Rex, which has one list of windows and no shelves. A snoozed,
@@ -1409,6 +1408,7 @@ pub fn pending_kind(thread: &Value) -> Option<&str> {
     pending(thread).and(thread["pendingRuntimeRequest"]["kind"].as_str())
 }
 
+/// A thread from the shell, by id.
 pub fn find_thread<'a>(shell: &'a ShellState, id: &str) -> Option<&'a Value> {
     shell.threads.iter().find(|t| str_of(t, "id") == id)
 }

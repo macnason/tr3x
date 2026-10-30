@@ -32,7 +32,12 @@ pub struct Want {
 }
 
 /// The windows T3's shell asks for at `now`.
-pub fn wanted(shell: &ShellState, inbox: &mut Inbox, caps: t3term::tui::Capabilities, now: i64) -> Vec<Want> {
+pub fn wanted(
+    shell: &ShellState,
+    inbox: &mut Inbox,
+    caps: t3term::tui::Capabilities,
+    now: i64,
+) -> Vec<Want> {
     let roots: HashMap<&str, &str> = shell
         .projects
         .iter()
@@ -66,7 +71,11 @@ pub fn label(title: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
-    let clean = if clean.is_empty() { "Untitled".to_string() } else { clean };
+    let clean = if clean.is_empty() {
+        "Untitled".to_string()
+    } else {
+        clean
+    };
     if clean.chars().count() <= 120 {
         clean
     } else {
@@ -93,7 +102,10 @@ pub enum Slot {
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.close.is_empty() && self.create.is_empty() && self.relabel.is_empty() && self.order.is_empty()
+        self.close.is_empty()
+            && self.create.is_empty()
+            && self.relabel.is_empty()
+            && self.order.is_empty()
     }
 }
 
@@ -101,7 +113,8 @@ impl Plan {
 /// updates `state` for windows the user closed.
 pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> Plan {
     let present_ids: HashSet<&str> = present.iter().map(|(id, _)| id.as_str()).collect();
-    let wanted_ids: HashMap<&str, &Want> = wants.iter().map(|w| (w.thread_id.as_str(), w)).collect();
+    let wanted_ids: HashMap<&str, &Want> =
+        wants.iter().map(|w| (w.thread_id.as_str(), w)).collect();
 
     // A window the user closed: remember the thread as it was, so it stays closed until the
     // thread changes.
@@ -144,7 +157,8 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
                     .find(|(id, _)| id == &window.window_id)
                     .map(|(_, label)| label.as_str());
                 if shown != Some(want.label.as_str()) {
-                    plan.relabel.push((window.window_id.clone(), want.label.clone()));
+                    plan.relabel
+                        .push((window.window_id.clone(), want.label.clone()));
                     window.label = want.label.clone();
                 }
                 order.push(Slot::Window(window.window_id.clone()));
@@ -158,7 +172,11 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
     state.windows = kept;
 
     // Only t3rex's windows count. Others in the session keep their places at the front.
-    let mine: HashSet<&str> = state.windows.values().map(|w| w.window_id.as_str()).collect();
+    let mine: HashSet<&str> = state
+        .windows
+        .values()
+        .map(|w| w.window_id.as_str())
+        .collect();
     let current: Vec<Slot> = present
         .iter()
         .filter(|(id, _)| mine.contains(id.as_str()))
@@ -252,7 +270,9 @@ impl Syncer {
     async fn session(&mut self) -> Result<String> {
         let sessions = self.rex.sessions().await?;
         if let Some(id) = &self.state.session_id
-            && sessions.iter().any(|s| s["session_id"].as_str() == Some(id))
+            && sessions
+                .iter()
+                .any(|s| s["session_id"].as_str() == Some(id))
         {
             return Ok(id.clone());
         }
@@ -277,7 +297,12 @@ impl Syncer {
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
-            .filter_map(|w| Some((w["window_id"].as_str()?.to_string(), w["label"].as_str().unwrap_or_default().to_string())))
+            .filter_map(|w| {
+                Some((
+                    w["window_id"].as_str()?.to_string(),
+                    w["label"].as_str().unwrap_or_default().to_string(),
+                ))
+            })
             .collect();
         let plan = plan(wants, &present, &mut self.state);
         if plan.is_empty() {
@@ -287,10 +312,16 @@ impl Syncer {
         let exe = self.exe.to_string_lossy().into_owned();
         let result = self.rex.lua(&session, &script(&plan, &exe)).await?;
         for (thread, id) in result["created"].as_object().into_iter().flatten() {
-            if let (Some(id), Some(want)) = (id.as_str(), plan.create.iter().find(|w| &w.thread_id == thread)) {
+            if let (Some(id), Some(want)) = (
+                id.as_str(),
+                plan.create.iter().find(|w| &w.thread_id == thread),
+            ) {
                 self.state.windows.insert(
                     thread.clone(),
-                    Window { window_id: id.to_string(), label: want.label.clone() },
+                    Window {
+                        window_id: id.to_string(),
+                        label: want.label.clone(),
+                    },
                 );
             }
         }
@@ -374,7 +405,10 @@ mod tests {
     }
 
     fn win(id: &str, label: &str) -> Window {
-        Window { window_id: id.into(), label: label.into() }
+        Window {
+            window_id: id.into(),
+            label: label.into(),
+        }
     }
 
     #[test]
@@ -382,12 +416,19 @@ mod tests {
         let mut state = State::default();
         state.windows.insert("a".into(), win("w-a", "A"));
         state.windows.insert("gone".into(), win("w-g", "G"));
-        let present = vec![("w-g".into(), "G".into()), ("w-a".into(), "A".into()), ("user".into(), "mine".into())];
+        let present = vec![
+            ("w-g".into(), "G".into()),
+            ("w-a".into(), "A".into()),
+            ("user".into(), "mine".into()),
+        ];
         let plan = plan(&[want("b", "B"), want("a", "A2")], &present, &mut state);
         assert_eq!(plan.close, vec!["w-g".to_string()]);
         assert_eq!(plan.create.len(), 1);
         assert_eq!(plan.relabel, vec![("w-a".to_string(), "A2".to_string())]);
-        assert_eq!(plan.order, vec![Slot::New("b".into()), Slot::Window("w-a".into())]);
+        assert_eq!(
+            plan.order,
+            vec![Slot::New("b".into()), Slot::Window("w-a".into())]
+        );
         assert!(!state.windows.contains_key("gone"));
     }
 

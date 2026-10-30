@@ -4,6 +4,7 @@
 mod chat;
 mod compose;
 mod install;
+mod media;
 mod render;
 mod rex;
 mod state;
@@ -97,7 +98,10 @@ impl Target {
             bail!("name a thread with --thread, or run this in a T3 window in Rex");
         };
         let state = State::load();
-        let session = state.session_id.clone().context("t3rex hasn't synced yet")?;
+        let session = state
+            .session_id
+            .clone()
+            .context("t3rex hasn't synced yet")?;
         let view = Rex::find().inspect(&session).await?;
         let window = view["windows"]
             .as_array()
@@ -105,7 +109,11 @@ impl Target {
             .flatten()
             .find(|w| {
                 w["layers"].as_array().into_iter().flatten().any(|layer| {
-                    layer["blocks"].as_array().into_iter().flatten().any(|b| b["block_id"] == block.as_str())
+                    layer["blocks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|b| b["block_id"] == block.as_str())
                 })
             })
             .and_then(|w| w["window_id"].as_str())
@@ -149,7 +157,10 @@ fn main() {
 
 async fn terminated() -> i32 {
     use tokio::signal::unix::{SignalKind, signal};
-    let (Ok(mut hup), Ok(mut term)) = (signal(SignalKind::hangup()), signal(SignalKind::terminate())) else {
+    let (Ok(mut hup), Ok(mut term)) = (
+        signal(SignalKind::hangup()),
+        signal(SignalKind::terminate()),
+    ) else {
         return std::future::pending().await;
     };
     tokio::select! {
@@ -184,7 +195,10 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
             break;
         }
     }
-    client.dispatch(t3::command(&thread, &action)).await.map(drop)
+    client
+        .dispatch(t3::command(&thread, &action))
+        .await
+        .map(drop)
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -196,12 +210,22 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Settle(t) => lifecycle(&t, Lifecycle::Settle).await,
         Command::Unsettle(t) => lifecycle(&t, Lifecycle::Unsettle).await,
         Command::Snooze { duration, target } => {
-            let ms = t3::snooze_ms(&duration).with_context(|| format!("can't read {duration:?} as a duration, such as 2h or tomorrow"))?;
+            let ms = t3::snooze_ms(&duration).with_context(|| {
+                format!("can't read {duration:?} as a duration, such as 2h or tomorrow")
+            })?;
             lifecycle(&target, Lifecycle::Snooze(ms)).await
         }
         Command::Wake(t) => lifecycle(&t, Lifecycle::Wake).await,
         Command::Pin { off, target } => {
-            lifecycle(&target, if off { Lifecycle::Unpin } else { Lifecycle::Pin }).await
+            lifecycle(
+                &target,
+                if off {
+                    Lifecycle::Unpin
+                } else {
+                    Lifecycle::Pin
+                },
+            )
+            .await
         }
         Command::Archive(t) => lifecycle(&t, Lifecycle::Archive).await,
         Command::Open(t) => {
