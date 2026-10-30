@@ -2,7 +2,11 @@
 
 Rex as the interface to T3 Code. T3 keeps running the agents and owns every thread's state.
 Rex shows each open thread as a window in one session, **T3 Code**, ordered the way T3's
-sidebar is: what needs you first, then the rest, then what's working.
+sidebar is: what needs you first (approval, question, failed, done, woke), then the rest of
+the inbox with pins first, then what's working. Settled, snoozed and archived threads aren't
+listed until T3 brings them back.
+
+![A thread waiting on an approval, at the top of the T3 Code session](docs/frames/approval-dark.png)
 
 ```
 T3 Code                         ← one Rex session, made and kept by t3rex
@@ -23,6 +27,11 @@ Each thread window is two panes:
   theme. Its header reads `T3 · project · branch`.
 - **Reply** (bottom): one input. Its header names the model, effort and access the next message
   goes out with. A pending approval or question shows here.
+
+Pictures draw inline with the kitty graphics protocol: local images an agent links in a reply,
+and a snapshot of each HTML embed (`html_render`) taken with a headless Chromium when one is
+installed (Playwright's, or Chrome), in the Mac's light or dark appearance. Each embed has a
+link that opens the thread in T3 Code, where the page is interactive.
 
 Nothing runs an agent of its own. Every message, approval and setting goes to T3.
 
@@ -88,4 +97,17 @@ does.
 | `t3rex/` | The t3rex crate: `sync.rs`, `chat.rs`, `compose.rs`, `render.rs` (Markdown to ANSI), `install.rs`, `rex.rs`, `t3.rs`, `state.rs`. |
 | `t3term/` | [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT), vendored. t3rex uses its T3 client, auth and sidebar logic. The only change is a small public API at the end of `src/tui/sidebar.rs`, re-exported from `src/tui/mod.rs`. |
 | `rex/t3rex.lua` | The Rex actions and key bindings `install` writes out. |
-| `scripts/` | `shot` screenshots the Rex window. `frame.py` and `render-frame` draw a window from Rex's own screen data when the Mac is locked. `dev-restart` and `size-panes` are for development. |
+| `scripts/` | `shot` screenshots the Rex window. `frame.py` and `render-frame` draw a window from Rex's own screen data when the Mac is locked (Rex draws nothing then). `morning-shots` waits for an unlock and takes the real screenshots. `dev-restart` and `size-panes` are for development. |
+| `docs/frames/` | Windows drawn from Rex's screen data overnight: an approval in dark and light, a question before and after answering, two real threads, and an HTML embed snapshot. `docs/screens/` gets real screenshots once the Mac is unlocked. |
+
+## Known limits
+
+- The conversation pane reprints the whole thread when its width changes, so Rex's scrollback
+  position resets on resize.
+- Pictures need a terminal with kitty graphics (Rex has it). HTML snapshots need a headless
+  Chromium; without one an embed is a titled link.
+- `/model` takes what `t3term models` lists, such as `claudeAgent/claude-haiku-5-5`. There is
+  no picker.
+- New threads open in T3 Code (`t3code://new`). Rex can't ask for a project and a prompt yet.
+- Built against T3 `0.1.6-nightly.20261030` on orchestration protocol 2, and Rex Beta 0.1.0
+  (1642), API revision 7. Both are moving targets.

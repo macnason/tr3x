@@ -1,0 +1,15 @@
+# Frames
+
+Drawn overnight on 31 Oct 2026 while the Mac was locked, with `scripts/render-frame`: the
+sidebar, labels and status markers are Rex's own (`session inspect`, `program_status`), and
+each pane is Rex's own screen buffer (`com.superlogical.terminal.format`, html). The window
+chrome and fonts are an approximation of the app's. Pictures drawn with kitty graphics (HTML
+snapshots, images) don't appear here; their rows show blank.
+
+| File | Shows |
+|---|---|
+| `approval-dark.png`, `approval-light.png` | A thread waiting on a file-change approval. It sits first in the sidebar with Rex's blue marker; the Reply pane offers a / s / d. Same output in both themes. |
+| `question-dark.png` | Claude's AskUserQuestion as a T3 question: numbered options in the Reply pane. |
+| `question-answered-dark.png` | After typing `2`: the answer reached T3, the agent replied, and the thread moved back down to the working group. |
+| `real-thread-dark.png`, `real-thread-light.png` | Real threads: headings, bold, lists, links, the run footer. |
+| `html-embed-snapshot-dark.png` | The snapshot t3rex took of an `html_render` embed, which draws inline in Rex. |

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Waits until the Mac is unlocked, then screenshots each window of the T3 Code session into
+# docs/screens/ and exits. Rex draws nothing while the screen is locked, so overnight checks
+# use render-frame instead; this takes the real ones once someone is back.
+#   nohup scripts/morning-shots > /tmp/morning-shots.log 2>&1 &
+set -e
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT="$HERE/.."
+REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+[ -x "$ROOT/target/unlocked" ] || swiftc -O -o "$ROOT/target/unlocked" "$HERE/unlocked.swift"
+until "$ROOT/target/unlocked"; do sleep 20; done
+# Give whoever unlocked it a moment before the view moves.
+sleep "${GRACE:-20}"
+"$ROOT/target/unlocked" || exec "$0"
+osascript -e 'tell application "Rex Beta" to activate' >/dev/null 2>&1 || true
+sleep 1
+mkdir -p "$ROOT/docs/screens"
+STATE=${T3REX_STATE_DIR:-$HOME/.local/state/t3rex}/state.json
+S=$(/usr/bin/python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['session_id'])" "$STATE")
+"$REX" session inspect "$S" --json | /usr/bin/python3 -I -c "import json,sys;[print(w['label']) for w in json.load(sys.stdin)['windows']]" | head -6 | {
+  n=0
+  while IFS= read -r label; do
+    n=$((n + 1))
+    SHOT_DELAY=1.5 "$HERE/shot" "$ROOT/docs/screens/$n.png" "T3 Code" "$label" || true
+    echo "captured $n: $label"
+  done
+}
+# Leave Rex on the thread that needs you most.
+FIRST=$("$REX" session inspect "$S" --json | /usr/bin/python3 -I -c "import json,sys;print(json.load(sys.stdin)['windows'][0]['label'])")
+SHOT_DELAY=0.5 "$HERE/shot" "$ROOT/docs/screens/overview.png" "T3 Code" "$FIRST" || true
+echo done

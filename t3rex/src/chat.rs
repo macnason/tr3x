@@ -466,43 +466,48 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
 /// Tool calls shown in a row before the rest of the run folds into one "more" line.
 const TOOLS_SHOWN: usize = 3;
 
-/// For each block, whether it is a tool call past the first few of its run, and so hidden.
+/// For each block, whether it shows. A run of tool calls (reasoning between them doesn't
+/// break it) shows its first few calls and folds the rest into one "more" line, when that
+/// hides at least two. Running and failed calls always show.
 fn visible_tools(blocks: &[Block]) -> Vec<bool> {
-    let mut run = 0;
-    blocks
-        .iter()
-        .map(|b| {
-            if b.kind == BlockKind::Tool {
-                run += 1;
-                run <= TOOLS_SHOWN || is_running(b) || failed(b)
-            } else {
-                if b.kind != BlockKind::Reasoning {
-                    run = 0;
-                }
-                true
+    let mut shown = vec![true; blocks.len()];
+    let mut i = 0;
+    while i < blocks.len() {
+        if blocks[i].kind != BlockKind::Tool {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < blocks.len() && matches!(blocks[i].kind, BlockKind::Tool | BlockKind::Reasoning) {
+            i += 1;
+        }
+        let tools: Vec<usize> = (start..i).filter(|&j| blocks[j].kind == BlockKind::Tool).collect();
+        if tools.len() >= TOOLS_SHOWN + 2 {
+            for &j in &tools[TOOLS_SHOWN..] {
+                shown[j] = is_running(&blocks[j]) || failed(&blocks[j]);
             }
-        })
-        .collect()
+        }
+    }
+    shown
 }
 
-/// Block `i`'s lines, with a "more" line where a hidden run of tool calls ends.
+/// Block `i`'s lines, after one "more" line when it ends a run with folded tool calls.
 fn lines_at(blocks: &[Block], shown: &[bool], i: usize, ctx: &Ctx) -> Vec<String> {
-    if !shown[i] {
-        return Vec::new();
-    }
     let mut lines = Vec::new();
-    let hidden = (0..i)
-        .rev()
-        .take_while(|&j| {
-            blocks[j].kind == BlockKind::Tool || blocks[j].kind == BlockKind::Reasoning
-        })
-        .filter(|&j| !shown[j])
-        .count();
-    if hidden > 0 && blocks[i].kind != BlockKind::Tool {
-        let s = if hidden == 1 { "" } else { "s" };
-        lines.push(format!("  {DIM}⋯ {hidden} more tool call{s}{RESET}"));
+    let ends_run = !matches!(blocks[i].kind, BlockKind::Tool | BlockKind::Reasoning);
+    if ends_run {
+        let hidden = (0..i)
+            .rev()
+            .take_while(|&j| matches!(blocks[j].kind, BlockKind::Tool | BlockKind::Reasoning))
+            .filter(|&j| blocks[j].kind == BlockKind::Tool && !shown[j])
+            .count();
+        if hidden > 0 {
+            lines.push(format!("  {DIM}⋯ {hidden} more tool calls{RESET}"));
+        }
     }
-    lines.extend(block_lines(&blocks[i], ctx));
+    if shown[i] {
+        lines.extend(block_lines(&blocks[i], ctx));
+    }
     lines
 }
 
@@ -988,6 +993,8 @@ mod tests {
             .collect();
         let shown = visible_tools(&blocks);
         assert_eq!(shown, vec![true, true, true, false, false, false]);
+        // Folding one call saves nothing, so a run of four shows all four.
+        assert!(visible_tools(&blocks[..4]).iter().all(|s| *s));
     }
 
     #[test]

@@ -145,7 +145,7 @@ body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system
 .main{{position:relative;margin:8px 8px 8px 0}}
 .pane{{position:absolute;padding:3px;}}
 .pane > .ph{{font-size:13px;font-weight:500;padding:6px 10px;color:{t['fg']}}}
-.pane > .term{{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px;line-height:1.35;padding:0 10px;height:calc(100% - 32px);overflow:hidden}}
+.pane > .term{{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.3;padding:0 10px;height:calc(100% - 32px);overflow:hidden}}
 .pane{{border:1px solid {t['line']};border-radius:10px;background:{t['bg']}}}
 a{{color:inherit}}
 </style></head><body><div class="app"><div class="side">{''.join(side)}</div><div class="main">{''.join(panes)}</div></div></body></html>""")
