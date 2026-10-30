@@ -53,6 +53,8 @@ struct Pane {
     header: bool,
     /// Set by a resize: the whole thread prints again at the new width.
     reflow: bool,
+    /// Whether the last frame drew a spinner or a clock, which the tick moves on.
+    animating: bool,
     frame: usize,
     offset_minutes: i64,
     media: Media,
@@ -481,7 +483,9 @@ fn visible_tools(blocks: &[Block]) -> Vec<bool> {
         while i < blocks.len() && matches!(blocks[i].kind, BlockKind::Tool | BlockKind::Reasoning) {
             i += 1;
         }
-        let tools: Vec<usize> = (start..i).filter(|&j| blocks[j].kind == BlockKind::Tool).collect();
+        let tools: Vec<usize> = (start..i)
+            .filter(|&j| blocks[j].kind == BlockKind::Tool)
+            .collect();
         if tools.len() >= TOOLS_SHOWN + 2 {
             for &j in &tools[TOOLS_SHOWN..] {
                 shown[j] = is_running(&blocks[j]) || failed(&blocks[j]);
@@ -554,6 +558,7 @@ impl Pane {
             title: String::new(),
             header: false,
             reflow: false,
+            animating: false,
             frame: 0,
             offset_minutes: local_offset_minutes(),
             media,
@@ -569,6 +574,7 @@ impl Pane {
     /// Prints the thread's blocks: what's new and finished for good, then the live tail.
     fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) {
         let blocks = transcript::blocks(state);
+        self.animating = state.active_run().is_some() || blocks.iter().any(is_running);
         let run_active = state.active_run().is_some();
         // A history that no longer starts with what was printed, after a reconnect, prints
         // again from the top.
@@ -766,8 +772,9 @@ async fn hand_to_composer(text: String) {
     };
     let rex = crate::rex::Rex::find();
     let bin = rex.bin.clone();
+    let session = std::env::var("REX_SESSION").unwrap_or_default();
     let _ = tokio::process::Command::new(&bin)
-        .args(["focus", "-b", &block])
+        .args(["focus", "-s", &session, &block])
         .output()
         .await;
     if !text.is_empty() {
@@ -867,7 +874,7 @@ async fn event_loop(
                 dirty = true;
             }
             _ = tick.tick() => {
-                if state.as_ref().is_some_and(|s| s.active_run().is_some() || transcript::blocks(s).iter().any(is_running)) {
+                if pane.animating {
                     pane.frame += 1;
                     dirty = true;
                 }

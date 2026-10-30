@@ -10,7 +10,7 @@ SESSION=${4:-T3 Code}
 SHELL_BIN=${CHROME:-$(find "$HOME/Library/Caches/ms-playwright" -maxdepth 3 -name chrome-headless-shell -type f 2>/dev/null | head -1)}
 [ -x "$SHELL_BIN" ] || { echo "render-frame: needs Playwright's chrome-headless-shell" >&2; exit 1; }
 TMP=$(mktemp -d)
-/usr/bin/python3 -I "$HERE/frame.py" "$SESSION" "$WIN" --theme "$THEME" > "$TMP/frame.html"
+/usr/bin/python3 -I "$HERE/frame.py" "$SESSION" "$WIN" --theme "$THEME" ${DEMO:+--demo} > "$TMP/frame.html"
 "$SHELL_BIN" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
   --window-size=1280,780 --screenshot="$OUT" "file://$TMP/frame.html" >/dev/null 2>&1
 rm -rf "$TMP"

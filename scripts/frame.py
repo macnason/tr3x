@@ -87,6 +87,7 @@ def main():
     ap.add_argument("window")
     ap.add_argument("--theme", default="dark")
     ap.add_argument("--size", default="")
+    ap.add_argument("--demo", action="store_true", help="a made-up sidebar of a busy day around the real window")
     args = ap.parse_args()
     t = THEMES[args.theme]
     sessions = rex("ls", "--json")["sessions"]
@@ -109,6 +110,23 @@ def main():
             )
     if chosen is None:
         raise SystemExit("no such window")
+    if args.demo:
+        # Made up, to show a busier day than this Mac has: T3's order, Rex's markers.
+        fake = [
+            (chosen[1]["label"], "dot", True),
+            ("Which auth lib for mobile", "dot", False),
+            ("Fix flaky checkout e2e test", "dot", False),
+            ("Release notes 0.1.7", "", False),
+            ("Bump Effect to beta.74", "", False),
+            ("Migrate settings to Supabase", "dots", False),
+            ("Audit prod release", "dots", False),
+            ("Index open PRs by readiness", "dots", False),
+        ]
+        side = ['<div class="sess">T3 Code</div>']
+        for label, mark, on in fake:
+            m = {"dot": '<span class="dot"></span>', "dots": '<span class="dots">•••</span>'}.get(mark, "")
+            side.append(f'<div class="win{" on" if on else ""}"><span class="ico">›_</span><span class="lb">{html.escape(label)}</span>{m}</div>')
+        side += ['<div class="sess">dusty-creek</div>', '<div class="win"><span class="ico">›_</span><span class="lb">zsh ~/Developer/macstack</span></div>']
     session_id, window = chosen
     layer = window["layers"][0]
     panes = []
