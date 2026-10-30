@@ -29,6 +29,8 @@ pub struct Want {
     pub cwd: Option<String>,
     pub updated_at: String,
     pub place: Place,
+    /// The provider instance the thread runs on, for the window's icon.
+    pub instance: String,
 }
 
 /// The windows T3's shell asks for at `now`: T3's sidebar order, with each subagent thread
@@ -62,6 +64,11 @@ pub fn wanted(
             cwd,
             updated_at: thread["updatedAt"].as_str().unwrap_or_default().to_string(),
             place,
+            instance: thread["modelSelection"]["instanceId"]
+                .as_str()
+                .or(thread["providerInstanceId"].as_str())
+                .unwrap_or_default()
+                .to_string(),
         })
     };
     let by_id: HashMap<&str, &Value> = shell
@@ -326,18 +333,23 @@ fn adopt(windows: &[Value], state: &mut State, known: &HashSet<String>) -> Vec<S
 
 /// The Lua that carries out `plan` in one connection, so the blocks it starts are disowned by
 /// the client that made them and size to whoever views them.
-pub fn script(plan: &Plan, exe: &str) -> String {
+/// Each pane runs t3rex under the name of the thread's provider, so Rex's sidebar shows that
+/// provider's glyph for the window.
+pub fn script(plan: &Plan, exe: &std::path::Path, config: Option<&Value>) -> String {
     let create: Vec<Value> = plan
         .create
         .iter()
         .map(|want| {
+            let program =
+                crate::icons::as_program(exe, crate::icons::driver_of(config, &want.instance));
+            let program = program.to_string_lossy();
             json!({
                 "thread": want.thread_id,
                 "tag": tag(&want.thread_id),
                 "label": want.label,
                 "cwd": want.cwd,
-                "chat": [exe, "chat", want.thread_id],
-                "compose": [exe, "compose", want.thread_id],
+                "chat": [program, "chat", want.thread_id],
+                "compose": [program, "compose", want.thread_id],
             })
         })
         .collect();
@@ -361,7 +373,7 @@ local term = "com.superlogical.terminal.shell"
 local out = {{ created = {{}}, errors = {{}} }}
 -- Labelled as they are made, so the new-window watcher never takes them for a New Tab.
 local function pane(argv, cwd, label)
-  return {{ block = {{ flavor = term, label = label, options = {{ shell = "none", command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }} }}
+  return {{ block = {{ flavor = term, label = label, options = {{ shell = "none", login = false, command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }} }}
 end
 for _, id in ipairs(plan.close or {{}}) do
   local _, err = rex.session.close_window{{ window_id = id }}
@@ -402,6 +414,8 @@ pub struct Syncer {
     /// The `rex do` script that turns a New Tab in the session into a new thread, and the
     /// session it watches.
     pub watcher: Option<(String, tokio::process::Child)>,
+    /// T3's server config, for each provider instance's driver.
+    pub config: Option<Value>,
 }
 
 /// Turns each window made in the session by Rex's New Tab, its + button or the palette, which
@@ -421,7 +435,7 @@ rex.on("window_created", function(ctx, ev)
       local shell = blocks[1].block_id
       local _, err = rex.session.new_split{{ anchor_id = shell, direction = "vertical", side = "after",
         focus = true, layout = {{ block = {{ flavor = term, label = "New Thread",
-          options = {{ shell = "none", command = argv }} }} }} }}
+          options = {{ shell = "none", login = false, command = argv }} }} }} }}
       if not err then
         rex.call("block.close", {{ session_id = ctx.session_id, block_id = shell }})
         rex.session.set_window_label{{ window_id = w.window_id, label = "New Thread" }}
@@ -442,7 +456,7 @@ pub fn welcome_script(exe: &str) -> String {
         r#"local argv = rex.json.decode({argv})
 local w, err = rex.session.new_window{{ window_label = "New Thread", focus = true,
   layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "New Thread",
-    options = {{ shell = "none", command = argv }} }} }} }}
+    options = {{ shell = "none", login = false, command = argv }} }} }} }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
 return {{}}
@@ -543,8 +557,10 @@ impl Syncer {
             self.state.save()?;
             return Ok(false);
         }
-        let exe = self.exe.to_string_lossy().into_owned();
-        let result = self.rex.lua(&session, &script(&plan, &exe)).await?;
+        let result = self
+            .rex
+            .lua(&session, &script(&plan, &self.exe, self.config.as_ref()))
+            .await?;
         for (thread, id) in result["created"].as_object().into_iter().flatten() {
             if let (Some(id), Some(want)) = (
                 id.as_str(),
@@ -580,10 +596,11 @@ pub async fn run(first: bool) -> Result<()> {
     let caps = t3::capabilities(&client);
     let mut syncer = Syncer {
         rex: Rex::find(),
-        exe: std::env::current_exe()?,
+        exe: crate::icons::real_exe(),
         state: State::load(),
         first,
         watcher: None,
+        config: client.server_config().await.ok(),
     };
     let mut events = client.watch_shell(None);
     let mut shell = ShellState::default();
@@ -656,6 +673,7 @@ mod tests {
             cwd: None,
             updated_at: "u1".into(),
             place: Place::Open,
+            instance: String::new(),
         }
     }
 

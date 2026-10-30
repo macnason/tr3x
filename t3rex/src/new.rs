@@ -666,20 +666,20 @@ async fn set_label(label: &str) -> Result<()> {
     Rex::find().lua(&session, &script).await.map(drop)
 }
 
-/// The Reply pane under this one, for `thread`.
-async fn open_reply(thread: &str, cwd: Option<&str>) -> Result<()> {
+/// The Reply pane under this one, for `thread`, run as `program`.
+async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) -> Result<()> {
     let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
     else {
         return Ok(());
     };
-    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    let exe = program.to_string_lossy().into_owned();
     let data = json!({"block": block, "argv": [exe, "compose", thread], "cwd": cwd});
     let script = format!(
         r#"local d = rex.json.decode({})
 local r, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
   ratio = 0.86, focus = true,
   layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Reply",
-    options = {{ shell = "none", command = d.argv, cwd = d.cwd, exit = {{ on_completion = false }} }} }} }} }}
+    options = {{ shell = "none", login = false, command = d.argv, cwd = d.cwd, exit = {{ on_completion = false }} }} }} }} }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
 -- The app evens out a new split when its Autobalance setting is on; set the ratio again after.
@@ -854,7 +854,10 @@ pub async fn run(welcome: bool) -> Result<()> {
         .project_value()
         .and_then(|p| p["workspaceRoot"].as_str())
         .map(str::to_string);
-    if let Err(e) = open_reply(&thread, cwd.as_deref()).await {
+    // Both panes run under the provider's name, so Rex's sidebar shows its glyph.
+    let driver = icons::driver_of(Some(&ui.config), &ui.settings.instance).to_string();
+    let program = icons::as_program(&icons::real_exe(), &driver);
+    if let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await {
         eprintln!("t3rex: couldn't open the Reply pane: {e:#}");
     }
     if let Some(dir) = &cwd {
@@ -866,7 +869,8 @@ pub async fn run(welcome: bool) -> Result<()> {
     drop(client);
     t3term::auth::revoke_all_sessions();
     use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(std::env::current_exe()?)
+    let error = std::process::Command::new(&program)
+        .arg0(&program)
         .args(["chat", &thread])
         .exec();
     Err(error.into())

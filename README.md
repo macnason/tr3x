@@ -25,8 +25,17 @@ Each thread window is two panes:
   selection and links all work. Markdown renders with headings, lists, tables, syntax-highlighted
   code and OSC 8 links, using only the terminal's 16 colours so it follows any light or dark
   theme. Its header reads `T3 · project · branch`.
-- **Reply** (bottom): one input. Its header names the model, effort and access the next message
-  goes out with. A pending approval or question shows here.
+- **Reply** (bottom): one input, with T3's composer chips under it: the provider's logo and
+  model, the effort, and the access the next message goes out with. Click a chip, or press Tab,
+  to change it. A pending approval or question shows here.
+
+Each window's sidebar icon is its thread's provider: Claude, Codex, Cursor, Grok, Pi, OpenCode,
+Gemini or Antigravity. Rex picks a window's glyph from the name its focused pane's program was
+started as, so t3rex starts both panes through a link named for the provider
+(`~/.local/state/t3rex/bin/claude` → `t3rex`), without a login shell in between. A thread
+that moves to another provider takes the new glyph: the conversation starts again under the
+new name, and Reply does once its input is empty. Rex has no glyph for a project, and no way to
+set a custom one.
 
 Pictures draw inline with the kitty graphics protocol: local images an agent links in a reply,
 and a snapshot of each HTML embed (`html_render`) taken with a headless Chromium when one is
@@ -80,7 +89,7 @@ holds one **New Thread** window instead, with the four keys that matter under it
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project (with T3's icons), model, effort, access, Local or New worktree and its base branch, and the device. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The window becomes the thread's. |
 | Reply | Type in the Reply pane, Enter to send. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation pane moves you to Reply. Sending brings the conversation back to the bottom. A send that fails keeps your text. |
-| Model | `/model` alone in Reply, or ⌃⌘M, opens a picker over the window: every enabled provider's models under its logo, then the model's efforts; ← → for effort and access. A choice applies to the next message and the Reply header follows. `/model haiku`, `/effort high`, `/mode ask` still work. |
+| Model | Click a chip under Reply, press Tab there, type `/model` alone, or ⌃⌘M: a picker opens over the window with every enabled provider's models under its logo, then the model's efforts; ← → for effort and access. A choice applies to the next message and the Reply header follows. `/model haiku`, `/effort high`, `/mode ask` still work. |
 | Approve | With an approval pending: `a` then Enter accepts, `s` then Enter accepts for the session, `d` then Enter declines. Anything else you type is a reply. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
 | Commands | `/steer …`, `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model`, `/effort`, `/mode`, `/open` |

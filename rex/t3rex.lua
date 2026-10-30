@@ -64,7 +64,7 @@ rex.action{
       window_label = "New Thread",
       focus = true,
       layout = { block = { flavor = "com.superlogical.terminal.shell", label = "New Thread",
-        options = { shell = "none", command = { T3REX, "new" } } } },
+        options = { shell = "none", login = false, command = { T3REX, "new" } } } },
     }
     if err then error(err, 0) end
     rex.session.disown_block{ session_id = sid }

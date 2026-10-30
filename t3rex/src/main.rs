@@ -161,6 +161,23 @@ fn main() {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("T3TERM_NO_SAVED_LOGIN", "1") };
     }
+    // A pane Rex starts without a login shell gets Rex's PATH alone; t3term runs `ps` and
+    // the T3 server's own command, so the system folders go on the end.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let missing: Vec<&str> = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        .into_iter()
+        .filter(|dir| !path.split(':').any(|p| p == *dir))
+        .collect();
+    if !missing.is_empty() {
+        let joined = [path.as_str()]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .chain(missing)
+            .collect::<Vec<_>>()
+            .join(":");
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("PATH", joined) };
+    }
     let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

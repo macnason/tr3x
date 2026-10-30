@@ -902,6 +902,9 @@ async fn event_loop(
     let mut visited_for = String::new();
     let mut dirty = false;
     let mut focused = true;
+    // The provider's driver for each instance, so the pane can take its provider's name.
+    let config = client.server_config().await.ok();
+    let mut renamed = false;
     loop {
         tokio::select! {
             event = thread_events.recv() => match event {
@@ -956,6 +959,21 @@ async fn event_loop(
                     pane.frame += 1;
                     dirty = true;
                 }
+            }
+        }
+        // A thread that moved to another provider: start again under that provider's name,
+        // so Rex's sidebar shows its glyph. The thread prints again from the top.
+        if !renamed && let Some(s) = state.as_ref() {
+            let instance = s.thread()["modelSelection"]["instanceId"]
+                .as_str()
+                .unwrap_or_default();
+            let driver = crate::icons::driver_of(config.as_ref(), instance);
+            let want = crate::icons::program_name(driver).unwrap_or("t3rex");
+            if !instance.is_empty() && crate::icons::started_as() != want {
+                renamed = true;
+                out("\x1b[?1004l\x1b[?25h");
+                let _ = crossterm::terminal::disable_raw_mode();
+                crate::icons::become_program(driver);
             }
         }
         if dirty && let Some(s) = state.as_ref() {

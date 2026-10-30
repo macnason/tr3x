@@ -289,6 +289,87 @@ pub async fn provider(provider: &Value, dark: bool) -> Icon {
     }
 }
 
+/// The program name Rex shows a provider's glyph for, by T3 provider driver. Rex picks a
+/// window's sidebar icon from the name its focused pane's program was started as.
+pub fn program_name(driver: &str) -> Option<&'static str> {
+    Some(match driver {
+        "claudeAgent" => "claude",
+        "codex" => "codex",
+        "cursor" => "cursor",
+        "grok" => "grok",
+        "pi" => "pi",
+        "opencode" => "opencode",
+        "fx" => "fx",
+        "antigravity" => "antigravity",
+        "gemini" => "gemini",
+        _ => return None,
+    })
+}
+
+/// The driver of a provider instance, from the server config, else the instance id itself.
+pub fn driver_of<'a>(config: Option<&'a Value>, instance: &'a str) -> &'a str {
+    config
+        .and_then(|c| {
+            t3term::models::providers(c)
+                .iter()
+                .find(|p| p["instanceId"].as_str() == Some(instance))
+        })
+        .and_then(|p| p["driver"].as_str())
+        .unwrap_or(instance)
+}
+
+/// `exe` under the name Rex knows `driver` by: a link in t3rex's state folder, made or fixed
+/// as needed. `exe` itself for a provider Rex has no glyph for.
+pub fn as_program(exe: &Path, driver: &str) -> PathBuf {
+    let Some(name) = program_name(driver) else {
+        return exe.to_path_buf();
+    };
+    let dir = crate::state::dir().join("bin");
+    let link = dir.join(name);
+    if std::fs::read_link(&link).ok().as_deref() != Some(exe) {
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join(format!(".{name}.{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        if std::os::unix::fs::symlink(exe, &tmp).is_err() || std::fs::rename(&tmp, &link).is_err() {
+            return exe.to_path_buf();
+        }
+    }
+    link
+}
+
+/// The real t3rex binary, through any provider link this process was started from.
+pub fn real_exe() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+/// The name this process was started as.
+pub fn started_as() -> String {
+    std::env::args_os()
+        .next()
+        .map(PathBuf::from)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
+/// Starts this pane's program again under the name Rex shows `driver`'s glyph for, keeping
+/// its arguments, when it isn't running as that already. Returns only if it didn't.
+pub fn become_program(driver: &str) {
+    let want = program_name(driver).unwrap_or("t3rex");
+    if started_as() == want {
+        return;
+    }
+    let exe = real_exe();
+    let program = as_program(&exe, driver);
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    t3term::auth::revoke_all_sessions();
+    use std::os::unix::process::CommandExt;
+    let _ = std::process::Command::new(&program)
+        .arg0(&program)
+        .args(args)
+        .exec();
+}
+
 /// Draws icons with kitty graphics. Each frame sends each picture again as a file path, which
 /// the terminal reads itself, the way the conversation pane draws pictures; `clear` removes
 /// the last frame's.

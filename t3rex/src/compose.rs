@@ -10,9 +10,12 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use t3term::client::{Client, IfBusy, WatchEvent};
 use t3term::models::{self, Choice};
 use t3term::projection::ThreadState;
@@ -20,6 +23,9 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, YELLOW, fit};
+use crate::icons::{Icon, Painter};
+use crate::pick::Field;
+use crate::picker::{self, Chip, Settings};
 use crate::t3::{self, Lifecycle};
 
 fn out(text: &str) {
@@ -103,6 +109,7 @@ enum Done {
     /// A message that failed to send, back into the input if it's empty.
     Restore(String),
     Config(Value),
+    Logos(HashMap<String, Icon>),
 }
 
 struct Composer {
@@ -120,6 +127,12 @@ struct Composer {
     rows: usize,
     title: String,
     tx: mpsc::UnboundedSender<Done>,
+    logos: HashMap<String, Icon>,
+    painter: Painter,
+    /// Each chip's columns on the bottom row, for clicks.
+    chip_spans: Vec<((usize, usize), Field)>,
+    /// Started again under the provider's name once already; don't loop if that failed.
+    renamed: bool,
 }
 
 impl Composer {
@@ -141,42 +154,53 @@ impl Composer {
         })
     }
 
-    /// The header: model, effort and access, as the desktop composer's chips show them.
-    fn header(&self) -> String {
+    /// The model, effort and access chips under the input, as T3's composer shows them, with
+    /// the provider's logo.
+    fn chips(&self) -> Vec<(Chip, Field)> {
         let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
-            return "Reply".into();
+            return Vec::new();
         };
-        let settings = models::thread_settings(config, state.thread());
-        let mut parts: Vec<String> = Vec::new();
-        let model = settings["modelName"]
-            .as_str()
-            .or(settings["model"].as_str())
-            .unwrap_or("Model");
-        parts.push(model.to_string());
-        for key in ["effort", "reasoningEffort", "thinking"] {
-            if let Some(v) = settings["options"][key].as_str() {
-                let mut c = v.chars();
-                parts.push(
-                    c.next()
-                        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-                        .unwrap_or_default(),
-                );
-            }
+        let settings = Settings::of_thread(config, state.thread());
+        let mut chips = vec![(
+            Chip {
+                icon: self.logos.get(&settings.instance).cloned(),
+                label: settings.model_label(config),
+            },
+            Field::Model,
+        )];
+        if let Some(effort) = settings.effort_label(config) {
+            chips.push((
+                Chip {
+                    icon: None,
+                    label: effort,
+                },
+                Field::Effort,
+            ));
         }
-        if settings["options"]["fastMode"] == true {
-            parts.push("Fast".into());
-        }
-        if let Some(mode) = settings["runtimeModeLabel"].as_str() {
-            parts.push(mode.to_string());
-        }
-        if state.active_run().is_some() {
-            parts.push("Working".into());
-        }
-        parts.join(" · ")
+        chips.push((
+            Chip {
+                icon: None,
+                label: settings.mode_label(),
+            },
+            Field::Access,
+        ));
+        chips
+    }
+
+    /// Opens the model picker over the window, on `field`.
+    fn pick(&mut self, field: Field) {
+        let Ok(session) = std::env::var("REX_SESSION") else {
+            return self.note("Open this in Rex to choose a model", true);
+        };
+        let thread = self.thread_id.clone();
+        self.spawn(async move {
+            crate::pick::float(&session, &thread, field).await?;
+            Ok(String::new())
+        });
     }
 
     fn draw(&mut self) {
-        let title = self.header();
+        let title = "Reply".to_string();
         let mut text = String::from("\x1b[?2026h");
         if title != self.title {
             text.push_str(&format!(
@@ -186,7 +210,16 @@ impl Composer {
             self.title = title;
         }
         text.push_str("\x1b[H\x1b[2J");
+        text.push_str(Painter::clear());
         let width = self.cols.saturating_sub(4).max(10);
+        // The chips take the bottom row, and a blank row above them when there is room.
+        let chips: Vec<(Chip, Field)> = self.chips();
+        let reserved = match (chips.is_empty(), self.rows) {
+            (true, _) => 0,
+            (false, r) if r >= 5 => 2,
+            _ => 1,
+        };
+        let room = self.rows.saturating_sub(reserved).max(1);
         let mut rows: Vec<String> = Vec::new();
         if let Some((request, item)) = self.pending() {
             if request["kind"] == "user_input" {
@@ -257,11 +290,26 @@ impl Composer {
         // Keep the cursor's row on screen in a pane shorter than the text.
         let cursor_row = first_input + cursor.0;
         let start = (cursor_row + 1)
-            .saturating_sub(self.rows)
-            .min(rows.len().saturating_sub(self.rows.min(rows.len())));
-        let shown: Vec<&String> = rows.iter().skip(start).take(self.rows).collect();
+            .saturating_sub(room)
+            .min(rows.len().saturating_sub(room.min(rows.len())));
+        let shown: Vec<&String> = rows.iter().skip(start).take(room).collect();
         for (i, row) in shown.iter().enumerate() {
             text.push_str(&format!("\x1b[{};1H {row}", i + 1));
+        }
+        if !chips.is_empty() {
+            let only: Vec<Chip> = chips
+                .iter()
+                .map(|(c, _)| Chip {
+                    icon: c.icon.clone(),
+                    label: c.label.clone(),
+                })
+                .collect();
+            let (line, spans) = picker::chips(&mut self.painter, &only, None, None, 1);
+            self.chip_spans = spans
+                .into_iter()
+                .zip(chips.iter().map(|(_, f)| *f))
+                .collect();
+            text.push_str(&format!("\x1b[{};1H {line}", self.rows));
         }
         let (r, c) = (cursor_row.saturating_sub(start) + 1, cursor.1 + 4);
         text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h\x1b[?2026l"));
@@ -456,20 +504,11 @@ impl Composer {
                 crate::install::open_in_t3(&thread).await?;
                 Ok("Opened in T3 Code".into())
             }),
-            "model" | "effort" | "mode" if arg.is_empty() => {
-                let field = match name {
-                    "model" => crate::pick::Field::Model,
-                    "effort" => crate::pick::Field::Effort,
-                    _ => crate::pick::Field::Access,
-                };
-                let Ok(session) = std::env::var("REX_SESSION") else {
-                    return self.note("Open this in Rex to choose a model", true);
-                };
-                self.spawn(async move {
-                    crate::pick::float(&session, &thread, field).await?;
-                    Ok(String::new())
-                });
-            }
+            "model" | "effort" | "mode" if arg.is_empty() => self.pick(match name {
+                "model" => Field::Model,
+                "effort" => Field::Effort,
+                _ => Field::Access,
+            }),
             "model" | "effort" | "mode" => {
                 let (Some(state), Some(config)) = (self.state.clone(), self.config.clone()) else {
                     return;
@@ -514,6 +553,7 @@ impl Composer {
                 self.editor.take();
             }
             KeyCode::Char('x') if ctrl => self.command("stop"),
+            KeyCode::Tab | KeyCode::BackTab => self.pick(Field::Model),
             _ => {
                 edit(&mut self.editor, key);
             }
@@ -640,7 +680,9 @@ pub async fn run(thread_id: String) -> Result<()> {
         let (client, tx) = (client.clone(), tx.clone());
         tokio::spawn(async move {
             if let Ok(config) = client.server_config().await {
+                let providers = models::providers(&config).to_vec();
                 let _ = tx.send(Done::Config(config));
+                let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
             }
         });
     }
@@ -658,9 +700,14 @@ pub async fn run(thread_id: String) -> Result<()> {
         rows: rows as usize,
         title: String::new(),
         tx,
+        logos: HashMap::new(),
+        painter: Painter,
+        chip_spans: Vec::new(),
+        renamed: false,
     };
     crossterm::terminal::enable_raw_mode()?;
-    out("\x1b[?1049h\x1b[?2004h");
+    // The alternate screen, bracketed paste, and clicks on the chips.
+    out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
     let mut input = EventStream::new();
     composer.draw();
     let result: Result<()> = async {
@@ -689,6 +736,7 @@ pub async fn run(thread_id: String) -> Result<()> {
                         }
                     }
                     Some(Done::Config(config)) => composer.config = Some(config),
+                    Some(Done::Logos(logos)) => composer.logos = logos,
                     None => {}
                 },
                 _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
@@ -697,6 +745,19 @@ pub async fn run(thread_id: String) -> Result<()> {
                 }
                 event = input.next() => match event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => composer.key(key),
+                    Some(Ok(Event::Mouse(m))) => {
+                        let col = m.column as usize + 1;
+                        let hit = composer
+                            .chip_spans
+                            .iter()
+                            .find(|((a, b), _)| (*a..=*b).contains(&col))
+                            .map(|(_, f)| *f);
+                        match (m.kind, hit) {
+                            (MouseEventKind::Down(MouseButton::Left), Some(field))
+                                if m.row as usize + 1 == composer.rows => composer.pick(field),
+                            _ => continue,
+                        }
+                    }
                     Some(Ok(Event::Paste(text))) => composer.editor.insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
                     Some(Ok(Event::Resize(c, r))) => {
                         composer.cols = c as usize;
@@ -707,11 +768,29 @@ pub async fn run(thread_id: String) -> Result<()> {
                     _ => continue,
                 },
             }
+            // A thread that moved to another provider: once the input is empty, start again
+            // under that provider's name, so Rex's sidebar shows its glyph.
+            if composer.editor.text.is_empty()
+                && composer.answers.is_empty()
+                && let (Some(state), Some(config)) = (composer.state.as_ref(), composer.config.as_ref())
+            {
+                let instance = state.thread()["modelSelection"]["instanceId"].as_str().unwrap_or_default();
+                let driver = crate::icons::driver_of(Some(config), instance).to_string();
+                let want = crate::icons::program_name(&driver).unwrap_or("t3rex");
+                if !instance.is_empty() && crate::icons::started_as() != want && !composer.renamed {
+                    composer.renamed = true;
+                    out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    crate::icons::become_program(&driver);
+                    out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+                    let _ = crossterm::terminal::enable_raw_mode();
+                }
+            }
             composer.draw();
         }
     }
     .await;
-    out("\x1b[?2004l\x1b[?1049l");
+    out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result
 }

@@ -33,7 +33,7 @@ pub enum Field {
 
 /// Opens the picker for `thread` in a floating layer over the session's active window.
 pub async fn float(session: &str, thread: &str, field: Field) -> Result<()> {
-    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    let exe = crate::icons::real_exe().to_string_lossy().into_owned();
     let field = match field {
         Field::Model => "model",
         Field::Effort => "effort",
@@ -44,7 +44,7 @@ pub async fn float(session: &str, thread: &str, field: Field) -> Result<()> {
         r#"local d = rex.json.decode({})
 local _, err = rex.session.new_layer{{ bounds = {{ 0.2, 0.12, 0.6, 0.76 }}, focus = true,
   layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Model",
-    options = {{ shell = "none", command = d.argv }} }} }} }}
+    options = {{ shell = "none", login = false, command = d.argv }} }} }} }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
 return {{}}"#,
