@@ -194,8 +194,29 @@ fn shorten_paths(text: &str) -> String {
 }
 
 /// A tool row's text: what it did, in T3's words where it has them.
-fn tool_text(block: &Block) -> String {
+/// `mcp__claude_ai_Claude_Docs__update` as `Claude Docs · update`, `ToolSearch` as itself.
+fn tool_name(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("mcp__") else {
+        return raw.to_string();
+    };
+    let (server, tool) = rest.rsplit_once("__").unwrap_or((rest, ""));
+    let server = server
+        .strip_prefix("claude_ai_")
+        .unwrap_or(server)
+        .replace(['_', '-'], " ");
+    if tool.is_empty() {
+        server
+    } else {
+        format!("{server} · {tool}")
+    }
+}
+
+fn tool_text(block: &Block, tool: Option<&str>) -> String {
     let first = |t: &str| one_line(t.lines().next().unwrap_or(""));
+    // T3's workspace setup reads best as what it ended with.
+    if block.detail == "Preparing workspace" && !block.title.is_empty() && !is_running(block) {
+        return block.title.clone();
+    }
     let text = match block.item_type.as_str() {
         "command_execution" => {
             let mut cmd = first(if block.detail.is_empty() {
@@ -225,6 +246,7 @@ fn tool_text(block: &Block) -> String {
         }
         "web_search" => format!("Searched {}", first(&block.detail)),
         _ if !block.title.is_empty() && block.title != "Thinking" => first(&block.title),
+        _ if let Some(tool) = tool => tool_name(tool),
         _ => first(&block.header),
     };
     shorten_paths(&text)
@@ -349,6 +371,11 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
             }
         }
         BlockKind::Tool => {
+            let tool = Some(block.tool_name.as_str()).filter(|t| !t.is_empty());
+            // A question shows as its own block, so its tool call needs no row.
+            if tool == Some("AskUserQuestion") {
+                return lines;
+            }
             let mark = if is_running(block) {
                 format!(" {BLUE}{}{RESET}", SPINNER[frame % SPINNER.len()])
             } else if failed(block) {
@@ -360,7 +387,7 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
             lines.push(format!(
                 "  {DIM}{} {}{RESET}{mark}",
                 tool_glyph(block),
-                fit(&tool_text(block), room)
+                fit(&tool_text(block, tool), room)
             ));
             if failed(block) && !block.body.trim().is_empty() {
                 for line in block
@@ -884,4 +911,109 @@ pub async fn dump(thread_id: String) -> Result<()> {
     }
     let _ = visible_width("");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(item_type: &str, header: &str, detail: &str, title: &str) -> Block {
+        Block {
+            item_id: "i".into(),
+            kind: BlockKind::Tool,
+            header: header.into(),
+            body: String::new(),
+            streaming: false,
+            status: "completed".into(),
+            item_type: item_type.into(),
+            detail: detail.into(),
+            title: title.into(),
+            output_omitted: false,
+            updated_at: String::new(),
+            exit_code: Some(0),
+            run_id: String::new(),
+            tool_name: String::new(),
+            request_id: String::new(),
+            change: None,
+        }
+    }
+
+    #[test]
+    fn commands_drop_their_cd() {
+        let b = tool(
+            "command_execution",
+            "$ cd ~/x && pnpm test",
+            "cd ~/x && pnpm test",
+            "",
+        );
+        assert_eq!(tool_text(&b, None), "pnpm test");
+    }
+
+    #[test]
+    fn workspace_setup_reads_as_its_result() {
+        let b = tool(
+            "command_execution",
+            "$ Preparing workspace",
+            "Preparing workspace",
+            "Workspace ready",
+        );
+        assert_eq!(tool_text(&b, None), "Workspace ready");
+    }
+
+    #[test]
+    fn dynamic_tools_are_named() {
+        let b = tool("dynamic_tool", "dynamic_tool", "", "");
+        assert_eq!(
+            tool_text(&b, Some("mcp__claude_ai_Claude_Docs__update")),
+            "Claude Docs · update"
+        );
+        assert_eq!(tool_name("ToolSearch"), "ToolSearch");
+    }
+
+    #[test]
+    fn long_paths_keep_their_end() {
+        assert_eq!(
+            short_path(
+                "/private/tmp/claude-501/some-very-long-scratch-directory-name/scratchpad/v2.png"
+            ),
+            "…/scratchpad/v2.png"
+        );
+        assert_eq!(short_path("/usr/bin/env"), "/usr/bin/env");
+    }
+
+    #[test]
+    fn long_runs_of_tools_fold() {
+        let blocks: Vec<Block> = (0..6)
+            .map(|_| tool("command_execution", "$ ls", "ls", ""))
+            .collect();
+        let shown = visible_tools(&blocks);
+        assert_eq!(shown, vec![true, true, true, false, false, false]);
+    }
+
+    #[test]
+    fn status_maps_to_rex_states() {
+        assert!(
+            status_sequence(Some("Approval"), None, "t").contains("state=blocked:kind=permission")
+        );
+        assert!(status_sequence(Some("Input"), None, "t").contains("state=blocked:kind=question"));
+        assert!(status_sequence(Some("Working"), None, "t").contains("state=working"));
+        assert!(status_sequence(Some("Done"), None, "t").contains("state=done"));
+        assert!(status_sequence(None, None, "t").contains("state=idle"));
+    }
+
+    #[test]
+    fn clocks_are_local_twelve_hour() {
+        assert_eq!(
+            clock("2026-10-30T15:29:13.895Z", 11 * 60).as_deref(),
+            Some("2:29 AM")
+        );
+        assert_eq!(
+            clock("2026-10-30T01:05:00.000Z", 0).as_deref(),
+            Some("1:05 AM")
+        );
+        assert_eq!(
+            clock("2026-10-30T12:00:00.000Z", 0).as_deref(),
+            Some("12:00 PM")
+        );
+    }
 }

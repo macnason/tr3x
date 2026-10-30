@@ -211,7 +211,15 @@ pub async fn install() -> Result<()> {
     std::fs::write(&plist_file, plist(&bin, &rex.bin))?;
     let domain = format!("gui/{}", uid());
     let _ = launchctl(&["bootout", &format!("{domain}/{LABEL}")]).await;
-    let loaded = launchctl(&["bootstrap", &domain, &plist_file.to_string_lossy()]).await;
+    // launchd takes a moment to forget a job it just booted out, and refuses it again until then.
+    let mut loaded = false;
+    for _ in 0..20 {
+        loaded = launchctl(&["bootstrap", &domain, &plist_file.to_string_lossy()]).await;
+        if loaded {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     step(loaded, "Background sync", &format!("launchd agent {LABEL}"));
 
     // Wait for the first sync to make the session.

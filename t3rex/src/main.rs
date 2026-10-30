@@ -175,7 +175,10 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
     let first = client.dispatch(t3::command(&thread, &action)).await;
     // T3 won't settle or archive a thread mid-run. Settling says the thread is finished, so
     // stop the run, wait for T3 to see it stop, and try again.
-    let running = matches!(&first, Err(e) if e.to_string().contains("still running"));
+    let running = matches!(&first, Err(e) if {
+        let text = e.to_string();
+        text.contains("still running") || text.contains("waiting on an approval or question")
+    });
     if !(running && matches!(action, Lifecycle::Settle | Lifecycle::Archive)) {
         return first.map(drop);
     }
