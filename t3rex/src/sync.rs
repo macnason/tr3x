@@ -343,10 +343,13 @@ impl Syncer {
     pub async fn reconcile(&mut self, wants: &[Want]) -> Result<bool> {
         let session = self.session().await?;
         let view = self.rex.inspect(&session).await?;
-        // An answer without a window list is not "every window was closed".
-        let Some(windows) = view["windows"].as_array() else {
-            anyhow::bail!("Rex described the session without its windows");
-        };
+        // Rex leaves `windows` out of an empty session. An answer that isn't this session at all
+        // is not "every window was closed".
+        if view["session_id"].as_str() != Some(session.as_str()) {
+            anyhow::bail!("Rex described something other than the session");
+        }
+        let none = Vec::new();
+        let windows = view["windows"].as_array().unwrap_or(&none);
         let mut extra = adopt(windows, &mut self.state);
         let present: Vec<(String, String)> = windows
             .iter()
