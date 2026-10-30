@@ -66,6 +66,9 @@ enum Command {
     Archive(Target),
     /// Open the thread in T3 Code.
     Open(Target),
+    /// Print the windows sync wants, in order, for working on sync.
+    #[command(hide = true)]
+    Wants,
     /// Print where the thread that most needs you is, as Rex's session.select takes it.
     Inbox,
     /// Print the thread a Rex block belongs to.
@@ -240,6 +243,24 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Inbox => install::inbox().await,
+        Command::Wants => {
+            let client = t3::connect(false).await?;
+            // The same feed sync follows, up to its first synchronized state.
+            let mut events = client.watch_shell(None);
+            let mut shell = t3term::projection::ShellState::default();
+            while let Some(t3term::client::WatchEvent::Item(item)) = events.recv().await {
+                shell.apply(&item);
+                if item["kind"] == "synchronized" {
+                    break;
+                }
+            }
+            let caps = t3::capabilities(&client);
+            let mut inbox = t3term::tui::Inbox::default();
+            for want in sync::wanted(&shell, &mut inbox, caps, t3::now_ms()) {
+                println!("{:?}\t{}\t{}", want.place, want.thread_id, want.label);
+            }
+            Ok(())
+        }
         Command::Install => install::install().await,
         Command::Uninstall => install::uninstall().await,
         Command::Doctor => install::doctor().await,

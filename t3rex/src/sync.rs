@@ -31,7 +31,8 @@ pub struct Want {
     pub place: Place,
 }
 
-/// The windows T3's shell asks for at `now`.
+/// The windows T3's shell asks for at `now`: T3's sidebar order, with each subagent thread
+/// worth showing right after the window of the thread it works for.
 pub fn wanted(
     shell: &ShellState,
     inbox: &mut Inbox,
@@ -43,25 +44,77 @@ pub fn wanted(
         .iter()
         .filter_map(|p| Some((p["id"].as_str()?, p["workspaceRoot"].as_str()?)))
         .collect();
-    inbox
-        .order(&shell.threads, caps, now)
-        .into_iter()
-        .filter_map(|(thread, place)| {
-            let id = thread["id"].as_str()?.to_string();
-            let cwd = thread["worktreePath"]
-                .as_str()
-                .or_else(|| roots.get(thread["projectId"].as_str()?).copied())
-                .filter(|dir| std::path::Path::new(dir).is_dir())
-                .map(str::to_string);
-            Some(Want {
-                thread_id: id,
-                label: label(thread["title"].as_str().unwrap_or("Untitled")),
-                cwd,
-                updated_at: thread["updatedAt"].as_str().unwrap_or_default().to_string(),
-                place,
-            })
+    let want = |thread: &Value, place: Place, child: bool| {
+        let id = thread["id"].as_str()?.to_string();
+        let cwd = thread["worktreePath"]
+            .as_str()
+            .or_else(|| roots.get(thread["projectId"].as_str()?).copied())
+            .filter(|dir| std::path::Path::new(dir).is_dir())
+            .map(str::to_string);
+        let title = label(thread["title"].as_str().unwrap_or("Untitled"));
+        Some(Want {
+            thread_id: id,
+            label: if child { label(&format!("↳ {title}")) } else { title },
+            cwd,
+            updated_at: thread["updatedAt"].as_str().unwrap_or_default().to_string(),
+            place,
         })
-        .collect()
+    };
+    let by_id: HashMap<&str, &Value> = shell
+        .threads
+        .iter()
+        .filter_map(|t| Some((t["id"].as_str()?, t)))
+        .collect();
+    // Each shown subagent under the nearest ancestor that isn't one, in the shell's order.
+    let mut children: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for thread in shell.threads.iter().filter(|t| shown_subagent(t, now)) {
+        if let Some(root) = top_ancestor(thread, &by_id) {
+            children.entry(root).or_default().push(thread);
+        }
+    }
+    let mut out = Vec::new();
+    for (thread, place) in inbox.order(&shell.threads, caps, now) {
+        out.extend(want(thread, place, false));
+        let id = thread["id"].as_str().unwrap_or_default();
+        for child in children.remove(id).unwrap_or_default() {
+            out.extend(want(child, place, true));
+        }
+    }
+    out
+}
+
+/// A subagent gets a window while it works or needs you. A task delegated through T3 keeps
+/// its window until it settles, as a thread of its own would. A provider's own subagent at
+/// rest is history, which T3 shows inside the parent thread.
+fn shown_subagent(thread: &Value, now: i64) -> bool {
+    if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null()
+    {
+        return false;
+    }
+    let active = matches!(
+        t3term::tui::status_label(thread, now),
+        Some("Approval" | "Input" | "Working" | "Goal" | "Failed" | "Limited")
+    );
+    let delegated = thread["creationSource"] == "mcp"
+        || thread["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("thread:delegated-task:"));
+    let settled = thread["settledOverride"] == "settled" || !thread["settledAt"].is_null();
+    active || (delegated && !settled)
+}
+
+/// The thread a subagent works for at the top of its chain: the first ancestor that isn't a
+/// subagent itself. None for a broken chain.
+fn top_ancestor<'a>(thread: &Value, by_id: &HashMap<&'a str, &'a Value>) -> Option<&'a str> {
+    let mut parent = thread["lineage"]["parentThreadId"].as_str()?;
+    for _ in 0..16 {
+        let (id, t) = by_id.get_key_value(parent)?;
+        if t["lineage"]["relationshipToParent"] != "subagent" {
+            return Some(id);
+        }
+        parent = t["lineage"]["parentThreadId"].as_str()?;
+    }
+    None
 }
 
 /// A window label Rex accepts: one line, no control characters, at most 128 characters.
@@ -205,14 +258,19 @@ fn tagged(windows: &[Value]) -> Vec<(String, String)> {
 }
 
 /// Takes back windows t3rex made but lost track of, as after a script that failed partway,
-/// and returns the extra windows of a thread that has more than one, to close.
-fn adopt(windows: &[Value], state: &mut State) -> Vec<String> {
+/// and returns the extra windows of a thread that has more than one, to close. A window
+/// tagged with a thread T3 hasn't reported yet is left alone: a new-thread window tags itself
+/// before it launches, and becomes that thread's window once T3 has it.
+fn adopt(windows: &[Value], state: &mut State, known: &HashSet<String>) -> Vec<String> {
     let present: HashSet<&str> = windows
         .iter()
         .filter_map(|w| w["window_id"].as_str())
         .collect();
     let mut extra = Vec::new();
     for (window, thread) in tagged(windows) {
+        if !known.contains(&thread) && !state.windows.contains_key(&thread) {
+            continue;
+        }
         match state.windows.get(&thread) {
             Some(w) if w.window_id == window => {}
             Some(w) if present.contains(w.window_id.as_str()) => extra.push(window),
@@ -340,7 +398,7 @@ impl Syncer {
     }
 
     /// Brings the session in line with `wants`. Returns whether anything changed.
-    pub async fn reconcile(&mut self, wants: &[Want]) -> Result<bool> {
+    pub async fn reconcile(&mut self, wants: &[Want], known: &HashSet<String>) -> Result<bool> {
         let session = self.session().await?;
         let view = self.rex.inspect(&session).await?;
         // Rex leaves `windows` out of an empty session. An answer that isn't this session at all
@@ -350,7 +408,7 @@ impl Syncer {
         }
         let none = Vec::new();
         let windows = view["windows"].as_array().unwrap_or(&none);
-        let mut extra = adopt(windows, &mut self.state);
+        let mut extra = adopt(windows, &mut self.state, known);
         let present: Vec<(String, String)> = windows
             .iter()
             .filter_map(|w| {
@@ -450,7 +508,12 @@ pub async fn run(first: bool) -> Result<()> {
         dirty = false;
         let wants = wanted(&shell, &mut inbox, caps, t3::now_ms());
         let changed_wants = wants != last;
-        match syncer.reconcile(&wants).await {
+        let known: HashSet<String> = shell
+            .threads
+            .iter()
+            .filter_map(|t| t["id"].as_str().map(str::to_string))
+            .collect();
+        match syncer.reconcile(&wants, &known).await {
             Ok(changed) if changed || (changed_wants && wants.len() != last.len()) => {
                 let names: Vec<&str> = wants.iter().map(|w| w.label.as_str()).collect();
                 eprintln!("t3rex: {} thread(s): {}", wants.len(), names.join(" | "));
@@ -544,10 +607,62 @@ mod tests {
             tagged_window("w-b", "b"),
             json!({"window_id": "user", "label": "mine", "layers": [{"blocks": [{"label": "shell"}]}]}),
         ];
-        let extra = adopt(&windows, &mut state);
+        let known: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let extra = adopt(&windows, &mut state, &known);
         assert_eq!(extra, vec!["w-a2".to_string()]);
         assert_eq!(state.windows["b"].window_id, "w-b");
         assert!(!state.windows.values().any(|w| w.window_id == "user"));
+    }
+
+    #[test]
+    fn a_window_for_a_thread_t3_hasnt_reported_is_left_alone() {
+        let mut state = State::default();
+        let windows = vec![tagged_window("w-new", "launching")];
+        assert!(adopt(&windows, &mut state, &HashSet::new()).is_empty());
+        assert!(state.windows.is_empty());
+    }
+
+    fn thread(id: &str, extra: Value) -> Value {
+        let mut t = json!({
+            "id": id, "title": id, "projectId": "p", "archivedAt": null, "settledAt": null,
+            "updatedAt": "2026-10-30T00:00:00.000Z",
+            "lineage": {"parentThreadId": null, "relationshipToParent": null, "rootThreadId": id},
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            t[k] = v.clone();
+        }
+        t
+    }
+
+    #[test]
+    fn subagents_follow_their_parent() {
+        let child = |id: &str, parent: &str, extra: Value| {
+            let mut t = thread(id, extra);
+            t["lineage"] = json!({"parentThreadId": parent, "relationshipToParent": "subagent", "rootThreadId": parent});
+            t
+        };
+        let shell = ShellState {
+            threads: vec![
+                thread("a", json!({})),
+                thread("b", json!({})),
+                // A task delegated through T3, not settled: shown under a.
+                child("task", "a", json!({"creationSource": "mcp"})),
+                // Its own subagent, working: shown under a too.
+                child("deep", "task", json!({"creationSource": "provider", "activeRunId": "r", "latestRunId": "r", "activityRunStatus": "running"})),
+                // A provider's subagent at rest: history, not shown.
+                child("old", "b", json!({"creationSource": "provider", "activityRunStatus": "idle"})),
+                // A settled delegated task: not shown.
+                child("done", "b", json!({"creationSource": "mcp", "settledAt": "2026-10-30T00:00:00.000Z"})),
+            ],
+            ..ShellState::default()
+        };
+        let caps = t3term::tui::Capabilities::of(&json!({}));
+        let wants = wanted(&shell, &mut Inbox::default(), caps, 0);
+        let ids: Vec<&str> = wants.iter().map(|w| w.thread_id.as_str()).collect();
+        let a = ids.iter().position(|i| *i == "a").unwrap();
+        assert_eq!(&ids[a + 1..a + 3], &["task", "deep"]);
+        assert!(!ids.contains(&"old") && !ids.contains(&"done"));
+        assert_eq!(wants[a + 1].label, "↳ task");
     }
 
     #[test]
