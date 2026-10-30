@@ -1,0 +1,1071 @@
+//! t3term's own settings, kept in `~/.config/t3term/settings.json`.
+//!
+//! These are preferences, not state T3 owns, so a missing or unreadable file is not an error
+//! at start: it means the defaults. A save that fails is dropped for the same reason, since
+//! losing a preference must not interrupt what the user is doing. A save never puts the
+//! defaults over a file it couldn't read, though, so a failure loses only the change.
+//!
+//! Both calls touch the filesystem, so they run on a blocking thread and never hold up the
+//! event loop.
+//!
+//! Saves can overlap: each `t` press starts one, and so can another t3term. A save holds an
+//! exclusive lock on `settings.json.lock` from its read to its write, so it can't read a file
+//! another save is halfway through, or save over a change it never read. Nothing renames or
+//! removes the lock file, so every process locks the same one. The new text goes to
+//! `settings.json.tmp` and a rename puts it in place, so a reader without the lock, such as
+//! `load` or an older t3term, finds the old file or the new one and never part of either.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+
+use crate::discovery::home_dir;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Settings {
+    /// Show every reasoning block and tool call in full, including for finished runs.
+    pub verbose: bool,
+    /// Offer Build and Plan in the TUI, like the desktop's "Plan mode (legacy)" setting, which
+    /// shares the key. Off, the default, every message from the TUI runs in Build, and a thread
+    /// left in Plan goes back to Build with its next message. The CLI's `--plan` ignores it.
+    pub plan_mode_enabled: bool,
+    /// Move threads with a run under way out of the inbox into a Working shelf of their own,
+    /// like the desktop's "Working shelf" setting, which shares the key. The desktop starts
+    /// with it off. t3term starts with it on, so the sidebar shows what is working without an
+    /// edit to this file. Read at start, like `plan_mode_enabled`, so a change takes effect
+    /// when t3term starts again. `upgrade` says what a file from before that gets.
+    pub sidebar_working_shelf_enabled: bool,
+    /// Whether the Working shelf lists every thread in it or only its heading. `w` and a click
+    /// on the heading save it. The desktop keeps its own in the browser's storage, so this key
+    /// is t3term's.
+    pub sidebar_working_shelf_expanded: bool,
+    /// Whether the Done shelf, the finished runs nobody has looked at since, lists them or only
+    /// its heading. `d` and a click on the heading save it. The desktop has no Done shelf, so
+    /// this key is t3term's.
+    pub sidebar_done_shelf_expanded: bool,
+    /// Whether the Settled shelf lists its threads or only its heading. `e` and a click on the
+    /// heading save it. The desktop keeps its own in the browser's storage and starts it
+    /// closed, as t3term does, so this key is t3term's.
+    pub sidebar_settled_shelf_expanded: bool,
+    /// Whether the main sidebar is hidden. Ctrl+B and the toggle at the top left of the
+    /// conversation save it. The desktop writes its choice to a cookie that it never reads back,
+    /// so it opens with the sidebar shown each time, and this key is t3term's. A file without it
+    /// shows the sidebar.
+    pub sidebar_hidden: bool,
+    /// The main sidebar's width in columns, once a drag of its right edge or `[` and `]` in the
+    /// sidebar have chosen one. A file without it, and `0` in the sidebar, which removes it, give
+    /// the width t3term picks from the terminal's. The desktop keeps its width in pixels in the
+    /// browser's storage, under `chat_thread_sidebar_width`, so this key is t3term's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
+    /// The layout of the sidebar's shelves the file was last saved with. A file from before
+    /// version 1 has no key, which reads as 0 rather than as the default, and `upgrade` brings
+    /// it up to date. Every save writes the current version.
+    #[serde(default)]
+    pub sidebar_shelves_version: u32,
+    /// The color scheme: the system's appearance, or light or dark whatever the system shows.
+    /// Alt+Shift+A saves it, as the desktop's Cmd+Option+Shift+A saves its own under
+    /// `t3code:theme-appearance-mode` in the browser's storage, so this key is t3term's. A file
+    /// without it, or with a value this build doesn't know, draws dark.
+    pub appearance_mode: AppearanceMode,
+    /// The theme: T3 Code's own colors or one of the desktop's built-in themes, each drawn in
+    /// the half the color scheme shows. The desktop keeps its choice under `t3code:theme` in the
+    /// browser's storage, so this key is t3term's. Read at start. A file without it, or with a
+    /// name this build doesn't know, draws T3 Code's.
+    pub theme: ThemeName,
+}
+
+/// T3 Code's own theme or one of the desktop's built-in themes, in the order the desktop lists
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum ThemeName {
+    /// The desktop's stock colors. The desktop has no id for them, and its mobile app calls
+    /// them `t3-code`.
+    #[default]
+    #[serde(rename = "t3-code")]
+    T3Code,
+    #[serde(rename = "t3-chat")]
+    T3Chat,
+    #[serde(rename = "grove")]
+    Grove,
+    #[serde(rename = "ocean")]
+    Ocean,
+    #[serde(rename = "ember")]
+    Ember,
+    #[serde(rename = "iris")]
+    Iris,
+}
+
+impl ThemeName {
+    pub const ALL: [ThemeName; 6] = [
+        ThemeName::T3Code,
+        ThemeName::T3Chat,
+        ThemeName::Grove,
+        ThemeName::Ocean,
+        ThemeName::Ember,
+        ThemeName::Iris,
+    ];
+
+    /// The id the desktop gives the theme, which the file saves.
+    pub fn id(self) -> &'static str {
+        match self {
+            ThemeName::T3Code => "t3-code",
+            ThemeName::T3Chat => "t3-chat",
+            ThemeName::Grove => "grove",
+            ThemeName::Ocean => "ocean",
+            ThemeName::Ember => "ember",
+            ThemeName::Iris => "iris",
+        }
+    }
+
+    /// Its name, as the desktop shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeName::T3Code => "T3 Code",
+            ThemeName::T3Chat => "T3 Chat",
+            ThemeName::Grove => "Grove",
+            ThemeName::Ocean => "Ocean",
+            ThemeName::Ember => "Ember",
+            ThemeName::Iris => "Iris",
+        }
+    }
+}
+
+/// Reads anything but the six ids as T3 Code's, as `AppearanceMode` reads an unknown mode.
+impl<'de> Deserialize<'de> for ThemeName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(ThemeName::ALL
+            .into_iter()
+            .find(|name| value.as_str() == Some(name.id()))
+            .unwrap_or_default())
+    }
+}
+
+/// Which appearance the TUI draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    /// The system's: light or dark as macOS shows, and dark on other systems.
+    System,
+    Light,
+    /// The desktop starts on System. t3term starts dark, as it drew before it had a choice.
+    #[default]
+    Dark,
+}
+
+impl AppearanceMode {
+    /// The mode after this one, in the order the desktop's key cycles them.
+    pub fn next(self) -> AppearanceMode {
+        match self {
+            AppearanceMode::System => AppearanceMode::Light,
+            AppearanceMode::Light => AppearanceMode::Dark,
+            AppearanceMode::Dark => AppearanceMode::System,
+        }
+    }
+
+    /// Its name, as the desktop shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            AppearanceMode::System => "System",
+            AppearanceMode::Light => "Light",
+            AppearanceMode::Dark => "Dark",
+        }
+    }
+}
+
+/// Reads anything but the three names as the default, so a value from a later build or a hand
+/// edit doesn't lose the rest of the file.
+impl<'de> Deserialize<'de> for AppearanceMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match serde_json::Value::deserialize(deserializer)?.as_str() {
+                Some("system") => AppearanceMode::System,
+                Some("light") => AppearanceMode::Light,
+                Some("dark") => AppearanceMode::Dark,
+                _ => AppearanceMode::default(),
+            },
+        )
+    }
+}
+
+/// The version of the sidebar's shelves this build saves. Version 1 has the Working, Done and
+/// Settled shelves, each with its own key.
+const SHELVES_VERSION: u32 = 1;
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            verbose: false,
+            plan_mode_enabled: false,
+            sidebar_working_shelf_enabled: true,
+            sidebar_working_shelf_expanded: true,
+            sidebar_done_shelf_expanded: true,
+            sidebar_settled_shelf_expanded: false,
+            sidebar_hidden: false,
+            sidebar_width: None,
+            sidebar_shelves_version: SHELVES_VERSION,
+            appearance_mode: AppearanceMode::default(),
+            theme: ThemeName::default(),
+        }
+    }
+}
+
+impl Settings {
+    /// Brings a file from before version 1 of the shelves up to it. Every save before then
+    /// wrote both Working keys, so a `false` there is almost always the old default rather
+    /// than a choice. A file with the shelf off gets it on and open, as a new file has it.
+    /// Nothing in the TUI turned the shelf on, so a file with it on was edited by hand, and
+    /// whether it is open came from `w`: both stay. The next save writes the version, so a
+    /// choice made after that stays too. A file that is never saved upgrades the same way at
+    /// each start.
+    fn upgrade(mut self) -> Self {
+        if self.sidebar_shelves_version < SHELVES_VERSION {
+            if !self.sidebar_working_shelf_enabled {
+                self.sidebar_working_shelf_enabled = true;
+                self.sidebar_working_shelf_expanded = true;
+            }
+            self.sidebar_shelves_version = SHELVES_VERSION;
+        }
+        self
+    }
+}
+
+/// The settings in `raw`, upgraded to the current shelves.
+fn parse(raw: &[u8]) -> serde_json::Result<Settings> {
+    serde_json::from_slice(raw).map(Settings::upgrade)
+}
+
+fn path() -> PathBuf {
+    home_dir()
+        .join(".config")
+        .join("t3term")
+        .join("settings.json")
+}
+
+/// `path` with `suffix` added to its file name, so the result sits in the same directory.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn read(path: &Path) -> Settings {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| parse(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// What a change starts from: the file's settings, or the defaults when there is no file. A
+/// file that exists but doesn't read or parse is an error rather than the defaults, because
+/// saving the change would put the defaults over whatever it holds.
+fn read_for_change(path: &Path) -> io::Result<Settings> {
+    match std::fs::read(path) {
+        Ok(raw) => Ok(parse(&raw)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Waits for the exclusive lock every save takes. The kernel releases it when the returned
+/// file closes or its process exits, so a save that dies can't leave it held.
+fn lock(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(beside(path, ".lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// The file a save replaces: `path`, or the file a symlink there names. Links are followed one
+/// at a time, so a link to a file that doesn't exist yet still names it. Replacing that file
+/// keeps the link, such as one into a dotfiles repository, as writing in place did. A loop of
+/// links is an error, so a save can't replace one of them with a plain file.
+fn follow_links(path: &Path) -> io::Result<PathBuf> {
+    let mut target = path.to_path_buf();
+    // macOS follows at most 32 links in a path, MAXSYMLINKS in <sys/param.h>.
+    for _ in 0..32 {
+        let Ok(link) = std::fs::read_link(&target) else {
+            return Ok(target);
+        };
+        // A relative link is relative to the directory that holds it.
+        target = match target.parent() {
+            Some(dir) => dir.join(link),
+            None => link,
+        };
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+/// Replaces the file at `path` with `settings` in one step: the text goes to a temporary file
+/// in the same directory, then a rename moves it over the old one. A temporary file left by a
+/// save that died partway is removed first, and so is this save's own if it fails.
+fn write(path: &Path, settings: &Settings) -> io::Result<()> {
+    let target = follow_links(path)?;
+    let temp = beside(&target, ".tmp");
+    let text = serde_json::to_string_pretty(settings)? + "\n";
+    let _ = std::fs::remove_file(&temp);
+    let saved = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temp, &target));
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    saved
+}
+
+/// Applies `change` to what the file at `path` holds now, rather than to the values read at
+/// start, so a setting edited by hand while t3term runs survives a change made in the TUI. The
+/// lock is held from the read to the write, so two changes can't start from the same file and
+/// each save over the other.
+fn update_at(path: &Path, change: impl FnOnce(&mut Settings)) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let _lock = lock(path)?;
+    let mut settings = read_for_change(path)?;
+    change(&mut settings);
+    write(path, &settings)
+}
+
+type Change = Box<dyn FnOnce(&mut Settings) + Send>;
+
+/// Changes waiting to be saved, oldest first. Each `update` adds one and starts a blocking
+/// thread, and the runtime may run those threads in any order. Whichever runs first saves every
+/// change waiting, oldest first, so pressing `t` twice can't leave the first press's value.
+struct Queue {
+    changes: Mutex<Vec<Change>>,
+    /// Held from taking the changes until they're saved, so a later batch can't land first.
+    saving: Mutex<()>,
+}
+
+impl Queue {
+    const fn new() -> Self {
+        Self {
+            changes: Mutex::new(Vec::new()),
+            saving: Mutex::new(()),
+        }
+    }
+
+    /// Takes the `changes` lock only to push, so it is safe on the event loop.
+    fn push(&self, change: Change) {
+        self.changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(change);
+    }
+
+    /// Saves every change waiting in one update, or does nothing when none is. A failed save
+    /// drops them, like any failed save.
+    fn save(&self, path: &Path) {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = self.changes.lock().unwrap_or_else(|e| e.into_inner());
+        let changes = std::mem::take(&mut *waiting);
+        drop(waiting);
+        if changes.is_empty() {
+            return;
+        }
+        let _ = update_at(path, |settings| {
+            for change in changes {
+                change(settings);
+            }
+        });
+    }
+}
+
+#[cfg(not(test))]
+static QUEUE: Queue = Queue::new();
+
+#[cfg(test)]
+thread_local! {
+    /// What `update` has saved on this thread in a test build, starting from the defaults.
+    static SAVED_IN_TEST: std::cell::RefCell<Settings> =
+        std::cell::RefCell::new(Settings::default());
+}
+
+/// The settings `update` has saved on this thread in a test build.
+#[cfg(test)]
+pub(crate) fn saved_in_test() -> Settings {
+    SAVED_IN_TEST.with_borrow(Settings::clone)
+}
+
+impl Settings {
+    /// The saved settings, or the defaults when there is no readable file.
+    pub async fn load() -> Self {
+        tokio::task::spawn_blocking(|| read(&path()))
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Changes the saved settings on a blocking thread, ignoring a filesystem that won't take
+    /// them. The caller does not wait: a preference is not worth a pause.
+    ///
+    /// A test build applies the change to `saved_in_test` instead, so a test that presses a key
+    /// the TUI saves never writes the user's file. The tests below save through `update_at`
+    /// and `Queue`, which take a path.
+    pub fn update(change: impl FnOnce(&mut Settings) + Send + 'static) {
+        #[cfg(test)]
+        SAVED_IN_TEST.with_borrow_mut(change);
+        #[cfg(not(test))]
+        {
+            QUEUE.push(Box::new(change));
+            tokio::task::spawn_blocking(|| QUEUE.save(&path()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Which file `path` names, or `None` when nothing is there.
+    #[cfg(unix)]
+    fn identity(path: &Path) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        Some((metadata.dev(), metadata.ino()))
+    }
+
+    /// What the file at `path` holds, as JSON.
+    fn saved_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn unknown_and_missing_fields_fall_back_to_the_defaults() {
+        // A file from a later version, and one from an earlier one.
+        let later = parse(br#"{"verbose": true, "future": 3}"#).unwrap();
+        assert!(later.verbose);
+        let earlier = parse(b"{}").unwrap();
+        assert_eq!(earlier, Settings::default());
+        assert!(!earlier.verbose);
+        // A file from before plan mode was a setting hides Build and Plan, as the desktop does.
+        let before_plan = parse(br#"{"verbose": true}"#).unwrap();
+        assert!(!before_plan.plan_mode_enabled);
+        // A file that holds something else entirely fails, and `load` then uses the defaults.
+        assert!(parse(br#""verbose""#).is_err());
+    }
+
+    #[test]
+    fn plan_mode_uses_the_desktops_key() {
+        let on = parse(br#"{"planModeEnabled": true}"#).unwrap();
+        assert!(on.plan_mode_enabled);
+        assert!(!on.verbose);
+        let saved = serde_json::to_value(&on).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({
+                "verbose": false,
+                "planModeEnabled": true,
+                "sidebarWorkingShelfEnabled": true,
+                "sidebarWorkingShelfExpanded": true,
+                "sidebarDoneShelfExpanded": true,
+                "sidebarSettledShelfExpanded": false,
+                "sidebarHidden": false,
+                "sidebarShelvesVersion": 1,
+                "appearanceMode": "dark",
+                "theme": "t3-code",
+            })
+        );
+    }
+
+    #[test]
+    fn the_appearance_mode_reads_leniently() {
+        let mode = |raw: &str| parse(raw.as_bytes()).unwrap().appearance_mode;
+        assert_eq!(mode("{}"), AppearanceMode::Dark);
+        assert_eq!(
+            mode(r#"{"appearanceMode": "system"}"#),
+            AppearanceMode::System
+        );
+        assert_eq!(
+            mode(r#"{"appearanceMode": "light"}"#),
+            AppearanceMode::Light
+        );
+        assert_eq!(mode(r#"{"appearanceMode": "dark"}"#), AppearanceMode::Dark);
+        // A value this build doesn't know draws dark and keeps the rest of the file.
+        for unknown in [
+            r#""sepia""#,
+            r#""Light""#,
+            "null",
+            "3",
+            r#"{"mode": "light"}"#,
+        ] {
+            let raw = format!(r#"{{"verbose": true, "appearanceMode": {unknown}}}"#);
+            let read = parse(raw.as_bytes()).unwrap();
+            assert_eq!(read.appearance_mode, AppearanceMode::Dark, "{unknown}");
+            assert!(read.verbose, "{unknown}");
+        }
+        // Each saves as the name it reads back from.
+        for mode in [
+            AppearanceMode::System,
+            AppearanceMode::Light,
+            AppearanceMode::Dark,
+        ] {
+            let saved = serde_json::to_value(mode).unwrap();
+            assert_eq!(saved, mode.label().to_lowercase());
+            assert_eq!(
+                serde_json::from_value::<AppearanceMode>(saved).unwrap(),
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn the_theme_reads_leniently() {
+        let theme = |raw: &str| parse(raw.as_bytes()).unwrap().theme;
+        assert_eq!(theme("{}"), ThemeName::T3Code);
+        assert_eq!(theme(r#"{"theme": "grove"}"#), ThemeName::Grove);
+        assert_eq!(theme(r#"{"theme": "t3-chat"}"#), ThemeName::T3Chat);
+        // A name this build doesn't know draws T3 Code's and keeps the rest of the file. The
+        // desktop reads the ids its older builds saved, such as `t3-grove`, as their themes,
+        // but no t3term saved those.
+        for unknown in [r#""t3-grove""#, r#""Grove""#, r#""light""#, "null", "7"] {
+            let raw = format!(r#"{{"verbose": true, "theme": {unknown}}}"#);
+            let read = parse(raw.as_bytes()).unwrap();
+            assert_eq!(read.theme, ThemeName::T3Code, "{unknown}");
+            assert!(read.verbose, "{unknown}");
+        }
+        // Each saves as the id it reads back from, in the desktop's order.
+        let ids: Vec<_> = ThemeName::ALL.iter().map(|name| name.id()).collect();
+        assert_eq!(
+            ids,
+            ["t3-code", "t3-chat", "grove", "ocean", "ember", "iris"]
+        );
+        for name in ThemeName::ALL {
+            let saved = serde_json::to_value(name).unwrap();
+            assert_eq!(saved, name.id());
+            assert_eq!(serde_json::from_value::<ThemeName>(saved).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn a_new_file_opens_working_and_done_and_closes_settled() {
+        let fresh = Settings::default();
+        assert!(fresh.sidebar_working_shelf_enabled);
+        assert!(fresh.sidebar_working_shelf_expanded);
+        assert!(fresh.sidebar_done_shelf_expanded);
+        assert!(!fresh.sidebar_settled_shelf_expanded);
+        assert_eq!(fresh.sidebar_shelves_version, SHELVES_VERSION);
+
+        // No file reads as a new one, and so does one that doesn't parse.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        assert_eq!(read(&path), fresh);
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(read(&path), fresh);
+
+        // The first change writes every shelf's key and the version.
+        std::fs::remove_file(&path).unwrap();
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+        let saved = saved_json(&path);
+        assert_eq!(saved["sidebarWorkingShelfEnabled"], true);
+        assert_eq!(saved["sidebarWorkingShelfExpanded"], true);
+        assert_eq!(saved["sidebarDoneShelfExpanded"], true);
+        assert_eq!(saved["sidebarSettledShelfExpanded"], false);
+        assert_eq!(saved["sidebarShelvesVersion"], 1);
+    }
+
+    #[test]
+    fn a_file_from_before_the_shelves_gets_working_once() {
+        // What every save before version 1 wrote, for a user who never turned the shelf on.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let legacy = r#"{
+            "verbose": true,
+            "planModeEnabled": false,
+            "sidebarWorkingShelfEnabled": false,
+            "sidebarWorkingShelfExpanded": false,
+            "sidebarHidden": false,
+            "sidebarWidth": 30
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let upgraded = Settings {
+            verbose: true,
+            sidebar_width: Some(30),
+            ..Settings::default()
+        };
+        assert_eq!(read(&path), upgraded);
+        // Reading writes nothing, so the next start upgrades the file the same way.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        assert_eq!(read(&path), upgraded);
+
+        // `w` closes Working and `e` opens Settled. The first save writes the version, so
+        // both choices are still there at the next start.
+        update_at(&path, |settings| {
+            settings.sidebar_working_shelf_expanded = false;
+        })
+        .unwrap();
+        update_at(&path, |settings| {
+            settings.sidebar_settled_shelf_expanded = true;
+        })
+        .unwrap();
+        let chosen = Settings {
+            sidebar_working_shelf_expanded: false,
+            sidebar_settled_shelf_expanded: true,
+            ..upgraded
+        };
+        assert_eq!(read(&path), chosen);
+        assert_eq!(saved_json(&path)["sidebarShelvesVersion"], 1);
+        assert_eq!(saved_json(&path)["sidebarWorkingShelfExpanded"], false);
+
+        // Working turned off by hand once the file has the version stays off, through a save.
+        std::fs::write(
+            &path,
+            r#"{"sidebarWorkingShelfEnabled": false, "sidebarShelvesVersion": 1}"#,
+        )
+        .unwrap();
+        assert!(!read(&path).sidebar_working_shelf_enabled);
+        update_at(&path, |settings| settings.verbose = false).unwrap();
+        assert!(!read(&path).sidebar_working_shelf_enabled);
+
+        // A file from before version 1 with the shelf turned on by hand keeps whether `w` left
+        // it open.
+        std::fs::write(
+            &path,
+            r#"{"sidebarWorkingShelfEnabled": true, "sidebarWorkingShelfExpanded": false}"#,
+        )
+        .unwrap();
+        let kept = read(&path);
+        assert!(kept.sidebar_working_shelf_enabled);
+        assert!(!kept.sidebar_working_shelf_expanded);
+        assert_eq!(kept.sidebar_shelves_version, SHELVES_VERSION);
+    }
+
+    #[test]
+    fn opening_and_closing_a_shelf_keeps_the_other_settings() {
+        // Plan mode turned on by hand, then `w`, `d` and `t` pressed in the TUI.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"planModeEnabled": true, "sidebarShelvesVersion": 1}"#,
+        )
+        .unwrap();
+        update_at(&path, |settings| {
+            settings.sidebar_working_shelf_expanded = false;
+        })
+        .unwrap();
+        update_at(&path, |settings| {
+            settings.sidebar_done_shelf_expanded = false;
+        })
+        .unwrap();
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+        assert_eq!(
+            read(&path),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: true,
+                sidebar_working_shelf_enabled: true,
+                sidebar_working_shelf_expanded: false,
+                sidebar_done_shelf_expanded: false,
+                sidebar_settled_shelf_expanded: false,
+                sidebar_hidden: false,
+                sidebar_width: None,
+                sidebar_shelves_version: 1,
+                appearance_mode: AppearanceMode::Dark,
+                theme: ThemeName::T3Code,
+            }
+        );
+
+        // Opening Working again leaves the switch and the other shelves alone.
+        update_at(&path, |settings| {
+            settings.sidebar_working_shelf_expanded = true;
+        })
+        .unwrap();
+        let saved = saved_json(&path);
+        assert_eq!(saved["sidebarWorkingShelfEnabled"], true);
+        assert_eq!(saved["sidebarWorkingShelfExpanded"], true);
+        assert_eq!(saved["sidebarDoneShelfExpanded"], false);
+        assert_eq!(saved["sidebarSettledShelfExpanded"], false);
+        assert_eq!(saved["planModeEnabled"], true);
+    }
+
+    #[test]
+    fn the_sidebar_starts_shown_and_its_key_is_t3terms() {
+        // A file from before the key, an empty one and one from a later version show it.
+        for raw in [
+            r#"{"verbose": true, "planModeEnabled": true}"#,
+            "{}",
+            r#"{"future": 3}"#,
+        ] {
+            let settings: Settings = serde_json::from_str(raw).unwrap();
+            assert!(!settings.sidebar_hidden, "{raw}");
+        }
+        assert!(!Settings::default().sidebar_hidden);
+        let hidden = parse(br#"{"sidebarHidden": true}"#).unwrap();
+        assert_eq!(
+            hidden,
+            Settings {
+                sidebar_hidden: true,
+                ..Settings::default()
+            }
+        );
+        let saved = serde_json::to_value(&hidden).unwrap();
+        assert_eq!(saved["sidebarHidden"], true);
+    }
+
+    #[test]
+    fn hiding_the_sidebar_keeps_the_other_settings() {
+        // Every other setting changed from its default by hand, then Ctrl+B pressed in the TUI.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let others = Settings {
+            verbose: true,
+            plan_mode_enabled: true,
+            sidebar_working_shelf_enabled: false,
+            sidebar_working_shelf_expanded: false,
+            sidebar_done_shelf_expanded: false,
+            sidebar_settled_shelf_expanded: true,
+            sidebar_hidden: false,
+            sidebar_width: Some(42),
+            sidebar_shelves_version: SHELVES_VERSION,
+            appearance_mode: AppearanceMode::Light,
+            theme: ThemeName::Grove,
+        };
+        std::fs::write(&path, serde_json::to_string(&others).unwrap()).unwrap();
+        update_at(&path, |settings| settings.sidebar_hidden = true).unwrap();
+        let hidden = Settings {
+            sidebar_hidden: true,
+            ..others
+        };
+        assert_eq!(read(&path), hidden);
+
+        // Ctrl+B twice more, showing it and hiding it, with the second press's thread started
+        // first. The first save takes both, in the order they were pressed.
+        let show: Change = Box::new(|settings: &mut Settings| settings.sidebar_hidden = false);
+        let hide: Change = Box::new(|settings: &mut Settings| settings.sidebar_hidden = true);
+        let queue = Queue::new();
+        queue.push(show);
+        queue.push(hide);
+        queue.save(&path);
+        queue.save(&path);
+        assert_eq!(read(&path), hidden, "the presses were saved out of order");
+
+        // Showing it again leaves the rest alone.
+        update_at(&path, |settings| settings.sidebar_hidden = false).unwrap();
+        assert_eq!(read(&path), others);
+    }
+
+    #[test]
+    fn the_sidebar_width_starts_unset_and_its_key_is_t3terms() {
+        // A file from before the key, an empty one, one from a later version and a null leave
+        // the width to the terminal.
+        for raw in [
+            r#"{"verbose": true, "sidebarHidden": true}"#,
+            "{}",
+            r#"{"future": 3}"#,
+            r#"{"sidebarWidth": null}"#,
+        ] {
+            let settings: Settings = serde_json::from_str(raw).unwrap();
+            assert_eq!(settings.sidebar_width, None, "{raw}");
+        }
+        let chosen = parse(br#"{"sidebarWidth": 42}"#).unwrap();
+        assert_eq!(
+            chosen,
+            Settings {
+                sidebar_width: Some(42),
+                ..Settings::default()
+            }
+        );
+        assert_eq!(serde_json::to_value(&chosen).unwrap()["sidebarWidth"], 42);
+        // Unset, the key stays out of the file, so saving another setting writes what it did.
+        let unset = serde_json::to_value(Settings::default()).unwrap();
+        assert!(unset.get("sidebarWidth").is_none(), "{unset}");
+        // A width that isn't a whole number of columns fails like a wrong value for any other
+        // key, and `load` then uses the defaults.
+        for raw in [r#"{"sidebarWidth": -1}"#, r#"{"sidebarWidth": 42.5}"#] {
+            assert!(serde_json::from_str::<Settings>(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn resizing_the_sidebar_keeps_the_other_settings() {
+        // Every other setting changed from its default by hand, then the sidebar's edge dragged
+        // in the TUI.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let others = Settings {
+            verbose: true,
+            plan_mode_enabled: true,
+            sidebar_working_shelf_enabled: false,
+            sidebar_working_shelf_expanded: false,
+            sidebar_done_shelf_expanded: false,
+            sidebar_settled_shelf_expanded: true,
+            sidebar_hidden: true,
+            sidebar_width: None,
+            sidebar_shelves_version: SHELVES_VERSION,
+            appearance_mode: AppearanceMode::System,
+            theme: ThemeName::Iris,
+        };
+        std::fs::write(&path, serde_json::to_string(&others).unwrap()).unwrap();
+        update_at(&path, |settings| settings.sidebar_width = Some(42)).unwrap();
+        let resized = Settings {
+            sidebar_width: Some(42),
+            ..others
+        };
+        assert_eq!(read(&path), resized);
+
+        // `]` and then `0` pressed in the sidebar, with the second press's thread started first.
+        // The first save takes both, in the order they were pressed, so the width ends unset.
+        let widen: Change = Box::new(|settings: &mut Settings| settings.sidebar_width = Some(44));
+        let reset: Change = Box::new(|settings: &mut Settings| settings.sidebar_width = None);
+        let queue = Queue::new();
+        queue.push(widen);
+        queue.push(reset);
+        queue.save(&path);
+        queue.save(&path);
+        assert_eq!(read(&path), others, "the presses were saved out of order");
+        // The reset takes the key out of the file rather than writing a null.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("sidebarWidth").is_none(), "{saved}");
+        assert_eq!(saved["sidebarHidden"], true);
+    }
+
+    #[test]
+    fn an_update_in_a_test_build_stays_on_its_thread() {
+        Settings::update(|settings| settings.sidebar_hidden = true);
+        assert!(saved_in_test().sidebar_hidden);
+        let elsewhere = thread::spawn(saved_in_test).join().unwrap();
+        assert!(!elsewhere.sidebar_hidden, "another thread saw the change");
+    }
+
+    #[test]
+    fn a_change_keeps_what_the_file_holds_now() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("t3term").join("settings.json");
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+        assert_eq!(
+            read(&path),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: false,
+                ..Settings::default()
+            },
+            "a missing file and its directory start from the defaults"
+        );
+
+        // Plan mode turned on by hand while the TUI runs, then verbose toggled off in it.
+        std::fs::write(&path, r#"{"verbose": true, "planModeEnabled": true}"#).unwrap();
+        update_at(&path, |settings| settings.verbose = false).unwrap();
+        assert_eq!(
+            read(&path),
+            Settings {
+                verbose: false,
+                plan_mode_enabled: true,
+                ..Settings::default()
+            }
+        );
+    }
+
+    #[test]
+    fn an_update_waits_for_one_under_way() {
+        // Two saves that overlap, from two t3term processes or two blocking threads in one.
+        // The first has read the file and is about to turn Plan mode on when the second starts.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("t3term").join("settings.json");
+        let (has_read, wait_for_read) = mpsc::channel();
+        let (go, wait_for_go) = mpsc::channel();
+        let first = thread::spawn({
+            let path = path.clone();
+            move || {
+                update_at(&path, |settings| {
+                    has_read.send(()).unwrap();
+                    wait_for_go.recv().unwrap();
+                    settings.plan_mode_enabled = true;
+                })
+            }
+        });
+        wait_for_read.recv().unwrap();
+        let (finished, wait_for_second) = mpsc::channel();
+        let second = thread::spawn({
+            let path = path.clone();
+            move || {
+                let saved = update_at(&path, |settings| settings.verbose = true);
+                finished.send(()).unwrap();
+                saved
+            }
+        });
+        // Without the lock, the second reads, changes and saves inside this wait, and the first
+        // then saves over it. With the lock, the second can't read until the first has saved,
+        // so the wait runs out, and the result doesn't depend on how long the wait is.
+        let _ = wait_for_second.recv_timeout(Duration::from_millis(300));
+        go.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert_eq!(
+            read(&path),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: true,
+                ..Settings::default()
+            },
+            "one save was lost to the other"
+        );
+    }
+
+    #[test]
+    fn an_update_leaves_a_file_it_cannot_parse_alone() {
+        // What a save that writes in place, as t3term's did before, leaves while it runs: the
+        // file emptied, then cut short. The whole file would have Plan mode on.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        for unfinished in ["", r#"{"verbose": true, "planModeEna"#] {
+            std::fs::write(&path, unfinished).unwrap();
+            let saved = update_at(&path, |settings| settings.verbose = false);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                unfinished,
+                "an update saved the defaults over a file it couldn't parse"
+            );
+            assert!(saved.is_err());
+        }
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_in_one_step() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("t3term");
+        let path = dir.join("settings.json");
+        update_at(&path, |settings| settings.plan_mode_enabled = true).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        // A reader that opened the file just before the save, such as another t3term starting,
+        // and a temporary file from a save that died partway.
+        let mut reader = std::fs::File::open(&path).unwrap();
+        std::fs::write(dir.join("settings.json.tmp"), r#"{"verb"#).unwrap();
+        #[cfg(unix)]
+        let lock_file = identity(&dir.join("settings.json.lock"));
+
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, before, "the reader saw the file change under it");
+        assert_eq!(
+            read(&path),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: true,
+                ..Settings::default()
+            }
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["settings.json", "settings.json.lock"]);
+        // Every process has to lock the same file, so saves leave the lock file where it is.
+        #[cfg(unix)]
+        assert_eq!(identity(&dir.join("settings.json.lock")), lock_file);
+    }
+
+    #[test]
+    fn changes_save_in_the_order_they_were_made() {
+        // `t` pressed twice, turning verbose on and then off, and the runtime starts the second
+        // press's thread before the first's.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let queue = Queue::new();
+        queue.push(Box::new(|settings: &mut Settings| settings.verbose = true));
+        queue.push(Box::new(|settings: &mut Settings| settings.verbose = false));
+        queue.save(&path);
+        queue.save(&path);
+        assert!(!read(&path).verbose, "the first press was saved last");
+    }
+
+    #[test]
+    fn a_save_that_fails_keeps_the_saved_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let saved = r#"{"verbose": true, "planModeEnabled": true}"#;
+        std::fs::write(&path, saved).unwrap();
+        // A directory where the lock file goes, so the save can't lock, then one where the
+        // temporary file goes, so it can't write.
+        for blocked in ["settings.json.lock", "settings.json.tmp"] {
+            let in_the_way = home.path().join(blocked);
+            std::fs::create_dir(&in_the_way).unwrap();
+            let result = update_at(&path, |settings| settings.plan_mode_enabled = false);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "{blocked}");
+            assert!(result.is_err(), "{blocked}");
+            std::fs::remove_dir(&in_the_way).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_settings_file_stays_a_link() {
+        // settings.json linked into a dotfiles repository.
+        let home = tempfile::tempdir().unwrap();
+        let dotfiles = home.path().join("dotfiles");
+        let config = home.path().join("t3term");
+        std::fs::create_dir(&dotfiles).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        let path = config.join("settings.json");
+
+        // An absolute link to a file that exists.
+        let existing = dotfiles.join("settings.json");
+        std::fs::write(&existing, r#"{"planModeEnabled": true}"#).unwrap();
+        std::os::unix::fs::symlink(&existing, &path).unwrap();
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().is_symlink(),
+            "the save replaced the link to an existing file"
+        );
+        assert_eq!(
+            read(&existing),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: true,
+                ..Settings::default()
+            }
+        );
+
+        // A relative link to a file that doesn't exist yet, which the save creates.
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("../dotfiles/new.json", &path).unwrap();
+        update_at(&path, |settings| settings.verbose = true).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().is_symlink(),
+            "the save replaced the link to a missing file"
+        );
+        assert_eq!(
+            read(&dotfiles.join("new.json")),
+            Settings {
+                verbose: true,
+                plan_mode_enabled: false,
+                ..Settings::default()
+            }
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&dotfiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["new.json", "settings.json"]);
+    }
+
+    #[test]
+    fn the_file_sits_under_the_users_config_directory() {
+        let path = path();
+        assert!(path.ends_with(".config/t3term/settings.json"), "{path:?}");
+    }
+}
