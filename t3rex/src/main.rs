@@ -161,8 +161,30 @@ async fn terminated() -> i32 {
 async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
     let thread = target.resolve().await?;
     let client = t3::connect(true).await?;
-    client.dispatch(t3::command(&thread, &action)).await?;
-    Ok(())
+    let first = client.dispatch(t3::command(&thread, &action)).await;
+    // T3 won't settle or archive a thread mid-run. Settling says the thread is finished, so
+    // stop the run, wait for T3 to see it stop, and try again.
+    let running = matches!(&first, Err(e) if e.to_string().contains("still running"));
+    if !(running && matches!(action, Lifecycle::Settle | Lifecycle::Archive)) {
+        return first.map(drop);
+    }
+    let run_id = |shell: &t3term::projection::ShellState| {
+        t3term::tui::find_thread_in(shell, &thread)
+            .and_then(|t| t["activeRunId"].as_str())
+            .map(str::to_string)
+    };
+    if let Some(run) = run_id(&client.shell().await?) {
+        client
+            .dispatch(serde_json::json!({"type": "run.interrupt", "threadId": thread, "runId": run, "reason": "Settled from Rex"}))
+            .await?;
+    }
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if run_id(&client.shell().await?).is_none() {
+            break;
+        }
+    }
+    client.dispatch(t3::command(&thread, &action)).await.map(drop)
 }
 
 async fn run(cli: Cli) -> Result<()> {

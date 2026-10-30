@@ -348,7 +348,7 @@ pub async fn run(first: bool) -> Result<()> {
         let wants = wanted(&shell, &mut inbox, caps, t3::now_ms());
         let changed_wants = wants != last;
         match syncer.reconcile(&wants).await {
-            Ok(changed) if changed || changed_wants => {
+            Ok(changed) if changed || (changed_wants && wants.len() != last.len()) => {
                 let names: Vec<&str> = wants.iter().map(|w| w.label.as_str()).collect();
                 eprintln!("t3rex: {} thread(s): {}", wants.len(), names.join(" | "));
             }

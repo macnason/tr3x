@@ -163,7 +163,7 @@ pub async fn install() -> Result<()> {
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let state = State::load();
-        if let Some(session) = state.session_id {
+        if let Some(session) = state.session_id.filter(|_| !state.windows.is_empty()) {
             let count = state.windows.len();
             step(true, "Synced", &format!("{count} thread(s) in the \"{}\" session", crate::sync::SESSION_LABEL));
             let _ = rex.client_do("session.select", &[("session_id", &session)]).await;
