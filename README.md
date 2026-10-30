@@ -62,10 +62,10 @@ the binary and its state.
 
 | | |
 |---|---|
-| Reply | Type in the Reply pane, Enter to send. A message to a running thread queues. Alt+Enter or Ctrl+J for a new line. Typing in the conversation pane moves you to Reply. |
-| Approve | With a pending approval and an empty input: `a` accept, `s` accept for the session, `d` decline. |
+| Reply | Type in the Reply pane, Enter to send. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation pane moves you to Reply. Sending brings the conversation back to the bottom. A send that fails keeps your text. |
+| Approve | With an approval pending: `a` then Enter accepts, `s` then Enter accepts for the session, `d` then Enter declines. Anything else you type is a reply. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
-| Commands | `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model haiku`, `/effort high`, `/mode ask`, `/mode edits`, `/mode full`, `/open` |
+| Commands | `/steer …`, `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model haiku`, `/effort high`, `/mode ask`, `/mode edits`, `/mode full`, `/open` |
 | Keys | ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code |
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
 

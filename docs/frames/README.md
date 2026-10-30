@@ -13,4 +13,4 @@ snapshots, images) don't appear here; their rows show blank.
 | `question-answered-dark.png` | After typing `2`: the answer reached T3, the agent replied, and the thread moved back down to the working group. |
 | `real-thread-dark.png`, `real-thread-light.png` | Real threads: headings, bold, lists, links, the run footer. |
 | `html-embed-snapshot-dark.png` | The snapshot t3rex took of an `html_render` embed, which draws inline in Rex. |
-| `busy-day-mock-dark.png` | **Mock sidebar** (made-up thread names) around the real approval window, to show a busier day: needs-you first, then idle, then working with Rex's `•••`. |
+| `busy-day-mock-dark.png`, `busy-day-mock-light.png` | **Mock sidebar** (made-up thread names) around the real approval window, to show a busier day: needs-you first, then idle, then working with Rex's `•••`. |
