@@ -1349,6 +1349,66 @@ fn heading(shelf: Shelf, count: usize, open: bool, width: usize, t: &Theme) -> L
 }
 
 /// A thread from the shell, by id.
+// ---- t3rex ----
+
+/// Where t3rex lists a thread in Rex, which has one list of windows and no shelves. A snoozed,
+/// settled, archived or subagent thread isn't listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// It's the user's turn: Approval, Input, Failed, Limited, Woke or Done.
+    Attention,
+    /// Pinned or in the inbox, with nothing to say.
+    Open,
+    /// On the Working shelf. A pinned thread stays Open while it works, as in the GUI.
+    Working,
+}
+
+/// T3's sidebar order as one list: what needs the user, then the pins and the rest of the
+/// inbox, then Working. It keeps the Working shelf's return stamps between calls, as the
+/// sidebar does.
+#[derive(Debug, Default)]
+pub struct Inbox {
+    returns: Returns,
+}
+
+impl Inbox {
+    pub fn order<'a>(
+        &mut self,
+        threads: &'a [Value],
+        capabilities: Capabilities,
+        now: i64,
+    ) -> Vec<(&'a Value, Place)> {
+        self.returns.observe(threads, now);
+        let shelves = shelves(threads, capabilities, now, Some(&self.returns));
+        let attention = |t: &Value| {
+            matches!(
+                status_word(t, now),
+                Some(Word::Approval | Word::Input | Word::Failed | Word::Limited | Word::Woke | Word::Done)
+            )
+        };
+        let open = || shelves.pinned.iter().chain(&shelves.inbox);
+        let mut list: Vec<(&Value, Place)> = open()
+            .chain(&shelves.done)
+            .filter(|t| attention(t))
+            .map(|t| (*t, Place::Attention))
+            .collect();
+        list.extend(open().filter(|t| !attention(t)).map(|t| (*t, Place::Open)));
+        list.extend(shelves.working.iter().map(|t| (*t, Place::Working)));
+        list
+    }
+}
+
+/// The word T3's sidebar shows on the thread's card at `now`, such as Approval or Working.
+pub fn status_label(thread: &Value, now: i64) -> Option<&'static str> {
+    status_word(thread, now).map(Word::label)
+}
+
+/// What T3's sidebar would ask of the user for this thread: `user_input` for a question,
+/// another request kind for an approval, or None.
+pub fn pending_kind(thread: &Value) -> Option<&str> {
+    pending(thread).and(thread["pendingRuntimeRequest"]["kind"].as_str())
+}
+
 pub fn find_thread<'a>(shell: &'a ShellState, id: &str) -> Option<&'a Value> {
     shell.threads.iter().find(|t| str_of(t, "id") == id)
 }
