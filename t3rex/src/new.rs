@@ -598,7 +598,7 @@ impl NewThread {
         tokio::spawn(async move {
             let thread = request.thread_id().to_string();
             // Named first, so sync finds this window when T3 reports the thread.
-            let _ = set_label(&format!("t3:{thread}")).await;
+            let _ = set_label(&crate::sync::tag(&thread)).await;
             let result = match client.launch_thread(&request).await {
                 Ok(receipt) => Ok(receipt.thread_id),
                 Err(e) => {

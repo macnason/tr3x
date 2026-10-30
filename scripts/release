@@ -1,0 +1,15 @@
+#!/bin/sh
+# Builds a release tarball of t3rex for this Mac's architecture into dist/, with its SHA-256,
+# for install.sh to download from T3REX_URL. Publishing it is a separate, manual step.
+set -eu
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+ARCH=$(uname -m)
+NAME=t3rex-macos-$ARCH
+cargo build --release --locked -p t3rex --manifest-path "$HERE/Cargo.toml"
+rm -rf "$HERE/dist/$NAME" && mkdir -p "$HERE/dist/$NAME"
+cp "$HERE/target/release/t3rex" "$HERE/dist/$NAME/"
+strip -x "$HERE/dist/$NAME/t3rex" 2>/dev/null || true
+cp "$HERE/install.sh" "$HERE/README.md" "$HERE/dist/$NAME/"
+tar -czf "$HERE/dist/$NAME.tar.gz" -C "$HERE/dist" "$NAME"
+(cd "$HERE/dist" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+cat "$HERE/dist/$NAME.tar.gz.sha256"

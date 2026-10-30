@@ -241,7 +241,22 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
     plan
 }
 
+/// The block label that marks a thread's conversation pane: `t3:<thread>`, or for an id too
+/// long for Rex's 128-character labels, `t3#` and a hash of it.
+pub fn tag(thread: &str) -> String {
+    let tag = format!("t3:{thread}");
+    if tag.chars().count() <= 128 {
+        return tag;
+    }
+    // FNV-1a: stable across builds, which a std hasher isn't.
+    let hash = thread.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    });
+    format!("t3#{hash:016x}")
+}
+
 /// Each window's thread, from the tag on its conversation pane's block label, `t3:<thread>`.
+/// A hashed tag comes back as written; `adopt` matches it to a thread.
 fn tagged(windows: &[Value]) -> Vec<(String, String)> {
     windows
         .iter()
@@ -251,7 +266,10 @@ fn tagged(windows: &[Value]) -> Vec<(String, String)> {
                 .as_array()?
                 .iter()
                 .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
-                .find_map(|b| b["label"].as_str()?.strip_prefix("t3:"))?;
+                .find_map(|b| {
+                    let label = b["label"].as_str()?;
+                    label.strip_prefix("t3:").or(label.starts_with("t3#").then_some(label))
+                })?;
             Some((id.to_string(), thread.to_string()))
         })
         .collect()
@@ -267,7 +285,14 @@ fn adopt(windows: &[Value], state: &mut State, known: &HashSet<String>) -> Vec<S
         .filter_map(|w| w["window_id"].as_str())
         .collect();
     let mut extra = Vec::new();
+    let hashed: HashMap<String, String> = known
+        .iter()
+        .chain(state.windows.keys())
+        .map(|t| (tag(t), t.clone()))
+        .filter(|(tag, _)| tag.starts_with("t3#"))
+        .collect();
     for (window, thread) in tagged(windows) {
+        let thread = hashed.get(&thread).cloned().unwrap_or(thread);
         if !known.contains(&thread) && !state.windows.contains_key(&thread) {
             continue;
         }
@@ -303,6 +328,7 @@ pub fn script(plan: &Plan, exe: &str) -> String {
         .map(|want| {
             json!({
                 "thread": want.thread_id,
+                "tag": tag(&want.thread_id),
                 "label": want.label,
                 "cwd": want.cwd,
                 "chat": [exe, "chat", want.thread_id],
@@ -340,7 +366,7 @@ for _, c in ipairs(plan.create or {{}}) do
   local w, err = rex.session.new_window{{
     window_label = c.label,
     focus = false,
-    layout = rex.layout.vertical(0.86, pane(c.chat, c.cwd, "t3:" .. c.thread), pane(c.compose, c.cwd, "Reply")),
+    layout = rex.layout.vertical(0.86, pane(c.chat, c.cwd, c.tag), pane(c.compose, c.cwd, "Reply")),
   }}
   if w then
     out.created[c.thread] = w.window_id
@@ -752,6 +778,20 @@ mod tests {
         assert_eq!(&ids[a + 1..a + 3], &["task", "deep"]);
         assert!(!ids.contains(&"old") && !ids.contains(&"done"));
         assert_eq!(wants[a + 1].label, "↳ task");
+    }
+
+    #[test]
+    fn long_thread_ids_get_a_short_tag_that_adopts() {
+        let long = format!("thread:delegated-task:{}", "x".repeat(140));
+        let t = tag(&long);
+        assert!(t.starts_with("t3#") && t.len() == 19);
+        assert_eq!(tag("abc"), "t3:abc");
+        let windows = vec![json!({"window_id": "w", "label": "L", "layers": [{"blocks": [
+            {"block_id": "b1", "label": t}, {"block_id": "b2", "label": "Reply"}]}]})];
+        let mut state = State::default();
+        let known: HashSet<String> = [long.clone()].into_iter().collect();
+        adopt(&windows, &mut state, &known);
+        assert_eq!(state.windows[&long].window_id, "w");
     }
 
     #[test]

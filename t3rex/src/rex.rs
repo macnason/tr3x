@@ -135,7 +135,8 @@ pub fn lua_str(text: &str) -> String {
     let mut level = 0;
     loop {
         let close = format!("]{}]", "=".repeat(level));
-        if !text.contains(&close) {
+        // A `]` at the end would run into the closing bracket.
+        if !format!("{text}]").contains(&close) {
             let eq = "=".repeat(level);
             // A long string drops a newline right after its opening bracket.
             return format!("[{eq}[\n{text}]{eq}]");
@@ -152,5 +153,6 @@ mod tests {
     fn lua_str_escapes_closing_brackets() {
         assert_eq!(lua_str("a"), "[[\na]]");
         assert_eq!(lua_str("x]]y"), "[=[\nx]]y]=]");
+        assert_eq!(lua_str("[1]"), "[=[\n[1]]=]");
     }
 }

@@ -302,10 +302,12 @@ pub async fn install() -> Result<()> {
     step(loaded, "Background sync", &format!("launchd agent {LABEL}"));
 
     // Wait for the first sync to make the session.
-    for _ in 0..30 {
+    for i in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let state = State::load();
-        if let Some(session) = state.session_id {
+        // The session comes first and its windows a moment later; with no threads, it stays
+        // empty but for the new-thread window.
+        if let Some(session) = state.session_id.filter(|_| !state.windows.is_empty() || i >= 12) {
             let count = state.windows.len();
             step(
                 true,
