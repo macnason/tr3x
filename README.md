@@ -65,7 +65,7 @@ the binary and its state.
 | Reply | Type in the Reply pane, Enter to send. A message to a running thread queues. Alt+Enter or Ctrl+J for a new line. Typing in the conversation pane moves you to Reply. |
 | Approve | With a pending approval and an empty input: `a` accept, `s` accept for the session, `d` decline. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
-| Commands | `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model haiku`, `/effort high`, `/mode ask|edits|full`, `/open` |
+| Commands | `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model haiku`, `/effort high`, `/mode ask`, `/mode edits`, `/mode full`, `/open` |
 | Keys | ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code |
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
 
@@ -106,7 +106,7 @@ does.
   position resets on resize.
 - Pictures need a terminal with kitty graphics (Rex has it). HTML snapshots need a headless
   Chromium; without one an embed is a titled link.
-- `/model` takes what `t3term models` lists, such as `claudeAgent/claude-haiku-5-5`. There is
+- `/model` takes what `./target/release/t3term models` lists, such as `claudeAgent/claude-haiku-5-5`. There is
   no picker.
 - New threads open in T3 Code (`t3code://new`). Rex can't ask for a project and a prompt yet.
 - Built against T3 `0.1.6-nightly.20261030` on orchestration protocol 2, and Rex Beta 0.1.0
