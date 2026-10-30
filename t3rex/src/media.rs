@@ -3,11 +3,29 @@
 //! shows as a snapshot taken with a headless Chromium when one is installed, under a titled
 //! link that opens the thread in T3 Code, where the page is interactive.
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use t3term::projection::ThreadState;
+
+/// How much picture a pane holds at once. The terminal keeps each picture as RGBA pixels in
+/// the snapshot it sends when Rex's app connects, and the app shows a pane whose snapshot is
+/// past about 64 MiB as Stale. Past this the oldest pictures are freed.
+const PICTURE_BUDGET: u64 = 40 << 20;
+
+/// Frees every picture in the terminal, including ones scrolled into the scrollback, which
+/// `a=d,d=A` leaves in memory.
+const FREE_ALL: &str = "\x1b_Ga=d,d=R,x=1,y=4294967295,q=2\x1b\\";
+
+/// The pictures in the terminal, oldest first, with their ids and sizes in bytes.
+#[derive(Default)]
+struct Held {
+    next_id: u32,
+    pictures: VecDeque<(u32, u64)>,
+    bytes: u64,
+}
 
 /// An embed T3 rendered as HTML: its attachment and title.
 #[derive(Clone, Debug)]
@@ -49,6 +67,7 @@ pub struct Media {
     pub snapshots: HashMap<String, PathBuf>,
     asked: HashSet<String>,
     chrome: Option<PathBuf>,
+    held: RefCell<Held>,
 }
 
 fn home() -> PathBuf {
@@ -119,7 +138,16 @@ impl Media {
             snapshots: HashMap::new(),
             asked: HashSet::new(),
             chrome: find_chrome(),
+            held: RefCell::default(),
         }
+    }
+
+    /// Frees every picture, for printing the thread again from the top.
+    pub fn free_all(&self) -> &'static str {
+        let mut held = self.held.borrow_mut();
+        held.pictures.clear();
+        held.bytes = 0;
+        FREE_ALL
     }
 
     pub fn can_snapshot(&self) -> bool {
@@ -214,12 +242,27 @@ impl Media {
     }
 
     /// A picture `cols` columns wide, as the kitty graphics sequence and the rows it takes.
-    /// The terminal reads the file itself, so nothing large goes through the pty.
+    /// The terminal reads the file itself, so nothing large goes through the pty. None for a
+    /// picture bigger than a pane holds.
     pub fn picture(&self, path: &Path, cols: usize) -> Option<(String, usize)> {
         let (w, h) = png_size(path).or_else(|| jpeg_size(path))?;
-        if w == 0 || h == 0 {
+        let bytes = w as u64 * h as u64 * 4;
+        if w == 0 || h == 0 || bytes > PICTURE_BUDGET {
             return None;
         }
+        // Room for it, freeing the oldest pictures. Their rows stay, blank.
+        let mut seq = String::new();
+        let mut held = self.held.borrow_mut();
+        while held.bytes + bytes > PICTURE_BUDGET
+            && let Some((id, size)) = held.pictures.pop_front()
+        {
+            seq.push_str(&format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"));
+            held.bytes -= size;
+        }
+        held.next_id += 1;
+        let id = held.next_id;
+        held.pictures.push_back((id, bytes));
+        held.bytes += bytes;
         // Never wider than the picture is at 2x, so small ones stay small.
         let cell_px = 8.0 * 2.0;
         let cols = cols.min(((w as f64 / cell_px).ceil() as usize).max(8));
@@ -227,8 +270,11 @@ impl Media {
             ((cols as f64 * self.cell_ratio * h as f64 / w as f64).round() as usize).clamp(1, 60);
         let name =
             base64::engine::general_purpose::STANDARD.encode(path.to_string_lossy().as_bytes());
-        // f=100 PNG (the terminal sniffs JPEG too), t=f a file, C=1 leave the cursor alone, q=2 quiet.
-        let seq = format!("\x1b_Ga=T,f=100,t=f,c={cols},r={rows},C=1,q=2;{name}\x1b\\");
+        // i= its own id, so it can be freed. f=100 PNG (the terminal sniffs JPEG too), t=f a
+        // file, C=1 leave the cursor alone, q=2 quiet.
+        seq.push_str(&format!(
+            "\x1b_Ga=T,i={id},f=100,t=f,c={cols},r={rows},C=1,q=2;{name}\x1b\\"
+        ));
         Some((seq, rows))
     }
 }
@@ -293,4 +339,40 @@ pub fn local_image(line: &str) -> Option<(String, PathBuf)> {
     let path = path.strip_prefix("file://").unwrap_or(path);
     let path = PathBuf::from(path);
     (path.is_absolute() && path.is_file()).then(|| (alt.to_string(), path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file with just a PNG's header, which is all `picture` reads.
+    fn png(name: &str, w: u32, h: u32) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("t3rex-test-{}-{name}.png", std::process::id()));
+        let mut head = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        head.extend(w.to_be_bytes());
+        head.extend(h.to_be_bytes());
+        std::fs::write(&path, head).unwrap();
+        path
+    }
+
+    #[test]
+    fn pictures_past_the_budget_free_the_oldest() {
+        let media = Media::new(None);
+        // 24 MiB each, so the second frees the first.
+        let big = png("big", 3072, 2048);
+        let (first, _) = media.picture(&big, 80).unwrap();
+        assert!(first.starts_with("\x1b_Ga=T,i=1,"));
+        let (second, _) = media.picture(&big, 80).unwrap();
+        assert!(second.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b_Ga=T,i=2,"));
+        // Printing again from the top frees everything, so nothing is left to free.
+        assert_eq!(media.free_all(), FREE_ALL);
+        let (third, _) = media.picture(&big, 80).unwrap();
+        assert!(third.starts_with("\x1b_Ga=T,i=3,"));
+        // Bigger than a pane holds: no picture.
+        let huge = png("huge", 4096, 4096);
+        assert!(media.picture(&huge, 80).is_none());
+        let _ = std::fs::remove_file(big);
+        let _ = std::fs::remove_file(huge);
+    }
 }

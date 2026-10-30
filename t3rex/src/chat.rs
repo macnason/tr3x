@@ -629,8 +629,11 @@ impl Pane {
             self.last_user = newest;
         }
         let mut text = String::from("\x1b[?2026h");
-        if !matches || self.committed.len() > blocks.len() || std::mem::take(&mut self.reflow) {
-            text.push_str("\x1b_Ga=d,d=A,q=2\x1b\\\x1b[H\x1b[2J\x1b[3J");
+        let reflow = std::mem::take(&mut self.reflow);
+        // The first frame too, which frees pictures an earlier process left in this terminal.
+        if !self.header || !matches || self.committed.len() > blocks.len() || reflow {
+            text.push_str(self.media.free_all());
+            text.push_str("\x1b[H\x1b[2J\x1b[3J");
             self.committed.clear();
             self.live_rows = 0;
             self.spilled = 0;
