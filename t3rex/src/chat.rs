@@ -58,6 +58,8 @@ struct Pane {
     reflow: bool,
     /// Whether the last frame drew a spinner or a clock, which the tick moves on.
     animating: bool,
+    /// The newest message of yours drawn, so a new one can bring the view to the bottom.
+    last_user: String,
     frame: usize,
     offset_minutes: i64,
     media: Media,
@@ -578,6 +580,7 @@ impl Pane {
             header: false,
             reflow: false,
             animating: false,
+            last_user: String::new(),
             frame: 0,
             offset_minutes: local_offset_minutes(),
             media,
@@ -602,6 +605,19 @@ impl Pane {
             .iter()
             .zip(&blocks)
             .all(|((id, _), b)| id == &b.item_id);
+        // A message you just sent brings the view back to the bottom. No sequence scrolls a
+        // terminal's view, but clearing the scrollback and printing again does.
+        let newest = blocks
+            .iter()
+            .rev()
+            .find(|b| b.kind == BlockKind::User)
+            .map(|b| b.item_id.clone())
+            .unwrap_or_default();
+        if newest != self.last_user {
+            // Not on the first frame, which prints from the top anyway.
+            self.reflow |= self.header;
+            self.last_user = newest;
+        }
         let mut text = String::from("\x1b[?2026h");
         if !matches || self.committed.len() > blocks.len() || std::mem::take(&mut self.reflow) {
             text.push_str("\x1b_Ga=d,d=A,q=2\x1b\\\x1b[H\x1b[2J\x1b[3J");
