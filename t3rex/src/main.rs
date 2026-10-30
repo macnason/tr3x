@@ -38,6 +38,9 @@ enum Command {
     Chat { thread: String },
     /// The reply pane of a thread's window.
     Compose { thread: String },
+    /// Print a thread's transcript blocks, for working on the chat pane.
+    #[command(hide = true)]
+    Blocks { thread: String },
     /// Settle the thread. Its window closes.
     Settle(Target),
     /// Bring a settled thread back.
@@ -62,6 +65,8 @@ enum Command {
     Archive(Target),
     /// Open the thread in T3 Code.
     Open(Target),
+    /// Print where the thread that most needs you is, as Rex's session.select takes it.
+    Inbox,
     /// Print the thread a Rex block belongs to.
     Which(Target),
     /// Set up t3rex: the Rex config, the launchd agent, and a first sync.
@@ -165,10 +170,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sync { no_first } => sync::run(!no_first).await,
         Command::Chat { thread } => chat::run(thread).await,
         Command::Compose { thread } => compose::run(thread).await,
+        Command::Blocks { thread } => chat::dump(thread).await,
         Command::Settle(t) => lifecycle(&t, Lifecycle::Settle).await,
         Command::Unsettle(t) => lifecycle(&t, Lifecycle::Unsettle).await,
         Command::Snooze { duration, target } => {
-            let ms = t3::parse_duration(&duration).with_context(|| format!("can't read {duration:?} as a duration"))?;
+            let ms = t3::snooze_ms(&duration).with_context(|| format!("can't read {duration:?} as a duration, such as 2h or tomorrow"))?;
             lifecycle(&target, Lifecycle::Snooze(ms)).await
         }
         Command::Wake(t) => lifecycle(&t, Lifecycle::Wake).await,
@@ -184,6 +190,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", t.resolve().await?);
             Ok(())
         }
+        Command::Inbox => install::inbox().await,
         Command::Install => install::install().await,
         Command::Uninstall => install::uninstall().await,
         Command::Doctor => install::doctor().await,

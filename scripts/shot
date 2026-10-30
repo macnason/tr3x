@@ -1,0 +1,24 @@
+#!/bin/sh
+# Screenshots the Rex app window: scripts/shot OUT.png [SESSION_LABEL [WINDOW_LABEL]]
+# Selecting a session or window switches what the app shows. Needs an awake, unlocked screen:
+# Screen Sharing from another Mac can leave the console locked, and then every capture is black.
+set -e
+OUT=${1:?usage: shot OUT.png [SESSION [WINDOW]]}
+HERE=$(cd "$(dirname "$0")" && pwd)
+REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+if [ -n "$2" ]; then
+  S=$("$REX" ls --json | /usr/bin/python3 -I -c "import json,sys;print([s['session_id'] for s in json.load(sys.stdin)['sessions'] if s['label']==sys.argv[1]][0])" "$2")
+  ARGS="session_id=$S"
+  if [ -n "$3" ]; then
+    W=$("$REX" session inspect "$S" --json | /usr/bin/python3 -I -c "import json,sys;print([w['window_id'] for w in json.load(sys.stdin)['windows'] if w['label'].startswith(sys.argv[1])][0])" "$3")
+    ARGS="$ARGS window_id=$W"
+  fi
+  for C in $("$REX" client ls --json | /usr/bin/python3 -I -c "import json,sys;[print(c['client_id']) for c in json.load(sys.stdin)['clients'] if c.get('info',{}).get('kind')=='app']"); do
+    "$REX" -C "$C" do session.select $ARGS >/dev/null
+  done
+  sleep "${SHOT_DELAY:-1.2}"
+fi
+[ -x "$HERE/../target/rexwin" ] || swiftc -O -o "$HERE/../target/rexwin" "$HERE/rexwin.swift"
+WID=$("$HERE/../target/rexwin")
+[ -n "$WID" ] || { echo "shot: no Rex window on screen (locked or asleep?)" >&2; exit 1; }
+screencapture -x -o -l "$WID" "$OUT"

@@ -65,7 +65,8 @@ use picker::{Item, Kind, Pick};
 use pull_requests::{Ask, CommentsAsk, DiffAsk, Part, TextAsk, ViewedAsk};
 use scroll::{Pin, Scroll};
 use sidebar::{Badges, Shelf, ShelfChoices, Sidebar, View};
-pub use sidebar::{Capabilities, Inbox, Place, pending_kind, status_label};
+pub use sidebar::{Capabilities, Inbox, Place, find_thread as find_thread_in, pending_kind, status_label};
+pub use theme::parse_iso_ms as parse_iso;
 use theme::{
     Appearance, Depth, Theme, duration_label, model_display_name, now_ms, parse_iso_ms,
     runtime_mode_label,

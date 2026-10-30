@@ -1,0 +1,19 @@
+#!/bin/sh
+# Development: rebuild, close t3rex's session, and start sync again from a clean state, so every
+# pane runs the new binary. Uses the state dir in $T3REX_STATE_DIR (required, so it never
+# touches an installed setup's state by accident).
+set -e
+: "${T3REX_STATE_DIR:?set T3REX_STATE_DIR to a scratch directory}"
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+cargo build --release -p t3rex --manifest-path "$HERE/Cargo.toml" 2>&1 | grep -E '^(error|warning: unused)' -A5 || true
+pkill -f "$HERE/target/release/t3rex sync" || true
+if [ -f "$T3REX_STATE_DIR/state.json" ]; then
+  S=$(/usr/bin/python3 -I -c "import json,sys;print(json.load(open(sys.argv[1])).get('session_id') or '')" "$T3REX_STATE_DIR/state.json")
+  [ -n "$S" ] && "$REX" kill "$S" >/dev/null 2>&1 || true
+fi
+rm -rf "$T3REX_STATE_DIR"
+mkdir -p "$T3REX_STATE_DIR"
+nohup "$HERE/target/release/t3rex" sync > "$T3REX_STATE_DIR/sync.log" 2>&1 &
+sleep "${WAIT:-6}"
+cat "$T3REX_STATE_DIR/sync.log"

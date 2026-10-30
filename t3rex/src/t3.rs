@@ -116,6 +116,18 @@ pub fn parse_duration(text: &str) -> Option<i64> {
     Some(n * per)
 }
 
+/// How long a snooze lasts: a duration, or `tomorrow` for 9 AM local time the next day.
+pub fn snooze_ms(text: &str) -> Option<i64> {
+    if text.trim() != "tomorrow" {
+        return parse_duration(text);
+    }
+    let offset = crate::chat::local_offset_minutes() * 60_000;
+    let day = 86_400_000;
+    let local_now = now_ms() + offset;
+    let tomorrow_nine = (local_now.div_euclid(day) + 1) * day + 9 * 3_600_000;
+    Some(tomorrow_nine - local_now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

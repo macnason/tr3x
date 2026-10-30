@@ -1,0 +1,17 @@
+#!/bin/sh
+# Development: give every t3rex pane a realistic size while no app client is sizing them, as
+# when the Mac is locked. scripts/size-panes [COLS [CHAT_ROWS [REPLY_ROWS]]]
+set -e
+: "${T3REX_STATE_DIR:?set T3REX_STATE_DIR}"
+REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+S=$(/usr/bin/python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['session_id'])" "$T3REX_STATE_DIR/state.json")
+"$REX" session inspect "$S" --json | /usr/bin/python3 -I -c '
+import json, subprocess, sys
+rex, s, cols, chat, reply = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+for w in json.load(sys.stdin)["windows"]:
+    blocks = [b["block_id"] for l in w["layers"] for b in l["blocks"]]
+    for i, b in enumerate(blocks):
+        rows = chat if i == 0 else reply
+        body = {"session_id": s, "block_id": b, "method": "resize", "args": {"columns": cols, "rows": rows}}
+        subprocess.run([rex, "api", "call", "block.method", json.dumps(body)], capture_output=True)
+' "$REX" "$S" "${1:-132}" "${2:-40}" "${3:-5}"

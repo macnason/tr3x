@@ -1,6 +1,681 @@
+//! The conversation pane: the thread as plain terminal output, so Rex's scrollback, find,
+//! selection and links work on it. Finished blocks print once and stay. The blocks of a
+//! running turn form a live tail at the bottom that redraws in place until they finish.
+//!
+//! The pane also tells Rex what the thread is doing with OSC 7501, from the same status word
+//! T3's sidebar shows, names itself with OSC 2, and reports the thread's folder with OSC 7, so
+//! a split opened beside it starts there.
+
+use std::io::Write;
+use std::time::Duration;
+
 use anyhow::Result;
-pub async fn run(thread: String) -> Result<()> {
-    println!("chat {thread}");
-    std::future::pending::<()>().await;
+use base64::Engine;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use futures_util::StreamExt;
+use serde_json::Value;
+use t3term::client::WatchEvent;
+use t3term::projection::{ShellState, ThreadState};
+use t3term::transcript::{self, Block, BlockKind};
+
+use crate::render::{self, visible_width};
+use crate::t3;
+
+pub const RESET: &str = "\x1b[0m";
+pub const BOLD: &str = "\x1b[1m";
+pub const DIM: &str = "\x1b[2m";
+pub const ITALIC: &str = "\x1b[3m";
+pub const RED: &str = "\x1b[31m";
+pub const YELLOW: &str = "\x1b[33m";
+pub const BLUE: &str = "\x1b[34m";
+pub const MAGENTA: &str = "\x1b[35m";
+
+/// Columns of padding on the left of everything, and the least on the right.
+const PAD: usize = 2;
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The terminal's size and what this pane has written to it.
+struct Pane {
+    cols: usize,
+    rows: usize,
+    /// The id and version of each block printed for good, in order.
+    committed: Vec<(String, String)>,
+    /// Rows the live tail takes at the bottom, which the next frame rewrites.
+    live_rows: usize,
+    /// The last status sent with OSC 7501, so it goes out only when it changes.
+    status: String,
+    title: String,
+    header: bool,
+    /// Set by a resize: the whole thread prints again at the new width.
+    reflow: bool,
+    frame: usize,
+    offset_minutes: i64,
+}
+
+fn out(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
+}
+
+/// The local time zone's offset, read once from `date`, so timestamps need no time zone crate.
+pub fn local_offset_minutes() -> i64 {
+    std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let sign = if text.starts_with('-') { -1 } else { 1 };
+            let digits = text.trim_start_matches(['+', '-']);
+            let (h, m) = (digits.get(..2)?.parse::<i64>().ok()?, digits.get(2..4)?.parse::<i64>().ok()?);
+            Some(sign * (h * 60 + m))
+        })
+        .unwrap_or(0)
+}
+
+/// `12:37 PM` for a T3 timestamp, in local time.
+fn clock(iso: &str, offset_minutes: i64) -> Option<String> {
+    let ms = t3term::tui::parse_iso(iso)?;
+    let minutes = (ms / 60_000 + offset_minutes).rem_euclid(24 * 60);
+    let (h, m) = (minutes / 60, minutes % 60);
+    let (h12, half) = match h {
+        0 => (12, "AM"),
+        1..=11 => (h, "AM"),
+        12 => (12, "PM"),
+        _ => (h - 12, "PM"),
+    };
+    Some(format!("{h12}:{m:02} {half}"))
+}
+
+/// `1m 12s`, `45s` or `2h 3m`.
+pub fn duration(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// Cuts `text` to `width` columns, with an ellipsis when it was longer. Plain text only.
+pub fn fit(text: &str, width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
+    kept + "…"
+}
+
+fn one_line(text: &str) -> String {
+    transcript::plain(text).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pad(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|l| if l.is_empty() { l } else { format!("{}{l}", " ".repeat(PAD)) })
+        .collect()
+}
+
+/// The glyph a tool row starts with.
+fn tool_glyph(block: &Block) -> &'static str {
+    match block.item_type.as_str() {
+        "command_execution" => "$",
+        "file_change" => "✎",
+        "web_search" => "⌕",
+        "file_read" | "read" => "≡",
+        t if t.contains("search") || t.contains("grep") || t.contains("glob") => "⌕",
+        t if t.contains("mcp") || t.contains("dynamic") => "◇",
+        t if t.contains("subagent") || t.contains("agent") => "◎",
+        _ => "·",
+    }
+}
+
+/// A path as short as it can be and still say where: `~` for home, and only the last two
+/// parts of a long one.
+fn short_path(word: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let word = match word.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        _ => word.to_string(),
+    };
+    if word.len() <= 48 || !word.contains('/') {
+        return word;
+    }
+    let parts: Vec<&str> = word.trim_end_matches('/').rsplitn(3, '/').collect();
+    match parts.as_slice() {
+        [file, dir, _] => format!("…/{dir}/{file}"),
+        _ => word,
+    }
+}
+
+fn shorten_paths(text: &str) -> String {
+    text.split(' ')
+        .map(|w| if w.starts_with('/') || w.starts_with("~/") { short_path(w) } else { w.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A tool row's text: what it did, in T3's words where it has them.
+fn tool_text(block: &Block) -> String {
+    let first = |t: &str| one_line(t.lines().next().unwrap_or(""));
+    let text = match block.item_type.as_str() {
+        "command_execution" => {
+            let mut cmd = first(if block.detail.is_empty() { &block.header } else { &block.detail });
+            // `cd somewhere && real command` says more as `real command`.
+            if let Some(rest) = cmd.strip_prefix("cd ")
+                && let Some(at) = rest.find(" && ").or_else(|| rest.find("; "))
+            {
+                let skip = if rest[at..].starts_with(" && ") { 4 } else { 2 };
+                cmd = rest[at + skip..].to_string();
+            }
+            cmd
+        }
+        "file_change" => {
+            let what = first(&block.header);
+            let (verb, rest) = what.split_once(' ').unwrap_or(("edit", &what));
+            let verb = match verb {
+                "edit" => "Edit",
+                "add" | "create" => "Create",
+                "delete" => "Delete",
+                other => other,
+            };
+            format!("{verb} {rest}")
+        }
+        "web_search" => format!("Searched {}", first(&block.detail)),
+        _ if !block.title.is_empty() && block.title != "Thinking" => first(&block.title),
+        _ => first(&block.header),
+    };
+    shorten_paths(&text)
+}
+
+fn is_running(block: &Block) -> bool {
+    block.streaming || matches!(block.status.as_str(), "running" | "inProgress" | "in_progress" | "pending" | "started")
+}
+
+fn failed(block: &Block) -> bool {
+    matches!(block.status.as_str(), "failed" | "error" | "declined") || block.exit_code.is_some_and(|c| c != 0)
+}
+
+/// What one block looks like, at `width` columns before the left padding.
+fn block_lines(block: &Block, width: usize, frame: usize, offset: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    match block.kind {
+        BlockKind::User => {
+            lines.push(String::new());
+            let text = render::markdown(&block.body, width.saturating_sub(2));
+            for (i, line) in text.lines.into_iter().enumerate() {
+                let bar = if i == 0 { format!("{BLUE}{BOLD}›{RESET} ") } else { "  ".to_string() };
+                lines.push(format!("{bar}{line}"));
+            }
+            if let Some(at) = clock(&block.updated_at, offset) {
+                lines.push(format!("  {DIM}{at}{RESET}"));
+            }
+        }
+        BlockKind::Assistant => {
+            lines.push(String::new());
+            lines.extend(render::markdown(&block.body, width).lines);
+            if block.streaming {
+                lines.push(format!("{DIM}{}{RESET}", SPINNER[frame % SPINNER.len()]));
+            }
+        }
+        // Finished reasoning stays out of the way; a turn that is thinking says so.
+        BlockKind::Reasoning => {
+            if is_running(block) {
+                lines.push(format!("{DIM}{ITALIC}∴ Thinking{RESET}"));
+            }
+        }
+        BlockKind::Tool => {
+            let mark = if is_running(block) {
+                format!(" {BLUE}{}{RESET}", SPINNER[frame % SPINNER.len()])
+            } else if failed(block) {
+                format!(" {RED}✗{RESET}")
+            } else {
+                String::new()
+            };
+            let room = width.saturating_sub(6);
+            lines.push(format!("  {DIM}{} {}{RESET}{mark}", tool_glyph(block), fit(&tool_text(block), room)));
+            if failed(block) && !block.body.trim().is_empty() {
+                for line in block.body.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev() {
+                    lines.push(format!("    {DIM}{RED}{}{RESET}", fit(&transcript::plain(line), width.saturating_sub(6))));
+                }
+            }
+        }
+        BlockKind::Request => {
+            let open = matches!(block.status.as_str(), "pending" | "waiting");
+            let color = if open { YELLOW } else { DIM };
+            let head = if block.item_type.contains("input") || block.header.to_lowercase().contains("question") {
+                "Question"
+            } else {
+                "Approval"
+            };
+            lines.push(String::new());
+            let state = match block.status.as_str() {
+                _ if open => String::new(),
+                "accepted" | "approved" | "completed" => format!(" {DIM}· answered{RESET}"),
+                other => format!(" {DIM}· {other}{RESET}"),
+            };
+            lines.push(format!("{color}{BOLD}◆ {head}{RESET}{state}"));
+            let text = if block.body.trim().is_empty() { &block.header } else { &block.body };
+            for line in render::markdown(text, width.saturating_sub(2)).lines {
+                lines.push(format!("  {line}"));
+            }
+        }
+        BlockKind::Plan => {
+            lines.push(String::new());
+            lines.push(format!("{MAGENTA}{BOLD}Plan{RESET}"));
+            lines.extend(render::markdown(&block.body, width).lines);
+        }
+        BlockKind::Notice => {
+            let text = one_line(if block.body.is_empty() { &block.header } else { &block.body });
+            if !text.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("{DIM}{}{RESET}", fit(&text, width)));
+            }
+        }
+        BlockKind::Error => {
+            lines.push(String::new());
+            let text = if block.body.is_empty() { &block.header } else { &block.body };
+            for line in render::markdown(text, width.saturating_sub(2)).lines {
+                lines.push(format!("{RED}│{RESET} {line}"));
+            }
+        }
+    }
+    lines
+}
+
+/// Tool calls shown in a row before the rest of the run folds into one "more" line.
+const TOOLS_SHOWN: usize = 3;
+
+/// For each block, whether it is a tool call past the first few of its run, and so hidden.
+fn visible_tools(blocks: &[Block]) -> Vec<bool> {
+    let mut run = 0;
+    blocks
+        .iter()
+        .map(|b| {
+            if b.kind == BlockKind::Tool {
+                run += 1;
+                run <= TOOLS_SHOWN || is_running(b) || failed(b)
+            } else {
+                if b.kind != BlockKind::Reasoning {
+                    run = 0;
+                }
+                true
+            }
+        })
+        .collect()
+}
+
+/// Block `i`'s lines, with a "more" line where a hidden run of tool calls ends.
+fn lines_at(blocks: &[Block], shown: &[bool], i: usize, width: usize, frame: usize, offset: i64) -> Vec<String> {
+    if !shown[i] {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let hidden = (0..i).rev().take_while(|&j| blocks[j].kind == BlockKind::Tool || blocks[j].kind == BlockKind::Reasoning).filter(|&j| !shown[j]).count();
+    if hidden > 0 && blocks[i].kind != BlockKind::Tool {
+        let s = if hidden == 1 { "" } else { "s" };
+        lines.push(format!("  {DIM}⋯ {hidden} more tool call{s}{RESET}"));
+    }
+    lines.extend(block_lines(&blocks[i], width, frame, offset));
+    lines
+}
+
+/// Whether a block will change no more, so it can print for good.
+fn settled(block: &Block, last: bool, run_active: bool) -> bool {
+    !is_running(block) && !(last && run_active) && !(block.kind == BlockKind::Request && matches!(block.status.as_str(), "pending" | "waiting"))
+}
+
+/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it.
+fn status_sequence(word: Option<&str>, kind: Option<&str>, title: &str) -> String {
+    let (state, extra) = match word {
+        Some("Approval") => ("blocked", ":kind=permission"),
+        Some("Input") => ("blocked", ":kind=question"),
+        Some("Working" | "Goal" | "Waiting") => ("working", ""),
+        Some("Failed" | "Limited") => ("error", ""),
+        Some("Done" | "Woke") => ("done", ""),
+        _ => ("idle", ""),
+    };
+    let _ = kind;
+    let msg: String = match word {
+        Some(w) => format!("{w} · {title}"),
+        None => title.to_string(),
+    };
+    let msg: String = msg.chars().filter(|c| !c.is_control()).take(180).collect();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(msg.as_bytes());
+    format!("\x1b]7501;state={state}{extra}:app=t3code:msg={b64}\x1b\\")
+}
+
+impl Pane {
+    fn new() -> Pane {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        Pane {
+            cols: cols as usize,
+            rows: rows as usize,
+            committed: Vec::new(),
+            live_rows: 0,
+            status: String::new(),
+            title: String::new(),
+            header: false,
+            reflow: false,
+            frame: 0,
+            offset_minutes: local_offset_minutes(),
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.cols.saturating_sub(PAD * 2).max(20)
+    }
+
+    /// Prints the thread's blocks: what's new and finished for good, then the live tail.
+    fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) {
+        let blocks = transcript::blocks(state);
+        let run_active = state.active_run().is_some();
+        // A history that no longer starts with what was printed, after a reconnect, prints
+        // again from the top.
+        let matches = self
+            .committed
+            .iter()
+            .zip(&blocks)
+            .all(|((id, _), b)| id == &b.item_id);
+        let mut text = String::from("\x1b[?2026h");
+        if !matches || self.committed.len() > blocks.len() || std::mem::take(&mut self.reflow) {
+            text.push_str("\x1b[H\x1b[2J\x1b[3J");
+            self.committed.clear();
+            self.live_rows = 0;
+            self.header = false;
+        }
+        // Back to the top of the live tail, and clear it.
+        if self.live_rows > 0 {
+            text.push_str(&format!("\x1b[{}F\x1b[J", self.live_rows));
+        }
+        if !self.header {
+            text.push_str(&self.header_lines(state, shell_thread));
+            self.header = true;
+        }
+        let width = self.width();
+        let shown = visible_tools(&blocks);
+        let mut index = self.committed.len();
+        while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active) {
+            let block = &blocks[index];
+            for line in pad(lines_at(&blocks, &shown, index, width, 0, self.offset_minutes)) {
+                text.push_str(&line);
+                text.push_str("\r\n");
+            }
+            self.committed.push((block.item_id.clone(), block.updated_at.clone()));
+            index += 1;
+        }
+        let mut live: Vec<String> = Vec::new();
+        for i in index..blocks.len() {
+            live.extend(pad(lines_at(&blocks, &shown, i, width, self.frame, self.offset_minutes)));
+        }
+        if run_active {
+            live.push(String::new());
+            let since = state
+                .active_run()
+                .and_then(|r| r["startedAt"].as_str().or(r["requestedAt"].as_str()))
+                .and_then(t3term::tui::parse_iso)
+                .map(|at| duration(t3::now_ms() - at))
+                .unwrap_or_default();
+            live.push(format!(
+                "{}{BLUE}{}{RESET} {DIM}Working {since}{RESET}",
+                " ".repeat(PAD),
+                SPINNER[self.frame % SPINNER.len()]
+            ));
+        } else if let Some(footer) = self.footer(state) {
+            // The finished turn's footer redraws until the next turn starts, so it can stay live.
+            live.push(footer);
+        }
+        // A tail taller than the screen can't be rewritten once its top has scrolled away, so
+        // anything above the last screenful prints for good now.
+        let room = self.rows.saturating_sub(1).max(1);
+        if live.len() > room {
+            let cut = live.len() - room;
+            for line in live.drain(..cut) {
+                text.push_str(&line);
+                text.push_str("\r\n");
+            }
+        }
+        for line in &live {
+            text.push_str(line);
+            text.push_str("\r\n");
+        }
+        self.live_rows = live.len();
+        text.push_str("\x1b[?2026l");
+        out(&text);
+    }
+
+    fn footer(&self, state: &ThreadState) -> Option<String> {
+        let run = state.latest_run()?;
+        let done = run["completedAt"].as_str()?;
+        let started = run["startedAt"].as_str().or(run["requestedAt"].as_str())?;
+        let took = t3term::tui::parse_iso(done)? - t3term::tui::parse_iso(started)?;
+        let at = clock(done, self.offset_minutes)?;
+        let mark = match run["status"].as_str() {
+            Some("failed") => format!("{RED}✗{RESET} {DIM}Failed"),
+            Some("interrupted" | "cancelled") => format!("{DIM}■ Stopped"),
+            _ => format!("{DIM}{at} · {}", duration(took)),
+        };
+        Some(format!("{}{mark}{RESET}", " ".repeat(PAD)))
+    }
+
+    fn header_lines(&self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
+        let thread = state.thread();
+        let width = self.width();
+        let title = thread["title"].as_str().unwrap_or("Untitled");
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(branch) = thread["branch"].as_str() {
+            meta.push(branch.to_string());
+        }
+        let prs = shell_thread
+            .and_then(|t| t["pullRequests"].as_array())
+            .or(thread["pullRequests"].as_array());
+        for pr in prs.into_iter().flatten().take(3) {
+            let number = pr["number"].as_u64().map(|n| format!("PR #{n}"));
+            let url = pr["url"].as_str();
+            if let (Some(n), Some(url)) = (number, url) {
+                meta.push(format!("\x1b]8;;{url}\x1b\\{n}\x1b]8;;\x1b\\"));
+            }
+        }
+        let mut text = String::new();
+        let p = " ".repeat(PAD);
+        text.push_str(&format!("\r\n{p}{BOLD}{}{RESET}\r\n", fit(&one_line(title), width)));
+        if !meta.is_empty() {
+            text.push_str(&format!("{p}{DIM}{}{RESET}\r\n", meta.join(" · ")));
+        }
+        text
+    }
+
+    fn set_status(&mut self, thread: Option<&Value>) {
+        let Some(thread) = thread else { return };
+        let word = t3term::tui::status_label(thread, t3::now_ms());
+        let title = one_line(thread["title"].as_str().unwrap_or(""));
+        let seq = status_sequence(word, t3term::tui::pending_kind(thread), &title);
+        if seq != self.status {
+            out(&seq);
+            self.status = seq;
+        }
+    }
+
+    fn set_title(&mut self, state: &ThreadState, project: Option<&str>) {
+        let thread = state.thread();
+        let mut parts = vec!["T3".to_string()];
+        if let Some(p) = project {
+            parts.push(p.to_string());
+        }
+        if let Some(b) = thread["branch"].as_str() {
+            parts.push(b.to_string());
+        }
+        let title = parts.join(" · ");
+        if title != self.title {
+            out(&format!("\x1b]2;{}\x07", title.replace(|c: char| c.is_control(), "")));
+            self.title = title;
+        }
+    }
+}
+
+/// The sibling pane in this window: the composer.
+async fn composer_block() -> Option<String> {
+    let me = std::env::var("REX_BLOCK").ok()?;
+    let session = std::env::var("REX_SESSION").ok()?;
+    let view = crate::rex::Rex::find().inspect(&session).await.ok()?;
+    for window in view["windows"].as_array()? {
+        let blocks: Vec<&str> = window["layers"]
+            .as_array()?
+            .iter()
+            .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
+            .filter_map(|b| b["block_id"].as_str())
+            .collect();
+        if blocks.contains(&me.as_str()) {
+            return blocks.into_iter().find(|b| *b != me).map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Typing in the conversation goes to the composer: focus moves there with the keys typed.
+async fn hand_to_composer(text: String) {
+    let Some(block) = composer_block().await else { return };
+    let rex = crate::rex::Rex::find();
+    let bin = rex.bin.clone();
+    let _ = tokio::process::Command::new(&bin).args(["focus", "-b", &block]).output().await;
+    if !text.is_empty() {
+        let _ = tokio::process::Command::new(&bin).args(["send", "-b", &block, &text]).output().await;
+    }
+}
+
+pub async fn run(thread_id: String) -> Result<()> {
+    let client = t3::connect(true).await?;
+    let mut thread_events = client.watch_thread(&thread_id, None);
+    let mut shell_events = client.watch_shell(None);
+    crossterm::terminal::enable_raw_mode()?;
+    // Clear what the login printed, hide the cursor, and ask for focus reports.
+    out("\x1b[H\x1b[2J\x1b[3J\x1b[?25l\x1b[?1004h");
+    if let Ok(cwd) = std::env::current_dir() {
+        out(&format!("\x1b]7;file://localhost{}\x1b\\", cwd.display()));
+    }
+    let result = event_loop(&client, &thread_id, &mut thread_events, &mut shell_events).await;
+    out("\x1b[?1004l\x1b[?25h");
+    let _ = crossterm::terminal::disable_raw_mode();
+    result
+}
+
+async fn event_loop(
+    client: &std::sync::Arc<t3term::client::Client>,
+    thread_id: &str,
+    thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+) -> Result<()> {
+    let mut pane = Pane::new();
+    let mut state: Option<ThreadState> = None;
+    let mut shell = ShellState::default();
+    let mut input = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(120));
+    let mut visited_for = String::new();
+    let mut dirty = false;
+    let mut focused = true;
+    loop {
+        tokio::select! {
+            event = thread_events.recv() => match event {
+                Some(WatchEvent::Item(item)) => {
+                    if item["kind"] == "snapshot" {
+                        state = ThreadState::from_snapshot(&item);
+                    } else if let Some(s) = state.as_mut() {
+                        s.apply(&item);
+                    }
+                    dirty = true;
+                }
+                Some(WatchEvent::Reconnecting { .. }) => {}
+                Some(WatchEvent::Failed(message)) => anyhow::bail!("T3 refused the thread: {message}"),
+                None => anyhow::bail!("the thread's subscription ended"),
+            },
+            event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
+                shell.apply(&item);
+                let thread = t3term::tui::find_thread_in(&shell, thread_id);
+                pane.set_status(thread);
+            },
+            event = input.next() => match event {
+                Some(Ok(Event::Resize(cols, rows))) => {
+                    if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
+                        pane.reflow = cols as usize != pane.cols;
+                        pane.cols = cols as usize;
+                        pane.rows = rows as usize;
+                        dirty = true;
+                    }
+                }
+                Some(Ok(Event::FocusGained)) => focused = true,
+                Some(Ok(Event::FocusLost)) => focused = false,
+                Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        continue;
+                    }
+                    let typed = match key.code {
+                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => c.to_string(),
+                        _ => String::new(),
+                    };
+                    tokio::spawn(hand_to_composer(typed));
+                }
+                Some(Err(_)) | None => {}
+                _ => {}
+            },
+            _ = tick.tick() => {
+                if state.as_ref().is_some_and(|s| s.active_run().is_some() || transcript::blocks(s).iter().any(is_running)) {
+                    pane.frame += 1;
+                    dirty = true;
+                }
+            }
+        }
+        if dirty && let Some(s) = state.as_ref() {
+            let thread = t3term::tui::find_thread_in(&shell, thread_id);
+            let project = thread
+                .and_then(|t| t["projectId"].as_str())
+                .and_then(|p| shell.projects.iter().find(|x| x["id"] == p))
+                .and_then(|p| p["title"].as_str());
+            pane.set_title(s, project);
+            pane.draw(s, thread);
+            dirty = false;
+        }
+        // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
+        if focused && let Some(thread) = t3term::tui::find_thread_in(&shell, thread_id) {
+            let word = t3term::tui::status_label(thread, t3::now_ms());
+            let key = thread["updatedAt"].as_str().unwrap_or_default().to_string();
+            if matches!(word, Some("Done" | "Woke")) && visited_for != key {
+                visited_for = key;
+                let (client, id) = (client.clone(), thread_id.to_string());
+                tokio::spawn(async move { t3::visit(&client, &id).await });
+            }
+        }
+    }
+}
+
+/// Prints a thread's blocks, for working on this pane.
+pub async fn dump(thread_id: String) -> Result<()> {
+    let client = t3::connect(false).await?;
+    let state = client.thread(&thread_id, true).await?;
+    for b in transcript::blocks(&state) {
+        println!(
+            "{:?} type={} status={} streaming={} exit={:?} header={:?} detail={:?} title={:?} body={:?}",
+            b.kind,
+            b.item_type,
+            b.status,
+            b.streaming,
+            b.exit_code,
+            fit(&b.header, 60),
+            fit(&b.detail, 60),
+            fit(&b.title, 40),
+            fit(&one_line(&b.body), 80)
+        );
+    }
+    let _ = visible_width("");
     Ok(())
 }
