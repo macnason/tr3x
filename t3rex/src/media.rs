@@ -94,7 +94,7 @@ fn find_chrome() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
-fn mac_is_dark() -> bool {
+pub fn mac_is_dark() -> bool {
     std::process::Command::new("defaults")
         .args(["read", "-g", "AppleInterfaceStyle"])
         .output()

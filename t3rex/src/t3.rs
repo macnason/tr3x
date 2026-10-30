@@ -22,6 +22,14 @@ pub async fn connect(operate: bool) -> Result<Arc<Client>> {
     Ok(Arc::new(Client::connect(&target, scopes, "30d").await?))
 }
 
+/// A connection that can also read the server's linked environments.
+pub async fn connect_access() -> Result<Arc<Client>> {
+    let target = t3term::environments::target(None).await?;
+    Ok(Arc::new(
+        Client::connect(&target, &[Scope::Read, Scope::AccessRead], "1d").await?,
+    ))
+}
+
 pub fn capabilities(client: &Client) -> Capabilities {
     Capabilities::of(&client.runtime.capabilities)
 }

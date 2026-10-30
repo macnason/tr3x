@@ -50,6 +50,8 @@ pub enum Scope {
     TerminalRead,
     /// Opens, attaches to, writes to, resizes, clears, restarts and closes a terminal.
     TerminalOperate,
+    /// Reads the server's access settings, such as its linked environments (t3rex).
+    AccessRead,
 }
 
 impl Scope {
@@ -59,6 +61,7 @@ impl Scope {
             Scope::Operate => "orchestration:operate",
             Scope::TerminalRead => "terminal:read",
             Scope::TerminalOperate => "terminal:operate",
+            Scope::AccessRead => "access:read",
         }
     }
 

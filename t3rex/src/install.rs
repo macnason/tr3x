@@ -148,6 +148,76 @@ fn remove_require(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The Rex app's preference domain, which `defaults` reads and writes.
+const REX_DOMAIN: &str = "com.superlogical.rex";
+/// Rex app preferences t3rex sets, with the value. Settings → Interface → Pane Behavior →
+/// "Fade inactive panes" off, so the conversation keeps full contrast while you type in Reply.
+/// Rex has no per-pane or per-session form of it.
+const REX_PREFS: &[(&str, &str)] = &[("Workspace.inactivePaneFadeMode", "none")];
+
+fn prefs_backup() -> PathBuf {
+    state::dir().join("rex-defaults.json")
+}
+
+fn defaults_read(key: &str) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", REX_DOMAIN, key])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Sets `REX_PREFS`, keeping what each key held before (or that it was unset) the first time.
+fn set_rex_prefs() -> Result<String> {
+    let backup = prefs_backup();
+    if !backup.exists() {
+        let before: serde_json::Map<String, serde_json::Value> = REX_PREFS
+            .iter()
+            .map(|(key, _)| (key.to_string(), defaults_read(key).into()))
+            .collect();
+        std::fs::write(&backup, serde_json::to_vec_pretty(&before)?)?;
+    }
+    let mut changed = Vec::new();
+    for (key, value) in REX_PREFS {
+        if defaults_read(key).as_deref() == Some(*value) {
+            continue;
+        }
+        let ok = std::process::Command::new("/usr/bin/defaults")
+            .args(["write", REX_DOMAIN, key, "-string", value])
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            changed.push(*key);
+        }
+    }
+    Ok(if changed.is_empty() {
+        "already set".into()
+    } else {
+        format!("set {}", changed.join(", "))
+    })
+}
+
+/// Puts back what `set_rex_prefs` changed.
+fn restore_rex_prefs() {
+    let Ok(text) = std::fs::read(prefs_backup()) else {
+        return;
+    };
+    let Ok(before) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&text)
+    else {
+        return;
+    };
+    for (key, value) in before {
+        let mut args = vec!["delete".to_string(), REX_DOMAIN.into(), key.clone()];
+        if let Some(v) = value.as_str() {
+            args = vec!["write".into(), REX_DOMAIN.into(), key, "-string".into(), v.into()];
+        }
+        let _ = std::process::Command::new("/usr/bin/defaults").args(&args).status();
+    }
+    let _ = std::fs::remove_file(prefs_backup());
+}
+
 async fn launchctl(args: &[&str]) -> bool {
     tokio::process::Command::new("launchctl")
         .args(args)
@@ -213,6 +283,8 @@ pub async fn install() -> Result<()> {
     );
 
     std::fs::create_dir_all(state::dir())?;
+    let prefs = set_rex_prefs()?;
+    step(true, "Panes keep full contrast", &format!("{REX_DOMAIN} {prefs}"));
     let plist_file = plist_path();
     std::fs::create_dir_all(plist_file.parent().unwrap())?;
     std::fs::write(&plist_file, plist(&bin, &rex.bin))?;
@@ -233,7 +305,7 @@ pub async fn install() -> Result<()> {
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let state = State::load();
-        if let Some(session) = state.session_id.filter(|_| !state.windows.is_empty()) {
+        if let Some(session) = state.session_id {
             let count = state.windows.len();
             step(
                 true,
@@ -247,7 +319,7 @@ pub async fn install() -> Result<()> {
                 .client_do("session.select", &[("session_id", &session)])
                 .await;
             println!(
-                "\nKeys: ⌃⌘I next thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3"
+                "\nKeys: ⌘T new thread (in T3 Code) · ⌃⌘N new thread · ⌃⌘I next that needs you · ⌃⌘M model · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3"
             );
             println!("Every action is also in Rex's command palette under T3 Code.");
             return Ok(());
@@ -290,6 +362,8 @@ pub async fn uninstall() -> Result<()> {
         .output()
         .await;
     step(true, "Removed the Rex actions", "");
+    restore_rex_prefs();
+    step(true, "Restored Rex's pane fading", "");
     let _ = std::fs::remove_dir_all(state::dir());
     let _ = std::fs::remove_file(bin_path());
     step(true, "Removed t3rex", "");

@@ -3,8 +3,12 @@
 
 mod chat;
 mod compose;
+mod icons;
 mod install;
 mod media;
+mod new;
+mod pick;
+mod picker;
 mod render;
 mod rex;
 mod state;
@@ -37,6 +41,21 @@ enum Command {
     },
     /// The conversation pane of a thread's window.
     Chat { thread: String },
+    /// A new thread: the window Rex's New Tab makes in the T3 Code session.
+    New {
+        /// Show the keys that matter, for a session with no threads yet.
+        #[arg(long)]
+        welcome: bool,
+    },
+    /// The model picker, as the floating layer `model` opens runs it.
+    #[command(hide = true)]
+    Pick {
+        thread: String,
+        #[arg(long, value_enum, default_value = "model")]
+        field: pick::Field,
+    },
+    /// Choose the model, effort and access for the thread's next message, in a floating layer.
+    Model(Target),
     /// The reply pane of a thread's window.
     Compose { thread: String },
     /// Print a thread's transcript blocks, for working on the chat pane.
@@ -66,6 +85,13 @@ enum Command {
     Archive(Target),
     /// Open the thread in T3 Code.
     Open(Target),
+    /// Call a T3 RPC method and print its answer, for development.
+    #[command(hide = true)]
+    Rpc {
+        method: String,
+        #[arg(default_value = "{}")]
+        payload: String,
+    },
     /// Print the windows sync wants, in order, for working on sync.
     #[command(hide = true)]
     Wants,
@@ -212,6 +238,16 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sync { no_first } => sync::run(!no_first).await,
         Command::Chat { thread } => chat::run(thread).await,
         Command::Compose { thread } => compose::run(thread).await,
+        Command::New { welcome } => new::run(welcome).await,
+        Command::Pick { thread, field } => pick::run(thread, field).await,
+        Command::Model(t) => {
+            let thread = t.resolve().await?;
+            let session = std::env::var("REX_SESSION")
+                .ok()
+                .or(State::load().session_id)
+                .context("t3rex hasn't synced yet")?;
+            pick::float(&session, &thread, pick::Field::Model).await
+        }
         Command::Blocks { thread } => chat::dump(thread).await,
         Command::Settle(t) => lifecycle(&t, Lifecycle::Settle).await,
         Command::Unsettle(t) => lifecycle(&t, Lifecycle::Unsettle).await,
@@ -243,6 +279,16 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Inbox => install::inbox().await,
+        Command::Rpc { method, payload } => {
+            let client = t3::connect_access().await?;
+            let answer = client
+                .rpc()
+                .await?
+                .call(&method, serde_json::from_str(&payload)?, Duration::from_secs(20))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&answer)?);
+            Ok(())
+        }
         Command::Wants => {
             let client = t3::connect(false).await?;
             // The same feed sync follows, up to its first synchronized state.

@@ -328,8 +328,9 @@ pub fn script(plan: &Plan, exe: &str) -> String {
         r#"local plan = rex.json.decode({data})
 local term = "com.superlogical.terminal.shell"
 local out = {{ created = {{}}, errors = {{}} }}
-local function pane(argv, cwd)
-  return rex.layout.block{{ flavor = term, options = {{ shell = "none", command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }}
+-- Labelled as they are made, so the new-window watcher never takes them for a New Tab.
+local function pane(argv, cwd, label)
+  return {{ block = {{ flavor = term, label = label, options = {{ shell = "none", command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }} }}
 end
 for _, id in ipairs(plan.close or {{}}) do
   local _, err = rex.session.close_window{{ window_id = id }}
@@ -339,12 +340,10 @@ for _, c in ipairs(plan.create or {{}}) do
   local w, err = rex.session.new_window{{
     window_label = c.label,
     focus = false,
-    layout = rex.layout.vertical(0.86, pane(c.chat, c.cwd), pane(c.compose, c.cwd)),
+    layout = rex.layout.vertical(0.86, pane(c.chat, c.cwd, "t3:" .. c.thread), pane(c.compose, c.cwd, "Reply")),
   }}
   if w then
     out.created[c.thread] = w.window_id
-    rex.session.set_block_label{{ block_id = w.block_ids[1], label = "t3:" .. c.thread }}
-    rex.session.set_block_label{{ block_id = w.block_ids[2], label = "Reply" }}
   else
     table.insert(out.errors, err)
   end
@@ -369,6 +368,56 @@ pub struct Syncer {
     pub state: State,
     /// Put the session first in Rex's list when it is made.
     pub first: bool,
+    /// The `rex do` script that turns a New Tab in the session into a new thread, and the
+    /// session it watches.
+    pub watcher: Option<(String, tokio::process::Child)>,
+}
+
+/// Turns each window made in the session by Rex's New Tab, its + button or the palette, which
+/// is one unlabelled shell, into a new-thread composer. The shell gives way to it in place, so
+/// the window keeps its spot and focus. t3rex's own windows are labelled as they are made.
+pub fn watcher_script(exe: &str) -> String {
+    let argv = json!([exe, "new"]);
+    format!(
+        r#"local argv = rex.json.decode({argv})
+local term = "com.superlogical.terminal.shell"
+rex.on("window_created", function(ctx, ev)
+  local view = rex.session.view{{}}
+  for _, w in ipairs((view and view.windows) or {{}}) do
+    local blocks = w.layers and #w.layers == 1 and w.layers[1].blocks
+    if w.window_id == ev.window_id and blocks and #blocks == 1
+        and blocks[1].flavor == term and (blocks[1].label or "shell") == "shell" then
+      local shell = blocks[1].block_id
+      local _, err = rex.session.new_split{{ anchor_id = shell, direction = "vertical", side = "after",
+        focus = true, layout = {{ block = {{ flavor = term, label = "New Thread",
+          options = {{ shell = "none", command = argv }} }} }} }}
+      if not err then
+        rex.call("block.close", {{ session_id = ctx.session_id, block_id = shell }})
+        rex.session.set_window_label{{ window_id = w.window_id, label = "New Thread" }}
+      end
+      rex.session.disown_block{{}}
+    end
+  end
+end)
+"#,
+        argv = lua_str(&argv.to_string())
+    )
+}
+
+/// A new-thread window that also shows the keys that matter, for a session with no threads.
+pub fn welcome_script(exe: &str) -> String {
+    let argv = json!([exe, "new", "--welcome"]);
+    format!(
+        r#"local argv = rex.json.decode({argv})
+local w, err = rex.session.new_window{{ window_label = "New Thread", focus = true,
+  layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "New Thread",
+    options = {{ shell = "none", command = argv }} }} }} }}
+rex.session.disown_block{{}}
+if err then error(err, 0) end
+return {{}}
+"#,
+        argv = lua_str(&argv.to_string())
+    )
 }
 
 impl Syncer {
@@ -397,9 +446,42 @@ impl Syncer {
         Ok(id)
     }
 
+    /// Keeps the New Tab watcher running for `session`.
+    fn watch(&mut self, session: &str) {
+        let running = match self.watcher.as_mut() {
+            Some((watched, child)) => watched == session && matches!(child.try_wait(), Ok(None)),
+            None => false,
+        };
+        if running {
+            return;
+        }
+        let exe = self.exe.to_string_lossy().into_owned();
+        let child = tokio::process::Command::new(&self.rex.bin)
+            .args(["do", "-s", session, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+        match child {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let script = watcher_script(&exe);
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stdin.write_all(script.as_bytes()).await;
+                    });
+                }
+                self.watcher = Some((session.to_string(), child));
+            }
+            Err(e) => eprintln!("t3rex: couldn't watch for new windows: {e:#}"),
+        }
+    }
+
     /// Brings the session in line with `wants`. Returns whether anything changed.
     pub async fn reconcile(&mut self, wants: &[Want], known: &HashSet<String>) -> Result<bool> {
         let session = self.session().await?;
+        self.watch(&session);
         let view = self.rex.inspect(&session).await?;
         // Rex leaves `windows` out of an empty session. An answer that isn't this session at all
         // is not "every window was closed".
@@ -418,6 +500,12 @@ impl Syncer {
                 ))
             })
             .collect();
+        // With no threads to show, the session holds a new-thread window to start from.
+        if wants.is_empty() && windows.is_empty() {
+            let exe = self.exe.to_string_lossy().into_owned();
+            self.rex.lua(&session, &welcome_script(&exe)).await?;
+            return Ok(true);
+        }
         let mut plan = plan(wants, &present, &mut self.state);
         plan.close.append(&mut extra);
         if plan.is_empty() {
@@ -464,6 +552,7 @@ pub async fn run(first: bool) -> Result<()> {
         exe: std::env::current_exe()?,
         state: State::load(),
         first,
+        watcher: None,
     };
     let mut events = client.watch_shell(None);
     let mut shell = ShellState::default();

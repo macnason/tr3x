@@ -29,31 +29,31 @@ fn out(text: &str) {
 }
 
 #[derive(Default)]
-struct Editor {
-    text: Vec<char>,
-    cursor: usize,
+pub(crate) struct Editor {
+    pub(crate) text: Vec<char>,
+    pub(crate) cursor: usize,
 }
 
 impl Editor {
-    fn insert(&mut self, s: &str) {
+    pub(crate) fn insert(&mut self, s: &str) {
         let s = s.replace('\t', "    ");
         for c in s.chars().filter(|c| *c == '\n' || !c.is_control()) {
             self.text.insert(self.cursor, c);
             self.cursor += 1;
         }
     }
-    fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
             self.text.remove(self.cursor);
         }
     }
-    fn delete(&mut self) {
+    pub(crate) fn delete(&mut self) {
         if self.cursor < self.text.len() {
             self.text.remove(self.cursor);
         }
     }
-    fn delete_word(&mut self) {
+    pub(crate) fn delete_word(&mut self) {
         while self.cursor > 0 && self.text[self.cursor - 1].is_whitespace() {
             self.backspace();
         }
@@ -61,23 +61,23 @@ impl Editor {
             self.backspace();
         }
     }
-    fn line_start(&self) -> usize {
+    pub(crate) fn line_start(&self) -> usize {
         self.text[..self.cursor]
             .iter()
             .rposition(|c| *c == '\n')
             .map_or(0, |i| i + 1)
     }
-    fn line_end(&self) -> usize {
+    pub(crate) fn line_end(&self) -> usize {
         self.text[self.cursor..]
             .iter()
             .position(|c| *c == '\n')
             .map_or(self.text.len(), |i| self.cursor + i)
     }
-    fn take(&mut self) -> String {
+    pub(crate) fn take(&mut self) -> String {
         self.cursor = 0;
         std::mem::take(&mut self.text).into_iter().collect()
     }
-    fn string(&self) -> String {
+    pub(crate) fn string(&self) -> String {
         self.text.iter().collect()
     }
 }
@@ -456,6 +456,20 @@ impl Composer {
                 crate::install::open_in_t3(&thread).await?;
                 Ok("Opened in T3 Code".into())
             }),
+            "model" | "effort" | "mode" if arg.is_empty() => {
+                let field = match name {
+                    "model" => crate::pick::Field::Model,
+                    "effort" => crate::pick::Field::Effort,
+                    _ => crate::pick::Field::Access,
+                };
+                let Ok(session) = std::env::var("REX_SESSION") else {
+                    return self.note("Open this in Rex to choose a model", true);
+                };
+                self.spawn(async move {
+                    crate::pick::float(&session, &thread, field).await?;
+                    Ok(String::new())
+                });
+            }
             "model" | "effort" | "mode" => {
                 let (Some(state), Some(config)) = (self.state.clone(), self.config.clone()) else {
                     return;
@@ -487,69 +501,78 @@ impl Composer {
 
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         self.note = None;
         match key.code {
-            KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.editor.insert("\n")
+            KeyCode::Enter if !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+                self.submit()
             }
-            KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
-            KeyCode::Enter => self.submit(),
             KeyCode::Char('c') if ctrl => {
                 self.editor.take();
             }
-            KeyCode::Char('u') if ctrl => {
-                let start = self.editor.line_start();
-                while self.editor.cursor > start {
-                    self.editor.backspace();
-                }
-            }
-            KeyCode::Char('w') if ctrl => self.editor.delete_word(),
-            KeyCode::Backspace if alt => self.editor.delete_word(),
-            KeyCode::Char('a') if ctrl => self.editor.cursor = self.editor.line_start(),
-            KeyCode::Char('e') if ctrl => self.editor.cursor = self.editor.line_end(),
             KeyCode::Char('x') if ctrl => self.command("stop"),
-            KeyCode::Home => self.editor.cursor = self.editor.line_start(),
-            KeyCode::End => self.editor.cursor = self.editor.line_end(),
-            KeyCode::Left => self.editor.cursor = self.editor.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.editor.cursor = (self.editor.cursor + 1).min(self.editor.text.len())
+            _ => {
+                edit(&mut self.editor, key);
             }
-            KeyCode::Up => {
-                let start = self.editor.line_start();
-                if start > 0 {
-                    let col = self.editor.cursor - start;
-                    let prev_start = self.editor.text[..start - 1]
-                        .iter()
-                        .rposition(|c| *c == '\n')
-                        .map_or(0, |i| i + 1);
-                    self.editor.cursor = (prev_start + col).min(start - 1);
-                }
-            }
-            KeyCode::Down => {
-                let end = self.editor.line_end();
-                if end < self.editor.text.len() {
-                    let col = self.editor.cursor - self.editor.line_start();
-                    let next_end = self.editor.text[end + 1..]
-                        .iter()
-                        .position(|c| *c == '\n')
-                        .map_or(self.editor.text.len(), |i| end + 1 + i);
-                    self.editor.cursor = (end + 1 + col).min(next_end);
-                }
-            }
-            KeyCode::Backspace => self.editor.backspace(),
-            KeyCode::Delete => self.editor.delete(),
-            KeyCode::Tab => self.editor.insert("  "),
-            KeyCode::Esc => {}
-            KeyCode::Char(c) if !ctrl && !alt => self.editor.insert(&c.to_string()),
-            _ => {}
         }
     }
 }
 
+/// The editing keys every input shares: Alt+Enter, Shift+Enter or Ctrl+J for a new line,
+/// Ctrl+U, Ctrl+W, Ctrl+A and Ctrl+E as in a shell, and the arrows. Returns whether the key
+/// was one of them.
+pub(crate) fn edit(editor: &mut Editor, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => editor.insert("\n"),
+        KeyCode::Char('j') if ctrl => editor.insert("\n"),
+        KeyCode::Char('u') if ctrl => {
+            let start = editor.line_start();
+            while editor.cursor > start {
+                editor.backspace();
+            }
+        }
+        KeyCode::Char('w') if ctrl => editor.delete_word(),
+        KeyCode::Backspace if alt => editor.delete_word(),
+        KeyCode::Char('a') if ctrl => editor.cursor = editor.line_start(),
+        KeyCode::Char('e') if ctrl => editor.cursor = editor.line_end(),
+        KeyCode::Home => editor.cursor = editor.line_start(),
+        KeyCode::End => editor.cursor = editor.line_end(),
+        KeyCode::Left => editor.cursor = editor.cursor.saturating_sub(1),
+        KeyCode::Right => editor.cursor = (editor.cursor + 1).min(editor.text.len()),
+        KeyCode::Up => {
+            let start = editor.line_start();
+            if start > 0 {
+                let col = editor.cursor - start;
+                let prev_start = editor.text[..start - 1]
+                    .iter()
+                    .rposition(|c| *c == '\n')
+                    .map_or(0, |i| i + 1);
+                editor.cursor = (prev_start + col).min(start - 1);
+            }
+        }
+        KeyCode::Down => {
+            let end = editor.line_end();
+            if end < editor.text.len() {
+                let col = editor.cursor - editor.line_start();
+                let next_end = editor.text[end + 1..]
+                    .iter()
+                    .position(|c| *c == '\n')
+                    .map_or(editor.text.len(), |i| end + 1 + i);
+                editor.cursor = (end + 1 + col).min(next_end);
+            }
+        }
+        KeyCode::Backspace => editor.backspace(),
+        KeyCode::Delete => editor.delete(),
+        KeyCode::Char(c) if !ctrl && !alt => editor.insert(&c.to_string()),
+        _ => return false,
+    }
+    true
+}
+
 /// `text` broken into rows of at most `width` columns at spaces or newlines, and the cursor's
 /// row and column.
-fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
     // Each character's row and column, kept up to date as words move down, so the cursor
     // lands where its character finally is.
     let mut rows: Vec<Vec<(usize, char)>> = vec![Vec::new()];
@@ -655,7 +678,7 @@ pub async fn run(thread_id: String) -> Result<()> {
                     _ => {}
                 },
                 event = done.recv() => match event {
-                    Some(Done::Note(text, error)) => composer.note(text, error),
+                    Some(Done::Note(text, error)) => if !text.is_empty() { composer.note(text, error) },
                     Some(Done::Restore(text)) => {
                         if composer.editor.text.is_empty() {
                             composer.editor.insert(&text);

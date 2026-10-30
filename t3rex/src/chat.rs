@@ -135,6 +135,14 @@ pub fn fit(text: &str, width: usize) -> String {
     kept + "…"
 }
 
+/// `path` with the home folder written as `~`.
+pub fn short_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => format!("~{}", &path[home.len()..]),
+        _ => path.to_string(),
+    }
+}
+
 /// A path for a `file://` URL: anything but unreserved characters and `/` percent-encoded.
 pub fn percent(path: &str) -> String {
     let mut out = String::new();
@@ -148,7 +156,7 @@ pub fn percent(path: &str) -> String {
     out
 }
 
-fn one_line(text: &str) -> String {
+pub fn one_line(text: &str) -> String {
     transcript::plain(text)
         .split_whitespace()
         .collect::<Vec<_>>()

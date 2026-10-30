@@ -49,16 +49,35 @@ rex.action{
   end,
 }
 
+-- A new thread in the T3 Code session, from anywhere. In that session, New Tab does the same.
 rex.action{
   name = "t3_new",
-  title = "New Thread in T3 Code",
+  title = "New Thread",
   category = "T3 Code",
-  keywords = "t3 create start",
-  run = function() rex.exec({ "/usr/bin/open", "t3code://new" }) end,
+  keywords = "t3 create start compose prompt",
+  run = function(ctx)
+    local r = rex.exec({ T3REX, "inbox" }, { timeout = 10 })
+    if not (r and r.ok) then error("t3rex isn't syncing", 0) end
+    local sid = rex.json.decode(r.stdout).session_id
+    local w, err = rex.session.new_window{
+      session_id = sid,
+      window_label = "New Thread",
+      focus = true,
+      layout = { block = { flavor = "com.superlogical.terminal.shell", label = "New Thread",
+        options = { shell = "none", command = { T3REX, "new" } } } },
+    }
+    if err then error(err, 0) end
+    rex.session.disown_block{ session_id = sid }
+    rex.client.queue("session.select", { session_id = sid, window_id = w.window_id })
+  end,
 }
+
+thread_action("t3_model", "Change Model…", { "model" }, "t3 effort access provider reasoning")
 
 rex.bind("ctrl+cmd+s", "t3_settle")
 rex.bind("ctrl+cmd+z", "t3_snooze_hour")
 rex.bind("ctrl+cmd+p", "t3_pin")
 rex.bind("ctrl+cmd+o", "t3_open")
 rex.bind("ctrl+cmd+i", "t3_inbox")
+rex.bind("ctrl+cmd+n", "t3_new")
+rex.bind("ctrl+cmd+m", "t3_model")
