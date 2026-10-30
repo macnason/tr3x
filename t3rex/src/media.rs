@@ -133,6 +133,16 @@ impl Media {
         embed: &Embed,
         done: tokio::sync::mpsc::UnboundedSender<(String, PathBuf)>,
     ) {
+        // An attachment id names a file in T3's folder and nothing outside it.
+        let safe = !embed.attachment.is_empty()
+            && embed
+                .attachment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            && !embed.attachment.contains("..");
+        if !safe {
+            return;
+        }
         if self.snapshots.contains_key(&embed.attachment)
             || !self.asked.insert(embed.attachment.clone())
         {
@@ -179,8 +189,17 @@ impl Media {
                     ]
                 })
                 .arg(format!("--window-size=728,{}", embed.height))
+                // Its own profile, so a running Chrome never takes the page as a new tab.
+                .arg(format!(
+                    "--user-data-dir={}",
+                    cache.join("chromium-profile").display()
+                ))
+                .arg("--no-first-run")
                 .arg(format!("--screenshot={}", png.display()))
-                .arg(format!("file://{}", page.display()))
+                .arg(format!(
+                    "file://{}",
+                    crate::chat::percent(&page.to_string_lossy())
+                ))
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .kill_on_drop(true)

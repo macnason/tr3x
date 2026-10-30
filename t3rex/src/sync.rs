@@ -188,6 +188,54 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
     plan
 }
 
+/// Each window's thread, from the tag on its conversation pane's block label, `t3:<thread>`.
+fn tagged(windows: &[Value]) -> Vec<(String, String)> {
+    windows
+        .iter()
+        .filter_map(|w| {
+            let id = w["window_id"].as_str()?;
+            let thread = w["layers"]
+                .as_array()?
+                .iter()
+                .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
+                .find_map(|b| b["label"].as_str()?.strip_prefix("t3:"))?;
+            Some((id.to_string(), thread.to_string()))
+        })
+        .collect()
+}
+
+/// Takes back windows t3rex made but lost track of, as after a script that failed partway,
+/// and returns the extra windows of a thread that has more than one, to close.
+fn adopt(windows: &[Value], state: &mut State) -> Vec<String> {
+    let present: HashSet<&str> = windows
+        .iter()
+        .filter_map(|w| w["window_id"].as_str())
+        .collect();
+    let mut extra = Vec::new();
+    for (window, thread) in tagged(windows) {
+        match state.windows.get(&thread) {
+            Some(w) if w.window_id == window => {}
+            Some(w) if present.contains(w.window_id.as_str()) => extra.push(window),
+            _ => {
+                let label = windows
+                    .iter()
+                    .find(|w| w["window_id"] == window.as_str())
+                    .and_then(|w| w["label"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                state.windows.insert(
+                    thread,
+                    Window {
+                        window_id: window,
+                        label,
+                    },
+                );
+            }
+        }
+    }
+    extra
+}
+
 /// The Lua that carries out `plan` in one connection, so the blocks it starts are disowned by
 /// the client that made them and size to whoever views them.
 pub fn script(plan: &Plan, exe: &str) -> String {
@@ -237,7 +285,7 @@ for _, c in ipairs(plan.create or {{}}) do
   }}
   if w then
     out.created[c.thread] = w.window_id
-    rex.session.set_block_label{{ block_id = w.block_ids[1], label = "T3" }}
+    rex.session.set_block_label{{ block_id = w.block_ids[1], label = "t3:" .. c.thread }}
     rex.session.set_block_label{{ block_id = w.block_ids[2], label = "Reply" }}
   else
     table.insert(out.errors, err)
@@ -277,14 +325,17 @@ impl Syncer {
             return Ok(id.clone());
         }
         let id = self.rex.create_session(SESSION_LABEL).await?;
-        if self.first {
-            self.rex.move_session(&id, 1).await?;
-        }
+        // Recorded before anything else can fail, so a retry never makes a second session.
         self.state = State {
             session_id: Some(id.clone()),
             ..State::default()
         };
         self.state.save()?;
+        if self.first
+            && let Err(e) = self.rex.move_session(&id, 1).await
+        {
+            eprintln!("t3rex: couldn't move the session first: {e:#}");
+        }
         Ok(id)
     }
 
@@ -292,10 +343,12 @@ impl Syncer {
     pub async fn reconcile(&mut self, wants: &[Want]) -> Result<bool> {
         let session = self.session().await?;
         let view = self.rex.inspect(&session).await?;
-        let present: Vec<(String, String)> = view["windows"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+        // An answer without a window list is not "every window was closed".
+        let Some(windows) = view["windows"].as_array() else {
+            anyhow::bail!("Rex described the session without its windows");
+        };
+        let mut extra = adopt(windows, &mut self.state);
+        let present: Vec<(String, String)> = windows
             .iter()
             .filter_map(|w| {
                 Some((
@@ -304,7 +357,8 @@ impl Syncer {
                 ))
             })
             .collect();
-        let plan = plan(wants, &present, &mut self.state);
+        let mut plan = plan(wants, &present, &mut self.state);
+        plan.close.append(&mut extra);
         if plan.is_empty() {
             self.state.save()?;
             return Ok(false);
@@ -336,6 +390,12 @@ impl Syncer {
 /// Follows T3 until interrupted, reconciling after each burst of changes and every few
 /// seconds, which picks up snoozes that end and windows closed in Rex.
 pub async fn run(first: bool) -> Result<()> {
+    // One sync at a time: two would each make windows for the same threads.
+    std::fs::create_dir_all(crate::state::dir())?;
+    let lock = std::fs::File::create(crate::state::dir().join("sync.lock"))?;
+    if lock.try_lock().is_err() {
+        anyhow::bail!("another t3rex sync is already running");
+    }
     let client = t3::connect(false).await.context("couldn't reach T3")?;
     let caps = t3::capabilities(&client);
     let mut syncer = Syncer {
@@ -348,6 +408,7 @@ pub async fn run(first: bool) -> Result<()> {
     let mut shell = ShellState::default();
     let mut inbox = Inbox::default();
     let mut ready = false;
+    let mut failures = 0;
     let mut dirty = false;
     let mut last: Vec<Want> = Vec::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -355,11 +416,19 @@ pub async fn run(first: bool) -> Result<()> {
         tokio::select! {
             event = events.recv() => match event {
                 Some(WatchEvent::Item(item)) => {
+                    failures = 0;
                     shell.apply(&item);
                     ready |= item["kind"] == "synchronized";
                     dirty = true;
                 }
-                Some(WatchEvent::Reconnecting { reason, .. }) => eprintln!("t3rex: T3 reconnecting: {reason}"),
+                Some(WatchEvent::Reconnecting { reason, .. }) => {
+                    eprintln!("t3rex: T3 reconnecting: {reason}");
+                    // After a few minutes, start over with a fresh login; launchd restarts us.
+                    failures += 1;
+                    if failures > 40 {
+                        anyhow::bail!("T3 hasn't answered for a while: {reason}");
+                    }
+                }
                 Some(WatchEvent::Failed(message)) => anyhow::bail!("T3 refused the subscription: {message}"),
                 None => anyhow::bail!("T3's subscription ended"),
             },
@@ -453,6 +522,29 @@ mod tests {
         state.windows.insert("b".into(), win("w-b", "B"));
         let present = vec![("w-a".into(), "A".into()), ("w-b".into(), "B".into())];
         assert!(plan(&[want("a", "A"), want("b", "B")], &present, &mut state).is_empty());
+    }
+
+    fn tagged_window(id: &str, thread: &str) -> Value {
+        json!({"window_id": id, "label": "L", "layers": [{"blocks": [
+            {"block_id": "b1", "label": format!("t3:{thread}")},
+            {"block_id": "b2", "label": "Reply"}
+        ]}]})
+    }
+
+    #[test]
+    fn lost_windows_are_adopted_and_duplicates_closed() {
+        let mut state = State::default();
+        state.windows.insert("a".into(), win("w-a", "A"));
+        let windows = vec![
+            tagged_window("w-a", "a"),
+            tagged_window("w-a2", "a"),
+            tagged_window("w-b", "b"),
+            json!({"window_id": "user", "label": "mine", "layers": [{"blocks": [{"label": "shell"}]}]}),
+        ];
+        let extra = adopt(&windows, &mut state);
+        assert_eq!(extra, vec!["w-a2".to_string()]);
+        assert_eq!(state.windows["b"].window_id, "w-b");
+        assert!(!state.windows.values().any(|w| w.window_id == "user"));
     }
 
     #[test]

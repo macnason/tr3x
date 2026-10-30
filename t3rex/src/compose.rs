@@ -36,6 +36,7 @@ struct Editor {
 
 impl Editor {
     fn insert(&mut self, s: &str) {
+        let s = s.replace('\t', "    ");
         for c in s.chars().filter(|c| *c == '\n' || !c.is_control()) {
             self.text.insert(self.cursor, c);
             self.cursor += 1;
@@ -79,14 +80,28 @@ impl Editor {
     fn string(&self) -> String {
         self.text.iter().collect()
     }
-    fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
+}
+
+/// The `/` commands. Anything else starting with `/`, such as a path, is a message.
+const COMMANDS: &[&str] = &[
+    "settle", "unsettle", "snooze", "wake", "pin", "unpin", "archive", "stop", "open", "model",
+    "effort", "mode", "steer",
+];
+
+/// Agent-written text as one plain line: no escape sequences or other controls, which could
+/// redraw the pane and show something other than what is being asked.
+fn clean(text: &str) -> String {
+    t3term::transcript::plain(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What came back from work started in the background.
 enum Done {
     Note(String, bool),
+    /// A message that failed to send, back into the input if it's empty.
+    Restore(String),
     Config(Value),
 }
 
@@ -176,13 +191,15 @@ impl Composer {
         if let Some((request, item)) = self.pending() {
             if request["kind"] == "user_input" {
                 if let Some(q) = self.question(&item) {
-                    let prompt = q["question"]
-                        .as_str()
-                        .or(q["header"].as_str())
-                        .unwrap_or("Question");
+                    let prompt = clean(
+                        q["question"]
+                            .as_str()
+                            .or(q["header"].as_str())
+                            .unwrap_or("Question"),
+                    );
                     rows.push(format!(
                         "{YELLOW}{BOLD}◆{RESET} {BOLD}{}{RESET}",
-                        fit(prompt, width - 2)
+                        fit(&prompt, width - 2)
                     ));
                     let opts: Vec<String> = q["options"]
                         .as_array()
@@ -194,7 +211,7 @@ impl Composer {
                             format!(
                                 "{DIM}{}{RESET} {}",
                                 i + 1,
-                                o["label"].as_str().unwrap_or("")
+                                clean(o["label"].as_str().unwrap_or(""))
                             )
                         })
                         .collect();
@@ -208,7 +225,7 @@ impl Composer {
                     .or(item["title"].as_str())
                     .or(request["summary"].as_str())
                     .unwrap_or("The agent is asking to continue");
-                let what = what.split_whitespace().collect::<Vec<_>>().join(" ");
+                let what = clean(what);
                 let verb = match request["kind"].as_str().unwrap_or_default() {
                     k if k.contains("command") => "Run",
                     k if k.contains("file-change") || k.contains("file_change") => "Change",
@@ -221,7 +238,7 @@ impl Composer {
                     fit(&what, width.saturating_sub(8))
                 ));
                 rows.push(format!(
-                    "{BOLD}a{RESET} Accept   {BOLD}s{RESET} Accept for session   {BOLD}d{RESET} Decline"
+                    "{BOLD}a ⏎{RESET} Accept   {BOLD}s ⏎{RESET} Accept for session   {BOLD}d ⏎{RESET} Decline"
                 ));
             }
         }
@@ -334,21 +351,61 @@ impl Composer {
             }
             return;
         }
-        if let Some(command) = trimmed.strip_prefix('/') {
+        // An approval takes a, s or d and Enter. A reply that starts with one of those letters
+        // stays a reply.
+        if let Some((request, _)) = self.pending()
+            && request["kind"] != "user_input"
+            && let Some(decision) = match trimmed {
+                "a" => Some("accept"),
+                "s" => Some("acceptForSession"),
+                "d" => Some("decline"),
+                _ => None,
+            }
+        {
+            self.editor.take();
+            self.respond(decision);
+            return;
+        }
+        if let Some(command) = trimmed.strip_prefix('/')
+            && COMMANDS.contains(&command.split_whitespace().next().unwrap_or(""))
+        {
             let command = command.to_string();
+            if let Some(text) = command.strip_prefix("steer") {
+                let text = text.trim().to_string();
+                self.editor.take();
+                self.editor.insert(&text);
+                self.send(IfBusy::Steer);
+                return;
+            }
             self.editor.take();
             self.command(&command);
             return;
         }
+        self.send(IfBusy::Queue);
+    }
+
+    /// Sends the input. Queue waits for the running turn; Steer goes to it now. A send that
+    /// fails puts the text back.
+    fn send(&mut self, mode: IfBusy) {
         let Some(state) = self.state.clone() else {
             return;
         };
         let message = self.editor.take();
         let client = self.client.clone();
         let busy = state.active_run().is_some();
-        self.spawn(async move {
-            client.send_message(&state, &message, IfBusy::Queue).await?;
-            Ok(if busy { "Queued" } else { "Sent" }.into())
+        let steer = matches!(mode, IfBusy::Steer);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let done = match client.send_message(&state, &message, mode).await {
+                Ok(_) if busy && steer => Done::Note("Sent to the running turn".into(), false),
+                Ok(_) if busy => Done::Note("Queued".into(), false),
+                Ok(_) => Done::Note("Sent".into(), false),
+                Err(e) => {
+                    let _ = tx.send(Done::Restore(message));
+                    Done::Note(format!("{e:#}"), true)
+                }
+            };
+            let _ = tx.send(done);
         });
     }
 
@@ -432,20 +489,6 @@ impl Composer {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         self.note = None;
-        // An approval answers with a single key while the input is empty.
-        if self.editor.is_empty()
-            && !ctrl
-            && let Some((request, _)) = self.pending()
-            && request["kind"] != "user_input"
-            && let KeyCode::Char(c @ ('a' | 's' | 'd')) = key.code
-        {
-            self.respond(match c {
-                'a' => "accept",
-                's' => "acceptForSession",
-                _ => "decline",
-            });
-            return;
-        }
         match key.code {
             KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.editor.insert("\n")
@@ -507,42 +550,50 @@ impl Composer {
 /// `text` broken into rows of at most `width` columns at spaces or newlines, and the cursor's
 /// row and column.
 fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
-    let mut lines = vec![String::new()];
+    // Each character's row and column, kept up to date as words move down, so the cursor
+    // lands where its character finally is.
+    let mut rows: Vec<Vec<(usize, char)>> = vec![Vec::new()];
     let mut col = 0;
-    let mut at = (0, 0);
     for (i, &c) in text.iter().enumerate() {
-        if i == cursor {
-            at = (lines.len() - 1, col);
-        }
         if c == '\n' {
-            lines.push(String::new());
+            rows.last_mut().unwrap().push((i, c));
+            rows.push(Vec::new());
             col = 0;
             continue;
         }
         let w = c.width().unwrap_or(0);
         if col + w > width {
             // Move the word being typed down with it, when there is a space to break at.
-            let line = lines.last_mut().unwrap();
-            let carried = match line.rfind(' ') {
-                Some(space) if space + 1 < line.len() => {
-                    let tail = line[space + 1..].to_string();
-                    line.truncate(space + 1);
-                    tail
-                }
-                _ => String::new(),
+            let row = rows.last_mut().unwrap();
+            let carried = match row.iter().rposition(|(_, ch)| *ch == ' ') {
+                Some(space) if space + 1 < row.len() => row.split_off(space + 1),
+                _ => Vec::new(),
             };
-            col = unicode_width::UnicodeWidthStr::width(carried.as_str());
-            if i == cursor {
-                at = (lines.len(), col);
-            }
-            lines.push(carried);
+            col = carried.iter().map(|(_, ch)| ch.width().unwrap_or(0)).sum();
+            rows.push(carried);
         }
-        lines.last_mut().unwrap().push(c);
+        rows.last_mut().unwrap().push((i, c));
         col += w;
     }
-    if cursor >= text.len() {
-        at = (lines.len() - 1, col);
+    let mut at = (rows.len() - 1, col);
+    for (r, row) in rows.iter().enumerate() {
+        let mut x = 0;
+        for &(i, ch) in row {
+            if i == cursor {
+                at = (r, x);
+            }
+            x += ch.width().unwrap_or(0);
+        }
     }
+    let lines = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .filter(|(_, c)| *c != '\n')
+                .map(|(_, c)| c)
+                .collect()
+        })
+        .collect();
     (lines, at)
 }
 
@@ -605,6 +656,11 @@ pub async fn run(thread_id: String) -> Result<()> {
                 },
                 event = done.recv() => match event {
                     Some(Done::Note(text, error)) => composer.note(text, error),
+                    Some(Done::Restore(text)) => {
+                        if composer.editor.text.is_empty() {
+                            composer.editor.insert(&text);
+                        }
+                    }
                     Some(Done::Config(config)) => composer.config = Some(config),
                     None => {}
                 },
@@ -643,6 +699,9 @@ mod tests {
         let (lines, at) = wrap(&text, text.len(), 11);
         assert_eq!(lines, vec!["hello ".to_string(), "there world".to_string()]);
         assert_eq!(at, (1, 11));
+        // The cursor inside a word that a later character carries down goes down with it.
+        let text: Vec<char> = "hello there".chars().collect();
+        assert_eq!(wrap(&text, 8, 10).1, (1, 2));
         let (lines, at) = wrap(&"a\nb".chars().collect::<Vec<_>>(), 2, 10);
         assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(at, (1, 0));

@@ -17,7 +17,9 @@ pub async fn connect(operate: bool) -> Result<Arc<Client>> {
         &[Scope::Read]
     };
     let target = t3term::environments::target(None).await?;
-    Ok(Arc::new(Client::connect(&target, scopes, "12h").await?))
+    // Panes live as long as their windows, so the login outlasts any session; each process
+    // revokes its own on exit.
+    Ok(Arc::new(Client::connect(&target, scopes, "30d").await?))
 }
 
 pub fn capabilities(client: &Client) -> Capabilities {
@@ -117,7 +119,7 @@ pub fn parse_duration(text: &str) -> Option<i64> {
         "w" | "week" | "weeks" => 7 * 86_400_000,
         _ => return None,
     };
-    Some(n * per)
+    n.checked_mul(per)
 }
 
 /// How long a snooze lasts: a duration, or `tomorrow` for 9 AM local time the next day.

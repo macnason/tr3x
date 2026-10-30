@@ -77,6 +77,7 @@ fn plist(bin: &Path, rex: &Path) -> String {
   <key>EnvironmentVariables</key><dict>
     <key>T3REX_REX</key><string>{rex}</string>
     <key>PATH</key><string>{path}</string>
+    <key>T3REX_STATE_DIR</key><string>{state}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -91,17 +92,20 @@ fn plist(bin: &Path, rex: &Path) -> String {
         rex = rex.display(),
         path = path_var(),
         log = log.display(),
+        state = state::dir().display(),
     )
 }
 
 /// Adds the `require` line to init.lua, after copying the file aside once.
 fn add_require(dir: &Path) -> Result<&'static str> {
     let init = dir.join("init.lua");
-    let text = std::fs::read_to_string(&init).unwrap_or_default();
-    if text
-        .lines()
-        .any(|l| l.trim_start().starts_with("require(\"t3rex\")"))
-    {
+    // A file that exists but can't be read is left alone, never replaced.
+    let text = match std::fs::read_to_string(&init) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => bail!("couldn't read {}: {e}", init.display()),
+    };
+    if text.lines().any(|l| l.trim() == REQUIRE) {
         return Ok("already loads t3rex");
     }
     if init.exists() {
@@ -129,14 +133,17 @@ fn remove_require(dir: &Path) -> Result<()> {
     let Ok(text) = std::fs::read_to_string(&init) else {
         return Ok(());
     };
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("require(\"t3rex\")"))
-        .collect();
+    // Only the line install added goes; anything else is the user's.
+    if !text.lines().any(|l| l.trim() == REQUIRE) {
+        return Ok(());
+    }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let kept: Vec<&str> = text.lines().filter(|l| l.trim() != REQUIRE).collect();
     if kept.iter().all(|l| l.trim().is_empty()) && !dir.join("init.lua.before-t3rex").exists() {
         std::fs::remove_file(&init)?;
     } else {
-        std::fs::write(&init, kept.join("\n") + "\n")?;
+        let ends = text.ends_with('\n');
+        std::fs::write(&init, kept.join(newline) + if ends { newline } else { "" })?;
     }
     Ok(())
 }

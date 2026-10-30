@@ -47,6 +47,9 @@ struct Pane {
     committed: Vec<(String, String)>,
     /// Rows the live tail takes at the bottom, which the next frame rewrites.
     live_rows: usize,
+    /// Lines from the top of the live tail that have printed for good, because the tail
+    /// outgrew the screen. Later frames and the commit skip them.
+    spilled: usize,
     /// The last status sent with OSC 7501, so it goes out only when it changes.
     status: String,
     title: String,
@@ -130,6 +133,19 @@ pub fn fit(text: &str, width: usize) -> String {
     kept + "…"
 }
 
+/// A path for a `file://` URL: anything but unreserved characters and `/` percent-encoded.
+pub fn percent(path: &str) -> String {
+    let mut out = String::new();
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 fn one_line(text: &str) -> String {
     transcript::plain(text)
         .split_whitespace()
@@ -169,7 +185,9 @@ fn tool_glyph(block: &Block) -> &'static str {
 fn short_path(word: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let word = match word.strip_prefix(&home) {
-        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
         _ => word.to_string(),
     };
     if word.len() <= 48 || !word.contains('/') {
@@ -554,6 +572,7 @@ impl Pane {
             rows: rows as usize,
             committed: Vec::new(),
             live_rows: 0,
+            spilled: 0,
             status: String::new(),
             title: String::new(),
             header: false,
@@ -588,6 +607,7 @@ impl Pane {
             text.push_str("\x1b_Ga=d,d=A,q=2\x1b\\\x1b[H\x1b[2J\x1b[3J");
             self.committed.clear();
             self.live_rows = 0;
+            self.spilled = 0;
             self.header = false;
         }
         // Back to the top of the live tail, and clear it.
@@ -623,18 +643,28 @@ impl Pane {
         while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active)
         {
             let block = &blocks[index];
-            for line in pad(lines_at(&blocks, &shown, index, &fixed)) {
-                text.push_str(&line);
+            let lines = pad(lines_at(&blocks, &shown, index, &fixed));
+            // The top of this block may already be on screen, printed while it was live.
+            let skip = self.spilled.min(lines.len());
+            self.spilled -= skip;
+            for line in &lines[skip..] {
+                text.push_str(line);
                 text.push_str("\r\n");
             }
             self.committed
                 .push((block.item_id.clone(), block.updated_at.clone()));
             index += 1;
         }
+        if index == blocks.len() {
+            self.spilled = 0;
+        }
         let mut live: Vec<String> = Vec::new();
         for i in index..blocks.len() {
             live.extend(pad(lines_at(&blocks, &shown, i, &moving)));
         }
+        // Lines that already printed for good stay where they are.
+        let skip = self.spilled.min(live.len());
+        live.drain(..skip);
         if run_active {
             live.push(String::new());
             let since = state
@@ -661,6 +691,7 @@ impl Pane {
                 text.push_str(&line);
                 text.push_str("\r\n");
             }
+            self.spilled += cut;
         }
         for line in &live {
             text.push_str(line);
@@ -766,23 +797,37 @@ async fn composer_block() -> Option<String> {
 }
 
 /// Typing in the conversation goes to the composer: focus moves there with the keys typed.
-async fn hand_to_composer(text: String) {
-    let Some(block) = composer_block().await else {
-        return;
-    };
-    let rex = crate::rex::Rex::find();
-    let bin = rex.bin.clone();
-    let session = std::env::var("REX_SESSION").unwrap_or_default();
-    let _ = tokio::process::Command::new(&bin)
-        .args(["focus", "-s", &session, &block])
-        .output()
-        .await;
-    if !text.is_empty() {
-        let _ = tokio::process::Command::new(&bin)
-            .args(["send", "-b", &block, &text])
-            .output()
-            .await;
-    }
+/// Keys go through one task in order, so a burst of typing arrives as typed.
+fn spawn_handoff() -> mpsc::UnboundedSender<String> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let bin = crate::rex::Rex::find().bin;
+        let session = std::env::var("REX_SESSION").unwrap_or_default();
+        let mut block: Option<String> = None;
+        while let Some(first) = rx.recv().await {
+            let mut text = first;
+            while let Ok(more) = rx.try_recv() {
+                text.push_str(&more);
+            }
+            if block.is_none() {
+                block = composer_block().await;
+            }
+            let Some(block) = block.as_deref() else {
+                continue;
+            };
+            let _ = tokio::process::Command::new(&bin)
+                .args(["focus", "-s", &session, block])
+                .output()
+                .await;
+            if !text.is_empty() {
+                let _ = tokio::process::Command::new(&bin)
+                    .args(["send", "-b", block, &text])
+                    .output()
+                    .await;
+            }
+        }
+    });
+    tx
 }
 
 pub async fn run(thread_id: String) -> Result<()> {
@@ -793,7 +838,10 @@ pub async fn run(thread_id: String) -> Result<()> {
     // Clear what the login printed, hide the cursor, and ask for focus reports.
     out("\x1b[H\x1b[2J\x1b[3J\x1b[?25l\x1b[?1004h");
     if let Ok(cwd) = std::env::current_dir() {
-        out(&format!("\x1b]7;file://localhost{}\x1b\\", cwd.display()));
+        out(&format!(
+            "\x1b]7;file://localhost{}\x1b\\",
+            percent(&cwd.to_string_lossy())
+        ));
     }
     let result = event_loop(&client, &thread_id, &mut thread_events, &mut shell_events).await;
     out("\x1b[?1004l\x1b[?25h");
@@ -812,6 +860,7 @@ async fn event_loop(
         "t3code://threads/{}/{}",
         client.runtime.environment_id, thread_id
     );
+    let handoff = spawn_handoff();
     let mut pane = Pane::new(
         Media::new(client.runtime.state_dir.as_deref()),
         link,
@@ -863,7 +912,7 @@ async fn event_loop(
                         KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => c.to_string(),
                         _ => String::new(),
                     };
-                    tokio::spawn(hand_to_composer(typed));
+                    let _ = handoff.send(typed);
                 }
                 Some(Err(_)) | None => {}
                 _ => {}

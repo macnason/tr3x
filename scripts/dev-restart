@@ -4,6 +4,9 @@
 # touches an installed setup's state by accident).
 set -e
 : "${T3REX_STATE_DIR:?set T3REX_STATE_DIR to a scratch directory}"
+case "$T3REX_STATE_DIR" in
+  "$HOME/.local/state/t3rex"|"$HOME/.local/state/t3rex/") echo "dev-restart: that's the installed state; use a scratch dir" >&2; exit 1 ;;
+esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
 cargo build --release -p t3rex --manifest-path "$HERE/Cargo.toml" 2>&1 | grep -E '^(error|warning: unused)' -A5 || true
