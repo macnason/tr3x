@@ -211,9 +211,17 @@ fn restore_rex_prefs() {
     for (key, value) in before {
         let mut args = vec!["delete".to_string(), REX_DOMAIN.into(), key.clone()];
         if let Some(v) = value.as_str() {
-            args = vec!["write".into(), REX_DOMAIN.into(), key, "-string".into(), v.into()];
+            args = vec![
+                "write".into(),
+                REX_DOMAIN.into(),
+                key,
+                "-string".into(),
+                v.into(),
+            ];
         }
-        let _ = std::process::Command::new("/usr/bin/defaults").args(&args).status();
+        let _ = std::process::Command::new("/usr/bin/defaults")
+            .args(&args)
+            .status();
     }
     let _ = std::fs::remove_file(prefs_backup());
 }
@@ -284,7 +292,11 @@ pub async fn install() -> Result<()> {
 
     std::fs::create_dir_all(state::dir())?;
     let prefs = set_rex_prefs()?;
-    step(true, "Panes keep full contrast", &format!("{REX_DOMAIN} {prefs}"));
+    step(
+        true,
+        "Panes keep full contrast",
+        &format!("{REX_DOMAIN} {prefs}"),
+    );
     let plist_file = plist_path();
     std::fs::create_dir_all(plist_file.parent().unwrap())?;
     std::fs::write(&plist_file, plist(&bin, &rex.bin))?;
@@ -307,7 +319,10 @@ pub async fn install() -> Result<()> {
         let state = State::load();
         // The session comes first and its windows a moment later; with no threads, it stays
         // empty but for the new-thread window.
-        if let Some(session) = state.session_id.filter(|_| !state.windows.is_empty() || i >= 12) {
+        if let Some(session) = state
+            .session_id
+            .filter(|_| !state.windows.is_empty() || i >= 12)
+        {
             let count = state.windows.len();
             step(
                 true,

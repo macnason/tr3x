@@ -138,7 +138,9 @@ pub fn fit(text: &str, width: usize) -> String {
 /// `path` with the home folder written as `~`.
 pub fn short_home(path: &str) -> String {
     match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => format!("~{}", &path[home.len()..]),
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
         _ => path.to_string(),
     }
 }

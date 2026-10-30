@@ -503,7 +503,11 @@ impl Composer {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
         match key.code {
-            KeyCode::Enter if !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+            KeyCode::Enter
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
                 self.submit()
             }
             KeyCode::Char('c') if ctrl => {

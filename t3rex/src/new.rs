@@ -140,7 +140,9 @@ impl NewThread {
     }
 
     fn is_repo(&self) -> bool {
-        self.branches.get(&self.project).is_none_or(|(_, repo)| *repo)
+        self.branches
+            .get(&self.project)
+            .is_none_or(|(_, repo)| *repo)
     }
 
     fn fields(&self) -> Vec<Field> {
@@ -173,7 +175,9 @@ impl NewThread {
                             .or_else(|| p.map(icons::fallback))
                             .unwrap_or(Icon::Text("PR".into(), 4)),
                     ),
-                    p.and_then(|p| p["title"].as_str()).unwrap_or("Project").to_string(),
+                    p.and_then(|p| p["title"].as_str())
+                        .unwrap_or("Project")
+                        .to_string(),
                 )
             }
             Field::Model => (
@@ -187,7 +191,12 @@ impl NewThread {
             Field::Access => (None, self.settings.mode_label()),
             Field::Workspace => (
                 None,
-                if self.worktree { "New worktree" } else { "Local" }.to_string(),
+                if self.worktree {
+                    "New worktree"
+                } else {
+                    "Local"
+                }
+                .to_string(),
             ),
             Field::Branch => (
                 None,
@@ -218,7 +227,12 @@ impl NewThread {
                     .filter_map(|p| {
                         let id = p["id"].as_str()?;
                         let mut item = Item::new(id, p["title"].as_str().unwrap_or("Project"));
-                        item.icon = Some(self.icons.get(id).cloned().unwrap_or_else(|| icons::fallback(p)));
+                        item.icon = Some(
+                            self.icons
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| icons::fallback(p)),
+                        );
                         item.detail = p["workspaceRoot"]
                             .as_str()
                             .map(crate::chat::short_home)
@@ -230,7 +244,10 @@ impl NewThread {
             ),
             Field::Model => (
                 picker::model_items(&self.config, &self.logos),
-                Some(format!("{}/{}", self.settings.instance, self.settings.model)),
+                Some(format!(
+                    "{}/{}",
+                    self.settings.instance, self.settings.model
+                )),
             ),
             Field::Effort => (
                 picker::effort_items(&self.config, &self.settings),
@@ -241,7 +258,10 @@ impl NewThread {
                 Some(self.settings.mode.clone()),
             ),
             Field::Workspace => (
-                vec![Item::new("local", "Local"), Item::new("worktree", "New worktree")],
+                vec![
+                    Item::new("local", "Local"),
+                    Item::new("worktree", "New worktree"),
+                ],
                 Some(if self.worktree { "worktree" } else { "local" }.into()),
             ),
             Field::Branch => (
@@ -373,7 +393,10 @@ impl NewThread {
         while body.len() < 3 {
             body.push(String::new());
         }
-        lines.push(format!("{pad}{DIM}╭{}╮{RESET}", "─".repeat(width.saturating_sub(2))));
+        lines.push(format!(
+            "{pad}{DIM}╭{}╮{RESET}",
+            "─".repeat(width.saturating_sub(2))
+        ));
         let first_body = lines.len();
         for row in &body {
             let w = crate::render::visible_width(row);
@@ -382,7 +405,10 @@ impl NewThread {
                 " ".repeat(inner.saturating_sub(w))
             ));
         }
-        lines.push(format!("{pad}{DIM}╰{}╯{RESET}", "─".repeat(width.saturating_sub(2))));
+        lines.push(format!(
+            "{pad}{DIM}╰{}╯{RESET}",
+            "─".repeat(width.saturating_sub(2))
+        ));
         let fields = self.fields();
         let chips: Vec<Chip> = fields.iter().map(|f| self.chip(*f)).collect();
         let open = self
@@ -485,7 +511,9 @@ impl NewThread {
                 self.editor.take();
             }
             (KeyCode::Enter, None)
-                if !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 self.send()
             }
@@ -514,7 +542,10 @@ impl NewThread {
         let fields = self.fields();
         let col = col as usize + 1;
         if row == self.chip_row
-            && let Some(i) = self.chip_spans.iter().position(|(a, b)| (*a..=*b).contains(&col))
+            && let Some(i) = self
+                .chip_spans
+                .iter()
+                .position(|(a, b)| (*a..=*b).contains(&col))
         {
             let reopen = self.menu.as_ref().map(|(f, _)| *f) == fields.get(i).copied();
             self.menu = None;
@@ -553,7 +584,9 @@ impl NewThread {
                     child.wait()
                 })
                 .is_ok_and(|s| s.success());
-            let _ = std::process::Command::new("/usr/bin/open").arg(&link).status();
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg(&link)
+                .status();
             self.note = Some((
                 if copied {
                     "Opened T3 Code. The message is on the clipboard.".into()
@@ -564,13 +597,14 @@ impl NewThread {
             ));
             return;
         }
-        let plan = match models::plan_new_thread(&self.config, &self.project, &self.settings.choice()) {
-            Ok((plan, _)) => plan,
-            Err(e) => {
-                self.note = Some((format!("{e:#}"), true));
-                return;
-            }
-        };
+        let plan =
+            match models::plan_new_thread(&self.config, &self.project, &self.settings.choice()) {
+                Ok((plan, _)) => plan,
+                Err(e) => {
+                    self.note = Some((format!("{e:#}"), true));
+                    return;
+                }
+            };
         let workspace = if self.worktree && self.is_repo() {
             match &self.base {
                 Some(base) => Workspace::Worktree {
@@ -586,7 +620,14 @@ impl NewThread {
         } else {
             Workspace::Root
         };
-        let request = match LaunchRequest::new(&self.client, &self.project, &prompt, None, &plan, workspace) {
+        let request = match LaunchRequest::new(
+            &self.client,
+            &self.project,
+            &prompt,
+            None,
+            &plan,
+            workspace,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 self.note = Some((format!("{e:#}"), true));
@@ -613,7 +654,8 @@ impl NewThread {
 
 /// Labels this pane's block.
 async fn set_label(label: &str) -> Result<()> {
-    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK")) else {
+    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
+    else {
         return Ok(());
     };
     let script = format!(
@@ -626,19 +668,24 @@ async fn set_label(label: &str) -> Result<()> {
 
 /// The Reply pane under this one, for `thread`.
 async fn open_reply(thread: &str, cwd: Option<&str>) -> Result<()> {
-    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK")) else {
+    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
+    else {
         return Ok(());
     };
     let exe = std::env::current_exe()?.to_string_lossy().into_owned();
     let data = json!({"block": block, "argv": [exe, "compose", thread], "cwd": cwd});
     let script = format!(
         r#"local d = rex.json.decode({})
-local _, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
+local r, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
   ratio = 0.86, focus = true,
   layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Reply",
     options = {{ shell = "none", command = d.argv, cwd = d.cwd, exit = {{ on_completion = false }} }} }} }} }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
+-- The app evens out a new split when its Autobalance setting is on; set the ratio again after.
+rex.sleep(0.5)
+rex.session.resize_pane{{ before_block_id = d.block, after_block_id = r.block_ids[1],
+  direction = "vertical", ratio = 0.86 }}
 return {{}}"#,
         lua_str(&data.to_string())
     );
@@ -654,7 +701,9 @@ pub async fn run(welcome: bool) -> Result<()> {
         if t["lineage"]["relationshipToParent"] == "subagent" {
             continue;
         }
-        let Some(p) = t["projectId"].as_str() else { continue };
+        let Some(p) = t["projectId"].as_str() else {
+            continue;
+        };
         let newer = recent
             .get(p)
             .is_none_or(|r| r["updatedAt"].as_str() < t["updatedAt"].as_str());
@@ -703,7 +752,7 @@ pub async fn run(welcome: bool) -> Result<()> {
         welcome,
         cols: cols as usize,
         rows: rows as usize,
-        painter: Painter::default(),
+        painter: Painter,
         chip_spans: Vec::new(),
         chip_row: 0,
         tx: tx.clone(),
@@ -721,13 +770,21 @@ pub async fn run(welcome: bool) -> Result<()> {
         let tx = tx.clone();
         tokio::spawn(async move {
             // Linked environments need the access:read scope, which only this call asks for.
-            let Ok(access) = t3::connect_access().await else { return };
+            let Ok(access) = t3::connect_access().await else {
+                return;
+            };
             let Ok(rpc) = access.rpc().await else { return };
             if let Ok(r) = rpc
-                .call("peerLinks.list", json!({}), std::time::Duration::from_secs(10))
+                .call(
+                    "peerLinks.list",
+                    json!({}),
+                    std::time::Duration::from_secs(10),
+                )
                 .await
             {
-                let _ = tx.send(Loaded::Peers(r["links"].as_array().cloned().unwrap_or_default()));
+                let _ = tx.send(Loaded::Peers(
+                    r["links"].as_array().cloned().unwrap_or_default(),
+                ));
             }
         });
     }

@@ -54,7 +54,11 @@ pub fn wanted(
         let title = label(thread["title"].as_str().unwrap_or("Untitled"));
         Some(Want {
             thread_id: id,
-            label: if child { label(&format!("↳ {title}")) } else { title },
+            label: if child {
+                label(&format!("↳ {title}"))
+            } else {
+                title
+            },
             cwd,
             updated_at: thread["updatedAt"].as_str().unwrap_or_default().to_string(),
             place,
@@ -87,8 +91,7 @@ pub fn wanted(
 /// its window until it settles, as a thread of its own would. A provider's own subagent at
 /// rest is history, which T3 shows inside the parent thread.
 fn shown_subagent(thread: &Value, now: i64) -> bool {
-    if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null()
-    {
+    if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null() {
         return false;
     }
     let active = matches!(
@@ -268,7 +271,9 @@ fn tagged(windows: &[Value]) -> Vec<(String, String)> {
                 .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
                 .find_map(|b| {
                     let label = b["label"].as_str()?;
-                    label.strip_prefix("t3:").or(label.starts_with("t3#").then_some(label))
+                    label
+                        .strip_prefix("t3:")
+                        .or(label.starts_with("t3#").then_some(label))
                 })?;
             Some((id.to_string(), thread.to_string()))
         })
@@ -763,11 +768,23 @@ mod tests {
                 // A task delegated through T3, not settled: shown under a.
                 child("task", "a", json!({"creationSource": "mcp"})),
                 // Its own subagent, working: shown under a too.
-                child("deep", "task", json!({"creationSource": "provider", "activeRunId": "r", "latestRunId": "r", "activityRunStatus": "running"})),
+                child(
+                    "deep",
+                    "task",
+                    json!({"creationSource": "provider", "activeRunId": "r", "latestRunId": "r", "activityRunStatus": "running"}),
+                ),
                 // A provider's subagent at rest: history, not shown.
-                child("old", "b", json!({"creationSource": "provider", "activityRunStatus": "idle"})),
+                child(
+                    "old",
+                    "b",
+                    json!({"creationSource": "provider", "activityRunStatus": "idle"}),
+                ),
                 // A settled delegated task: not shown.
-                child("done", "b", json!({"creationSource": "mcp", "settledAt": "2026-10-30T00:00:00.000Z"})),
+                child(
+                    "done",
+                    "b",
+                    json!({"creationSource": "mcp", "settledAt": "2026-10-30T00:00:00.000Z"}),
+                ),
             ],
             ..ShellState::default()
         };
@@ -786,8 +803,10 @@ mod tests {
         let t = tag(&long);
         assert!(t.starts_with("t3#") && t.len() == 19);
         assert_eq!(tag("abc"), "t3:abc");
-        let windows = vec![json!({"window_id": "w", "label": "L", "layers": [{"blocks": [
-            {"block_id": "b1", "label": t}, {"block_id": "b2", "label": "Reply"}]}]})];
+        let windows = vec![
+            json!({"window_id": "w", "label": "L", "layers": [{"blocks": [
+            {"block_id": "b1", "label": t}, {"block_id": "b2", "label": "Reply"}]}]}),
+        ];
         let mut state = State::default();
         let known: HashSet<String> = [long.clone()].into_iter().collect();
         adopt(&windows, &mut state, &known);

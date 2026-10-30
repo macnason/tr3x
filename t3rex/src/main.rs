@@ -284,7 +284,11 @@ async fn run(cli: Cli) -> Result<()> {
             let answer = client
                 .rpc()
                 .await?
-                .call(&method, serde_json::from_str(&payload)?, Duration::from_secs(20))
+                .call(
+                    &method,
+                    serde_json::from_str(&payload)?,
+                    Duration::from_secs(20),
+                )
                 .await?;
             println!("{}", serde_json::to_string_pretty(&answer)?);
             Ok(())

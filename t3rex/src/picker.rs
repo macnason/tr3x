@@ -138,7 +138,13 @@ impl Menu {
 
     /// The menu as at most `height` lines, starting on screen row `top` (0-based), `width`
     /// columns wide, scrolled to keep the selection in view.
-    pub fn lines(&mut self, painter: &mut Painter, top: u16, width: usize, height: usize) -> Vec<String> {
+    pub fn lines(
+        &mut self,
+        painter: &mut Painter,
+        top: u16,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
         let shown = self.shown();
         self.selected = self.selected.min(shown.len().saturating_sub(1));
         // Each item with its heading when the section changes.
@@ -153,7 +159,13 @@ impl Menu {
             if item.section.as_deref() != section {
                 section = item.section.as_deref();
                 if let Some(s) = section {
-                    rows.push((None, format!("{DIM}{}{RESET}", fit(s, width))));
+                    // A section's items share their icon, so the heading carries it.
+                    let icon = item
+                        .icon
+                        .as_ref()
+                        .map(|i| painter.draw(i) + " ")
+                        .unwrap_or_default();
+                    rows.push((None, format!("{icon}{DIM}{}{RESET}", fit(s, width))));
                 }
             }
             if n == self.selected {
@@ -180,11 +192,16 @@ impl Menu {
             } else {
                 " "
             };
-            let icon = item.icon.as_ref().map(|icon| painter.draw(icon) + " ");
+            let icon = item
+                .icon
+                .as_ref()
+                .filter(|_| item.section.is_none())
+                .map(|icon| painter.draw(icon) + " ");
             let used = 2 + if icon.is_some() { 3 } else { 0 };
             let room = width.saturating_sub(used + 1);
             let label = fit(&item.label, room);
-            let detail_room = room.saturating_sub(unicode_width::UnicodeWidthStr::width(label.as_str()) + 2);
+            let detail_room =
+                room.saturating_sub(unicode_width::UnicodeWidthStr::width(label.as_str()) + 2);
             let detail = if item.detail.is_empty() || detail_room < 4 {
                 String::new()
             } else {
@@ -195,7 +212,10 @@ impl Menu {
             } else {
                 format!(" {label} ")
             };
-            out.push(format!("{mark} {}{label}{detail}", icon.unwrap_or_default()));
+            out.push(format!(
+                "{mark} {}{label}{detail}",
+                icon.unwrap_or_default()
+            ));
         }
         out
     }
@@ -262,7 +282,10 @@ impl Settings {
             instance: s["instanceId"].as_str().unwrap_or_default().to_string(),
             model: s["model"].as_str().unwrap_or_default().to_string(),
             effort: None,
-            mode: s["runtimeMode"].as_str().unwrap_or("full-access").to_string(),
+            mode: s["runtimeMode"]
+                .as_str()
+                .unwrap_or("full-access")
+                .to_string(),
         };
         if let Some(id) = out.effort_descriptor(config).and_then(|d| d["id"].as_str()) {
             out.effort = s["options"][id].as_str().map(str::to_string);
@@ -373,7 +396,10 @@ fn default_option(descriptor: &Value) -> Option<String> {
 /// Every model of every enabled provider, under the provider's name, with its logo.
 pub fn model_items(config: &Value, logos: &std::collections::HashMap<String, Icon>) -> Vec<Item> {
     let mut items = Vec::new();
-    for provider in models::providers(config).iter().filter(|p| models::enabled(p)) {
+    for provider in models::providers(config)
+        .iter()
+        .filter(|p| models::enabled(p))
+    {
         let name = provider["displayName"]
             .as_str()
             .or(provider["instanceId"].as_str())
@@ -385,7 +411,10 @@ pub fn model_items(config: &Value, logos: &std::collections::HashMap<String, Ico
         for model in models::models(provider) {
             let mut item = Item::new(
                 models::qualified(provider, model),
-                model["name"].as_str().or(model["slug"].as_str()).unwrap_or("Model"),
+                model["name"]
+                    .as_str()
+                    .or(model["slug"].as_str())
+                    .unwrap_or("Model"),
             );
             item.section = Some(name.to_string());
             item.icon = logo.clone();
@@ -442,7 +471,11 @@ mod tests {
     #[test]
     fn typing_filters_and_enter_chooses() {
         let mut menu = Menu::new(
-            vec![Item::new("a", "Opus 5.5"), Item::new("b", "Haiku 5.5"), Item::new("c", "GPT-6")],
+            vec![
+                Item::new("a", "Opus 5.5"),
+                Item::new("b", "Haiku 5.5"),
+                Item::new("c", "GPT-6"),
+            ],
             Some("c"),
         );
         assert_eq!(menu.selected, 2);
@@ -461,7 +494,12 @@ mod tests {
             {"slug": "y", "name": "Y", "capabilities": {"optionDescriptors": [{"id": "effort", "type": "select",
                 "options": [{"id": "medium", "isDefault": true}]}]}}
         ]}]});
-        let mut s = Settings { instance: "c".into(), model: "x".into(), effort: Some("low".into()), mode: "full-access".into() };
+        let mut s = Settings {
+            instance: "c".into(),
+            model: "x".into(),
+            effort: Some("low".into()),
+            mode: "full-access".into(),
+        };
         s.set_model(&config, "c/y");
         assert_eq!(s.effort, None);
         assert_eq!(s.effort_label(&config).as_deref(), Some("medium"));

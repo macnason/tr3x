@@ -85,7 +85,11 @@ pub fn monogram(title: &str) -> String {
 /// `projectColor`: a hash of the lowercase title picks one of the 18 colours.
 pub fn monogram_color(title: &str) -> &'static str {
     let seed = title.trim().to_lowercase();
-    let seed = if seed.is_empty() { "project".into() } else { seed };
+    let seed = if seed.is_empty() {
+        "project".into()
+    } else {
+        seed
+    };
     let mut index: u32 = 0;
     for c in seed.chars() {
         index = (index * 31 + c as u32) % COLORS.len() as u32;
@@ -103,7 +107,9 @@ pub fn chosen(project: &Value) -> Option<Icon> {
             7,
         )),
         "monogram" => Some(Icon::Text(
-            icon["text"].as_str().map_or_else(|| monogram(title), |t| t.chars().take(2).collect()),
+            icon["text"]
+                .as_str()
+                .map_or_else(|| monogram(title), |t| t.chars().take(2).collect()),
             ansi(icon["color"].as_str().unwrap_or("blue")),
         )),
         // A Lucide glyph has no terminal form; its colour on the monogram keeps the likeness.
@@ -130,7 +136,13 @@ fn cache() -> PathBuf {
 /// `name` made safe as a file name.
 fn file_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -199,7 +211,10 @@ pub async fn project(client: &Client, project: &Value) -> Icon {
     let fetched = tokio::process::Command::new("/usr/bin/curl")
         .args(["-fsS", "--max-time", "10", "-o"])
         .arg(&raw)
-        .arg(format!("{}{url}", client.runtime.origin.trim_end_matches('/')))
+        .arg(format!(
+            "{}{url}",
+            client.runtime.origin.trim_end_matches('/')
+        ))
         .status()
         .await
         .is_ok_and(|s| s.success());
@@ -224,7 +239,10 @@ pub async fn projects(client: &Client, projects: &[Value]) -> HashMap<String, Ic
 }
 
 const LOGOS: &[(&str, &str)] = &[
-    ("claudeAgent", include_str!("../assets/logos/claudeAgent.svg")),
+    (
+        "claudeAgent",
+        include_str!("../assets/logos/claudeAgent.svg"),
+    ),
     ("codex", include_str!("../assets/logos/codex.svg")),
     ("cursor", include_str!("../assets/logos/cursor.svg")),
     ("grok", include_str!("../assets/logos/grok.svg")),
@@ -232,7 +250,10 @@ const LOGOS: &[(&str, &str)] = &[
     ("fx", include_str!("../assets/logos/fx.svg")),
     ("opencode", include_str!("../assets/logos/opencode.svg")),
     ("muse", include_str!("../assets/logos/muse.svg")),
-    ("acpRegistry", include_str!("../assets/logos/acpRegistry.svg")),
+    (
+        "acpRegistry",
+        include_str!("../assets/logos/acpRegistry.svg"),
+    ),
 ];
 
 /// The provider's logo as T3 shows it, for the Mac's appearance, or its initials.
@@ -268,17 +289,16 @@ pub async fn provider(provider: &Value, dark: bool) -> Icon {
     }
 }
 
-/// Draws icons as kitty graphics placements. Each picture goes to the terminal once, under an
-/// id, and every frame places it again after `clear` takes the last frame's placements away.
+/// Draws icons with kitty graphics. Each frame sends each picture again as a file path, which
+/// the terminal reads itself, the way the conversation pane draws pictures; `clear` removes
+/// the last frame's.
 #[derive(Default)]
-pub struct Painter {
-    ids: HashMap<PathBuf, u32>,
-}
+pub struct Painter;
 
 impl Painter {
-    /// Removes every placement this pane made, keeping the pictures.
+    /// Removes every picture this pane drew.
     pub fn clear() -> &'static str {
-        "\x1b_Ga=d,d=a,q=2\x1b\\"
+        "\x1b_Ga=d,d=A,q=2\x1b\\"
     }
 
     /// The icon at the cursor, two cells wide, leaving the cursor after it.
@@ -287,20 +307,18 @@ impl Painter {
             Icon::Text(text, color) => {
                 let w = unicode_width::UnicodeWidthStr::width(text.as_str());
                 let pad = " ".repeat(2usize.saturating_sub(w));
-                let fg = if *color >= 8 { 90 + (color - 8) as u32 } else { 30 + *color as u32 };
+                let fg = if *color >= 8 {
+                    90 + (color - 8) as u32
+                } else {
+                    30 + *color as u32
+                };
                 format!("\x1b[{fg}m{BOLD}{text}{RESET}{pad}")
             }
             Icon::Picture(path) => {
-                let mut out = String::new();
-                let next = self.ids.len() as u32 + 7001;
-                let id = *self.ids.entry(path.clone()).or_insert_with(|| {
-                    let name = base64::engine::general_purpose::STANDARD
-                        .encode(path.to_string_lossy().as_bytes());
-                    out.push_str(&format!("\x1b_Ga=t,f=100,t=f,i={next},q=2;{name}\x1b\\"));
-                    next
-                });
-                out.push_str(&format!("\x1b_Ga=p,i={id},c=2,r=1,C=1,q=2\x1b\\\x1b[2C"));
-                out
+                let name = base64::engine::general_purpose::STANDARD
+                    .encode(path.to_string_lossy().as_bytes());
+                // f=100 PNG, t=f a file, c=2 r=1 two cells, C=1 leave the cursor, q=2 quiet.
+                format!("\x1b_Ga=T,f=100,t=f,c=2,r=1,C=1,q=2;{name}\x1b\\\x1b[2C")
             }
         }
     }

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use t3term::models;
 
-use crate::chat::{DIM, RED, RESET, fit};
+use crate::chat::{RED, RESET, fit};
 use crate::icons::Painter;
 use crate::picker::{self, Chip, Menu, MenuKey, Settings};
 use crate::rex::{Rex, lua_str};
@@ -55,7 +55,8 @@ return {{}}"#,
 
 pub async fn run(thread_id: String, first: Field) -> Result<()> {
     let client = t3::connect(true).await?;
-    let (config, state) = tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
+    let (config, state) =
+        tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
     let mut logos: HashMap<String, crate::icons::Icon> = HashMap::new();
     let mut settings = Settings::of_thread(&config, state.thread());
     let (tx, mut loaded) = tokio::sync::mpsc::unbounded_channel();
@@ -79,14 +80,17 @@ pub async fn run(thread_id: String, first: Field) -> Result<()> {
                 picker::model_items(&config, logos),
                 Some(format!("{}/{}", s.instance, s.model)),
             ),
-            Field::Effort => (picker::effort_items(&config, s), picker::effort_now(&config, s)),
+            Field::Effort => (
+                picker::effort_items(&config, s),
+                picker::effort_now(&config, s),
+            ),
             Field::Access => (picker::mode_items(&config, s), Some(s.mode.clone())),
         };
         Menu::new(items, current.as_deref())
     };
     let mut field = first;
     let mut menu = open(field, &settings, &logos);
-    let mut painter = Painter::default();
+    let mut painter = Painter;
     let mut note: Option<String> = None;
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((60, 20));
@@ -124,8 +128,6 @@ pub async fn run(thread_id: String, first: Field) -> Result<()> {
             }
             if let Some(n) = &note {
                 text.push_str(&format!("\x1b[{rows};1H  {RED}{}{RESET}", fit(n, width)));
-            } else {
-                text.push_str(&format!("\x1b[{rows};1H  {DIM}{}{RESET}", fit(&crate::chat::one_line(state.thread()["title"].as_str().unwrap_or("")), width)));
             }
             text.push_str("\x1b[?2026l");
             out(&text);
