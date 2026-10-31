@@ -24,6 +24,8 @@ pub enum Via {
     Ssh,
     /// A pairing link the user pasted. Pairing again takes another.
     Link,
+    /// The machine joined with `curl …/join | sh`. Pairing again takes running it again.
+    Join,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

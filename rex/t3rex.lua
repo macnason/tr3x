@@ -169,7 +169,7 @@ rex.action{
   name = "t3_pair",
   title = "Pair Another Machine…",
   category = "T3 Code",
-  keywords = "t3 machine device computer environment link connect ssh",
+  keywords = "t3 machine device computer environment link connect ssh join",
   run = function(ctx)
     local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.15, 0.2, 0.7, 0.5 }, focus = true,
       layout = { block = { flavor = "com.superlogical.terminal.shell", label = "Pair",

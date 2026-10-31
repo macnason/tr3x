@@ -30,6 +30,8 @@ pub struct Env {
     store: Store,
     descriptor: std::sync::Mutex<Option<Descriptor>>,
     rpc: Mutex<Option<RpcClient>>,
+    /// When renewing the token last failed, so a token still good isn't renewed on every call.
+    renew_failed: std::sync::Mutex<Option<i64>>,
     /// Tests reach a fake T3 at this address, with no descriptor or token.
     fixed: Option<Api>,
 }
@@ -48,6 +50,9 @@ pub struct SendReceipt {
     pub sequence: u64,
     pub dispatch_mode: &'static str,
 }
+
+/// How long a failed renewal waits before the next try, while the token still works.
+const RENEW_RETRY_MS: i64 = 10 * 60 * 1000;
 
 /// The error for a machine t3rex has no working pairing with.
 pub fn needs_pairing(machine: &Machine) -> anyhow::Error {
@@ -79,6 +84,7 @@ impl Env {
             store,
             descriptor: std::sync::Mutex::new(None),
             rpc: Mutex::new(None),
+            renew_failed: std::sync::Mutex::new(None),
             fixed: None,
         }
     }
@@ -163,19 +169,17 @@ impl Env {
         }))
     }
 
-    /// The token to send: the stored one, replaced first when it's close to running out and
-    /// the machine can pair again on its own.
+    /// The token to send: the stored one, replaced first when it's close to running out.
     async fn token(&self) -> Result<String> {
         let now = now_ms();
+        let resting = self
+            .renew_failed
+            .lock()
+            .ok()
+            .and_then(|f| *f)
+            .is_some_and(|at| now - at < RENEW_RETRY_MS);
         match self.store.credential(&self.machine.id) {
-            Some(c) if !c.due(now) => Ok(c.token),
-            Some(c) if self.machine.via == Via::Link => {
-                if c.expired(now) {
-                    Err(needs_pairing(&self.machine))
-                } else {
-                    Ok(c.token)
-                }
-            }
+            Some(c) if !c.due(now) || (resting && !c.expired(now)) => Ok(c.token),
             Some(c) => match self.pair_again(None).await {
                 Ok(token) => Ok(token),
                 Err(_) if !c.expired(now) => Ok(c.token),
@@ -185,32 +189,65 @@ impl Env {
         }
     }
 
-    /// Pairs again through the way the machine was paired, unless another t3rex process just
-    /// did. `rejected` is a token the server turned down.
+    /// Replaces the token, unless another t3rex process just did: with one the current token
+    /// mints, else by pairing again the way the machine was paired. `rejected` is a token the
+    /// server turned down.
     async fn pair_again(&self, rejected: Option<&str>) -> Result<String> {
-        if self.machine.via == Via::Link {
-            return Err(needs_pairing(&self.machine));
-        }
         let _lock = self.store.lock().await?;
-        if let Some(c) = self.store.credential(&self.machine.id)
+        let current = self.store.credential(&self.machine.id);
+        if let Some(c) = &current
             && Some(c.token.as_str()) != rejected
             && !c.due(now_ms())
         {
-            return Ok(c.token);
+            return Ok(c.token.clone());
         }
-        crate::pair::again_locked(&self.store, &self.machine)
-            .await
-            .map_err(|e| {
-                if self.is_local() {
+        let renewed = match &current {
+            Some(c)
+                if Some(c.token.as_str()) != rejected
+                    && !c.expired(now_ms())
+                    && c.renews_itself() =>
+            {
+                match self.route().await {
+                    Ok(found) => {
+                        crate::pair::renew_locked(&self.store, &self.machine, &found.origin).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err(needs_pairing(&self.machine)),
+        };
+        if let Err(e) = renewed {
+            let again = match self.machine.via {
+                Via::Link | Via::Join => Err(if is_pairing_error(&e) {
                     e
                 } else {
-                    e.context(format!(
-                        "couldn't pair with {} again; run `t3rex pair {}`",
-                        self.name(),
-                        self.name()
-                    ))
+                    needs_pairing(&self.machine)
+                }),
+                _ => crate::pair::again_locked(&self.store, &self.machine)
+                    .await
+                    .map(drop)
+                    .map_err(|e| {
+                        if self.is_local() {
+                            e
+                        } else {
+                            e.context(format!(
+                                "couldn't pair with {} again; run `t3rex pair {}`",
+                                self.name(),
+                                self.name()
+                            ))
+                        }
+                    }),
+            };
+            if let Err(e) = again {
+                if let Ok(mut failed) = self.renew_failed.lock() {
+                    *failed = Some(now_ms());
                 }
-            })?;
+                return Err(e);
+            }
+        }
+        if let Ok(mut failed) = self.renew_failed.lock() {
+            *failed = None;
+        }
         self.store
             .credential(&self.machine.id)
             .map(|c| c.token)

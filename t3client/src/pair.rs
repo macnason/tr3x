@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::auth::{self, client_label, exchange, parse_link};
 use crate::descriptor::{self, Descriptor, Local, normalize_origin};
 use crate::env::Env;
-use crate::store::{Machine, Registry, Store, Via};
+use crate::store::{Credential, Machine, Registry, Store, Via};
 
 /// Where a pairing code comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,11 @@ pub enum How {
     Ssh(String),
     /// A pairing link the user pasted, in any form T3 accepts.
     Link(String),
+    /// A code a machine minted and posted to Rex's join address, from `origins`.
+    Joined {
+        origins: Vec<String>,
+        minted: auth::Minted,
+    },
 }
 
 /// Pairs with a machine and saves it. Returns the machine as saved.
@@ -95,6 +100,13 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
             let target = parse_link(text)?;
             (vec![target.origin], target.code, None, Via::Link, None)
         }
+        How::Joined { origins, minted } => (
+            origins.clone(),
+            minted.code.clone(),
+            minted.environment_id.clone(),
+            Via::Join,
+            None,
+        ),
     };
     if let (Some(expect), Some(known)) = (expect, known_id.as_deref())
         && expect != known
@@ -110,15 +122,15 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
     store.save_credential(&found.environment_id, credential)?;
     // The token this one replaces, so T3's Connections lists Rex once.
     if let Some(previous) = previous {
-        let local = Local::read();
-        let cli = match (via, ssh.as_deref()) {
-            (Via::Local, _) => Some(auth::Cli::Local(&local)),
-            (Via::Ssh, Some(host)) => Some(auth::Cli::Ssh(host)),
-            _ => None,
-        };
-        if let Some(cli) = cli {
-            let _ = auth::revoke(cli, &previous).await;
-        }
+        let replacement = store.credential(&found.environment_id);
+        revoke(
+            &found.origin,
+            via,
+            ssh.as_deref(),
+            &previous,
+            replacement.as_ref(),
+        )
+        .await;
     }
     let mut registry = store.registry();
     let alias = ssh
@@ -149,6 +161,42 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
         .expect("just saved"))
 }
 
+/// Revokes `credential`'s session at `origin`: with the token that replaces it where there is
+/// one, else through the machine's CLI. Returns whether it did.
+async fn revoke(
+    origin: &str,
+    via: Via,
+    ssh: Option<&str>,
+    credential: &Credential,
+    replacement: Option<&Credential>,
+) -> bool {
+    if let Some(new) = replacement.filter(|c| c.renews_itself())
+        && auth::revoke_replaced(origin, credential, new)
+            .await
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    let local = Local::read();
+    let cli = match (via, ssh) {
+        (Via::Local, _) => auth::Cli::Local(&local),
+        (Via::Ssh, Some(host)) => auth::Cli::Ssh(host),
+        _ => return false,
+    };
+    auth::revoke(cli, credential).await.unwrap_or(false)
+}
+
+/// Replaces `machine`'s token with one its current token mints, at `origin`. Callers hold the
+/// store's lock.
+pub(crate) async fn renew_locked(store: &Store, machine: &Machine, origin: &str) -> Result<()> {
+    let current = store
+        .credential(&machine.id)
+        .filter(Credential::renews_itself)
+        .ok_or_else(|| crate::env::needs_pairing(machine))?;
+    let renewed = auth::renew(origin, &current, &client_label()).await?;
+    store.save_credential(&machine.id, renewed)
+}
+
 /// What forgetting a machine did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forgot {
@@ -164,14 +212,18 @@ pub async fn forget(store: &Store, machine: &Machine) -> Result<Forgot> {
     let _lock = store.lock().await?;
     let mut forgot = Forgot::Kept;
     if let Some(credential) = store.credential(&machine.id) {
-        let local = Local::read();
-        let cli = match (machine.via, machine.ssh.as_deref()) {
-            (Via::Local, _) => Some(auth::Cli::Local(&local)),
-            (Via::Ssh, Some(host)) => Some(auth::Cli::Ssh(host)),
-            _ => None,
+        let origin = match machine.via {
+            Via::Local => Local::read().origin_or_default(),
+            _ => machine.origins.first().cloned().unwrap_or_default(),
         };
-        if let Some(cli) = cli
-            && auth::revoke(cli, &credential).await.unwrap_or(false)
+        if revoke(
+            &origin,
+            machine.via,
+            machine.ssh.as_deref(),
+            &credential,
+            None,
+        )
+        .await
         {
             forgot = Forgot::Revoked;
         }
@@ -199,7 +251,7 @@ pub struct Candidate {
     pub ssh: Option<String>,
 }
 
-fn tailscale_bin() -> Option<String> {
+pub(crate) fn tailscale_bin() -> Option<String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|d| d.join("tailscale"))
@@ -365,13 +417,27 @@ pub async fn candidates(home: Option<&Env>, registry: &Registry) -> Vec<Candidat
         let ssh = hosts
             .iter()
             .find(|(_, reaches)| *reaches == host)
-            .map(|(alias, _)| alias.clone());
+            .map(|(alias, _)| alias.clone())
+            .or_else(|| host.ends_with(".ts.net").then_some(host));
         out.push(Candidate {
             id: d.environment_id.clone(),
             label: d.name().to_string(),
             origin: d.origin.clone(),
             ssh,
         });
+    }
+    // A tailnet name with no SSH config entry counts only once SSH gets in with a key.
+    let checks = out.iter().map(|c| async move {
+        match &c.ssh {
+            Some(host) if host.ends_with(".ts.net") => auth::ssh_reaches(host).await,
+            _ => true,
+        }
+    });
+    let reaches = futures_util::future::join_all(checks).await;
+    for (c, ok) in out.iter_mut().zip(reaches) {
+        if !ok {
+            c.ssh = None;
+        }
     }
     out
 }

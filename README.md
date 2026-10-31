@@ -48,7 +48,7 @@ That opens Rex and T3 if they aren't running, downloads the latest release and c
 SHA-256, installs `~/.local/bin/t3rex`, adds its actions and keys to Rex's config, and switches
 Rex to **T3 Code**. Rex starts t3rex's sync as its config loads, so it runs whenever Rex does.
 Rex pairs with this Mac's T3 on its own. Other machines on your tailnet that run T3 are found
-and offered: one confirm where SSH reaches them, else a pairing link from T3 there.
+and offered: one confirm where SSH reaches them, else one command to run there.
 
 From a clone, `install.sh` builds with cargo instead:
 
@@ -82,7 +82,7 @@ the tab says so and carries on once it is.
 | Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | Click **Approve**, **Always** or **Decline** over the input, or Tab to them and Enter. `a`, `s` or `d` then Enter does the same. Anything else you type is a reply. |
 | Answer | Click an option, or Tab to it. A pending question also takes the input as its answer, and a number picks that option. |
-| Another machine | `t3rex pair` finds the machines on your tailnet that run T3 and pairs each: over SSH where `ssh <host>` works, else with a link from T3 → Settings → Connections there (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
+| Another machine | On it, run `curl -fsSL http://<this Mac>:3779/join \| sh`; `t3rex pair` prints the exact command. That's all: it pairs that machine's T3 with Rex over your tailnet, and only your own machines can. Where `ssh <host>` already works, `t3rex pair` does it from here with one confirm instead. A link from T3 → Settings → Connections there works too (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
@@ -136,8 +136,9 @@ a column count). `/width t3` goes back to following T3.
   answers again. Nothing is settled or closed for a machine sync can't see.
 - **Other machines' files.** HTML snapshots need the attachment on this Mac, so on another
   machine an embed is a titled link. Add folder adds folders on this Mac only.
-- **Pairing links.** A machine paired with a link needs a new one every 30 days; `t3rex
-  doctor` warns a week ahead. Machines paired here or over SSH renew on their own.
+- **Tailscale for other machines.** Finding and joining machines goes over your tailnet. Without
+  Tailscale, pair with SSH or a link. Pairings renew on their own; one made before t3rex asked
+  for `access:write` renews the old way, so a linked machine from then needs one more link.
 - **Moving targets.** Built against T3 `0.1.6-nightly.20261030` (orchestration protocol 2) and
   Rex Beta 0.1.0 (1642), API revision 7.
 

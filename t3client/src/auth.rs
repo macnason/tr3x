@@ -16,11 +16,13 @@ use crate::http::{Api, direct_client};
 use crate::store::Credential;
 
 /// What t3rex asks a machine for: reading and running threads, listing its linked machines,
-/// reading project files for icons, and branches.
+/// reading project files for icons, and branches. `access:write` lets it mint its own next
+/// pairing code before its token runs out, and revoke the token it replaces.
 pub const SCOPES: &[&str] = &[
     "orchestration:read",
     "orchestration:operate",
     "access:read",
+    "access:write",
     "filesystem:read",
     "source-control:write",
 ];
@@ -496,6 +498,36 @@ printf 'PAIRING %s\n' "$("$T3" {} | tr -d '\n')""#,
     ))
 }
 
+/// A tailnet name's first host key is taken without asking: Tailscale has already checked
+/// which machine answers. Anywhere else, an unknown host key fails as SSH would.
+pub(crate) fn trust_new_key(host: &str) -> &'static [&'static str] {
+    if host.trim_end_matches('.').ends_with(".ts.net") {
+        &["-o", "StrictHostKeyChecking=accept-new"]
+    } else {
+        &[]
+    }
+}
+
+/// Whether `ssh host` gets in without asking anything.
+pub async fn ssh_reaches(host: &str) -> bool {
+    if host.starts_with('-') {
+        return false;
+    }
+    let run = tokio::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"])
+        .args(trust_new_key(host))
+        .args(["--", host, "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    matches!(
+        tokio::time::timeout(Duration::from_secs(6), run).await,
+        Ok(Ok(status)) if status.success()
+    )
+}
+
 /// Runs `script` on `host`. Batch mode: it never prompts, so a host that wants a password or
 /// a new host key fails at once with SSH's own words.
 async fn ssh_run(host: &str, script: String) -> Result<String> {
@@ -505,7 +537,10 @@ async fn ssh_run(host: &str, script: String) -> Result<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", host])
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"])
+            .args(trust_new_key(host))
+            .arg("--")
+            .arg(host)
             .arg(script)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -527,6 +562,25 @@ async fn ssh_run(host: &str, script: String) -> Result<String> {
 /// A pairing code from `host`'s T3, over SSH.
 pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
     let stdout = ssh_run(host, pairing_script(label)).await?;
+    let minted = read_minted(&stdout)?;
+    Ok(SshPairing {
+        environment_id: minted.environment_id,
+        port: minted.port,
+        code: minted.code,
+        hostname: ssh_hostname(host).await,
+    })
+}
+
+/// What the pairing script prints on a machine: its environment id, its server's port, and a
+/// pairing code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Minted {
+    pub environment_id: Option<String>,
+    pub port: Option<u16>,
+    pub code: String,
+}
+
+pub fn read_minted(stdout: &str) -> Result<Minted> {
     let line = |tag: &str| {
         stdout
             .lines()
@@ -539,12 +593,21 @@ pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
         .and_then(|r| serde_json::from_str::<Value>(&r).ok())
         .and_then(|r| r["port"].as_u64())
         .and_then(|p| u16::try_from(p).ok());
-    Ok(SshPairing {
+    Ok(Minted {
         environment_id: line("ENV "),
         port,
         code: read_pairing(&line("PAIRING ").unwrap_or_default())?,
-        hostname: ssh_hostname(host).await,
     })
+}
+
+/// The script `curl …/join | sh` runs on a machine joining Rex: the pairing script, its
+/// answer posted back to `join_url`, and what Rex said printed.
+pub fn join_script(label: &str, join_url: &str) -> String {
+    format!(
+        "#!/bin/sh\n# Pairs this machine's T3 with {label}.\n(\n{}) | curl -sS --fail-with-body --data-binary @- {}\n",
+        pairing_script(label),
+        shell_words(&[join_url.to_string()])
+    )
 }
 
 /// Where a machine's `t3` runs: here, or over SSH.
@@ -611,6 +674,89 @@ pub async fn revoke(cli: Cli<'_>, credential: &Credential) -> Result<bool> {
     };
     cli.run(&args(&["auth", "session", "revoke", &id])).await?;
     Ok(true)
+}
+
+/// The id of the session `api`'s token belongs to: the one T3 marks current in its access
+/// snapshot, from `subscribeAuthAccess`.
+async fn current_session(api: &Api) -> Result<String> {
+    let rpc = crate::rpc::RpcClient::connect(api).await?;
+    let mut stream = rpc
+        .stream("subscribeAuthAccess", serde_json::json!({}))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let first = tokio::time::timeout(Duration::from_secs(10), stream.next()).await;
+    drop(stream);
+    rpc.close();
+    let event = match first {
+        Ok(Some(Ok(event))) => event,
+        Ok(Some(Err(e))) => bail!("{e}"),
+        _ => bail!("T3 sent no access snapshot"),
+    };
+    let event = event.as_array().and_then(|a| a.first()).unwrap_or(&event);
+    current_in(event).context("T3 didn't say which session is t3rex's")
+}
+
+/// The current session in an access snapshot.
+fn current_in(snapshot: &Value) -> Option<String> {
+    snapshot["payload"]["clientSessions"]
+        .as_array()?
+        .iter()
+        .find(|s| s["current"] == true)
+        .and_then(|s| s["sessionId"].as_str())
+        .map(str::to_string)
+}
+
+/// A new token for a machine, minted with the current one: a pairing code from
+/// `/api/auth/pairing-token`, traded at once. The token it replaces is revoked, so T3's
+/// Connections lists Rex once. Needs `access:write`.
+pub async fn renew(origin: &str, current: &Credential, label: &str) -> Result<Credential> {
+    let api = Api::new(origin, &current.token);
+    let previous = current_session(&api).await.ok();
+    let scopes: Vec<&str> = SCOPES
+        .iter()
+        .copied()
+        .filter(|s| current.scopes.iter().any(|held| held == s))
+        .collect();
+    let minted = api
+        .post(
+            "/api/auth/pairing-token",
+            Some(&serde_json::json!({ "label": label, "scopes": scopes })),
+        )
+        .await?;
+    let code = minted["credential"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .context("T3 minted no pairing code")?;
+    let renewed = exchange(origin, code, label).await?;
+    if let Some(id) = previous {
+        let _ = Api::new(origin, &renewed.token)
+            .post(
+                "/api/auth/clients/revoke",
+                Some(&serde_json::json!({ "sessionId": id })),
+            )
+            .await;
+    }
+    Ok(renewed)
+}
+
+/// Revokes the session `old` belongs to, with `new`: T3 lets a token revoke another session
+/// but not its own. Returns whether T3 revoked it. Needs `access:write` on `new`.
+pub async fn revoke_replaced(origin: &str, old: &Credential, new: &Credential) -> Result<bool> {
+    let id = current_session(&Api::new(origin, &old.token)).await?;
+    let answer = Api::new(origin, &new.token)
+        .post(
+            "/api/auth/clients/revoke",
+            Some(&serde_json::json!({ "sessionId": id })),
+        )
+        .await?;
+    Ok(answer["revoked"] == true)
+}
+
+impl Credential {
+    /// Whether the token can mint its own replacement.
+    pub fn renews_itself(&self) -> bool {
+        self.scopes.iter().any(|s| s == "access:write")
+    }
 }
 
 /// The host name `ssh` connects to for `host`, after its config.
@@ -759,5 +905,29 @@ mod tests {
         let error = exchange(&server.origin, "OLD", "Rex").await.unwrap_err();
         assert_eq!(crate::error::code_of(&error), Some("PAIRING_REFUSED"));
         assert!(format!("{error}").contains("invalid_grant"));
+    }
+
+    #[test]
+    fn the_current_session_is_the_one_t3_marks() {
+        let snapshot = serde_json::json!({
+            "version": 1, "revision": 3, "type": "snapshot",
+            "payload": {"pairingLinks": [], "clientSessions": [
+                {"sessionId": "app", "current": false},
+                {"sessionId": "rex", "current": true}
+            ]}
+        });
+        assert_eq!(current_in(&snapshot).as_deref(), Some("rex"));
+        assert_eq!(current_in(&serde_json::json!({"type": "snapshot"})), None);
+    }
+
+    #[test]
+    fn the_pairing_script_answer_reads_back() {
+        let minted =
+            read_minted("ENV env-1\nRUNTIME {\"port\":3774}\nPAIRING {\"credential\":\"CODE\"}\n")
+                .unwrap();
+        assert_eq!(minted.environment_id.as_deref(), Some("env-1"));
+        assert_eq!(minted.port, Some(3774));
+        assert_eq!(minted.code, "CODE");
+        assert!(read_minted("ENV env-1\n").is_err());
     }
 }

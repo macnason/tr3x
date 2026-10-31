@@ -346,18 +346,21 @@ async fn other_machines() {
             mark(
                 Mark::Warn,
                 &format!("{} runs T3 too", c.label),
-                &format!(
-                    "`t3rex pair {}`",
-                    c.ssh
-                        .clone()
-                        .unwrap_or_else(|| format!("\"{}\" '<link>'", c.label))
-                ),
+                &pair_hint(c).await,
             );
         }
         return;
     }
     for c in &found {
         crate::machines::offer(&hub, c).await;
+    }
+}
+
+/// How to pair a machine found on the tailnet: over SSH where it reaches, else joining.
+async fn pair_hint(c: &t3client::pair::Candidate) -> String {
+    match &c.ssh {
+        Some(host) => format!("`t3rex pair {host}`"),
+        None => crate::machines::join_hint(&c.label).await,
     }
 }
 
@@ -563,13 +566,20 @@ pub async fn doctor() -> Result<()> {
                 }
                 let machine = env.machine();
                 if let Some(c) = hub.store.credential(env.id())
-                    && machine.via == t3client::store::Via::Link
+                    && matches!(
+                        machine.via,
+                        t3client::store::Via::Link | t3client::store::Via::Join
+                    )
+                    && !c.renews_itself()
                     && c.expires_at - crate::t3::now_ms() < 7 * 86_400_000
                 {
                     mark(
                         Mark::Warn,
                         &format!("Rex's pairing with {name} ends within a week"),
-                        &format!("`t3rex pair \"{name}\" '<link>'` with a new link from T3 there"),
+                        &format!(
+                            "To pair it again, {}",
+                            crate::machines::join_hint(&name).await
+                        ),
                     );
                 }
             }
@@ -588,12 +598,7 @@ pub async fn doctor() -> Result<()> {
         mark(
             Mark::Warn,
             &format!("{} runs T3 and isn't paired", c.label),
-            &format!(
-                "`t3rex pair {}`",
-                c.ssh
-                    .clone()
-                    .unwrap_or_else(|| format!("\"{}\" '<link>'", c.label))
-            ),
+            &pair_hint(&c).await,
         );
     }
 

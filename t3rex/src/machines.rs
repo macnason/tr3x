@@ -75,8 +75,45 @@ fn quoted(name: &str) -> String {
     }
 }
 
-fn link_question(name: &str) -> String {
-    format!("Paste a pairing link from T3 on {name} (Settings → Connections, or `t3 pair` there):")
+/// How to pair a machine SSH doesn't reach, for someone reading rather than typing.
+pub async fn join_hint(name: &str) -> String {
+    match t3client::join::command().await {
+        Some(join) => format!("run `{join}` on {name}"),
+        None => format!(
+            "`t3rex pair {} '<link>'` with a link from T3 there",
+            quoted(name)
+        ),
+    }
+}
+
+/// Pairing a machine SSH doesn't reach: the join command to run there, or a pasted link.
+/// Returns the link to pair with, or `None` once the machine joined or was skipped.
+async fn ask(hub: &Hub, name: &str, id: &str, interactive: bool) -> Result<Option<How>> {
+    if !interactive {
+        bail!("To pair {name}, {}", join_hint(name).await);
+    }
+    let paired_at = || hub.store.credential(id).map(|c| c.issued_at);
+    let before = paired_at();
+    let answer = match t3client::join::command().await {
+        Some(join) => {
+            println!("Run on {name}:  {join}");
+            prompt("Then press Enter, or paste a pairing link from T3 there:")
+        }
+        None => prompt(&format!(
+            "Paste a pairing link from T3 on {name} (Settings → Connections), or Enter to skip:"
+        )),
+    };
+    match answer.filter(|a| !a.is_empty()) {
+        Some(link) => Ok(Some(How::Link(link))),
+        None if paired_at().is_some() && paired_at() != before => {
+            println!("✓ Paired with {name}");
+            Ok(None)
+        }
+        None => {
+            println!("Skipped {name}");
+            Ok(None)
+        }
+    }
 }
 
 async fn pair_with(hub: &Hub, how: How, expect: Option<&str>) -> Result<Machine> {
@@ -104,26 +141,15 @@ pub async fn pair_command(target: Option<String>, link: Option<String>) -> Resul
         pair_with(&hub, How::Link(target), None).await?;
         return Ok(());
     }
-    let ask_link = |name: &str| -> Result<String> {
-        if let Some(link) = &link {
-            return Ok(link.clone());
-        }
-        if !interactive {
-            bail!(
-                "Pair {name} with a link from T3 there: `t3rex pair {} '<link>'`",
-                quoted(name)
-            );
-        }
-        prompt(&link_question(name))
-            .filter(|l| !l.is_empty())
-            .context("No link pasted")
-    };
     if let Some(machine) = hub.registry.find(&target).cloned() {
         let how = match (machine.via, &machine.ssh, &link) {
             (_, _, Some(link)) => How::Link(link.clone()),
             (Via::Local, _, _) => How::Local,
             (Via::Ssh, Some(host), _) => How::Ssh(host.clone()),
-            _ => How::Link(ask_link(machine.name())?),
+            _ => match ask(&hub, machine.name(), &machine.id, interactive).await? {
+                Some(how) => how,
+                None => return Ok(()),
+            },
         };
         pair_with(&hub, how, Some(&machine.id)).await?;
         return Ok(());
@@ -140,7 +166,10 @@ pub async fn pair_command(target: Option<String>, link: Option<String>) -> Resul
             let how = match (&c.ssh, &link) {
                 (_, Some(link)) => How::Link(link.clone()),
                 (Some(host), None) => How::Ssh(host.clone()),
-                (None, None) => How::Link(ask_link(&c.label)?),
+                (None, None) => match ask(&hub, &c.label, &c.id, interactive).await? {
+                    Some(how) => how,
+                    None => return Ok(()),
+                },
             };
             pair_with(&hub, how, Some(&c.id)).await?;
         }
@@ -171,7 +200,7 @@ async fn pair_all(hub: &Hub, interactive: bool) -> Result<()> {
         for c in &candidates {
             let how = match &c.ssh {
                 Some(host) => format!("`t3rex pair {host}` (over SSH)"),
-                None => format!("`t3rex pair {} '<link>'`", quoted(&c.label)),
+                None => join_hint(&c.label).await,
             };
             println!("{}  {}  {how}", c.label, c.origin);
         }
@@ -190,8 +219,8 @@ pub async fn offer(hub: &Hub, c: &Candidate) {
             How::Ssh(host.clone())
         }
         Some(_) => return,
-        None => match prompt(&format!("{} (Enter to skip)", link_question(&c.label))) {
-            Some(link) if !link.is_empty() => How::Link(link),
+        None => match ask(hub, &c.label, &c.id, true).await {
+            Ok(Some(how)) => how,
             _ => return,
         },
     };
@@ -222,6 +251,7 @@ pub async fn list() -> Result<()> {
             Via::Local => "this Mac".to_string(),
             Via::Ssh => format!("over SSH ({})", m.ssh.as_deref().unwrap_or("?")),
             Via::Link => "by link".to_string(),
+            Via::Join => "joined".to_string(),
         };
         let state = match checked {
             Ok(Ok(found)) => format!("✓ T3 {}", found.server_version),
@@ -245,12 +275,11 @@ pub async fn list() -> Result<()> {
     let home = hub.home();
     let candidates = pair::candidates(home.as_deref(), &hub.registry).await;
     for c in candidates {
-        println!(
-            "{:width$}  not paired        `t3rex pair {}`",
-            c.label,
-            c.ssh.clone().unwrap_or_else(|| quoted(&c.label)),
-            width = width
-        );
+        let how = match &c.ssh {
+            Some(host) => format!("`t3rex pair {host}`"),
+            None => join_hint(&c.label).await,
+        };
+        println!("{:width$}  not paired        {how}", c.label, width = width);
     }
     Ok(())
 }

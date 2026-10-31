@@ -994,6 +994,12 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
         log_to_file()?;
     }
     tokio::spawn(crate::fade::follow());
+    // Other machines join with `curl …/join | sh`; off a tailnet there's nothing to listen on.
+    tokio::spawn(async {
+        if let Err(e) = t3client::join::serve(t3::hub().store).await {
+            eprintln!("t3rex: not taking joins: {e:#}");
+        }
+    });
     let mut pause = 2;
     loop {
         let started = Instant::now();

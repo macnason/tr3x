@@ -153,26 +153,38 @@ t3rex pairs with T3 the way T3's own apps do. A one-time pairing code is traded 
 
 - **This Mac**: T3's own CLI, `t3 auth pairing create`. The first t3rex process that needs T3
   does it, so there's nothing to set up.
+- **Joining**: `curl -fsSL http://<this Mac>:3779/join | sh` on the other machine. Sync
+  listens on this Mac's tailnet addresses only, and answers only machines `tailscale whois`
+  says are the same person's. The script runs the same command against that machine's own T3
+  and posts the code back; sync trades it with T3 at the machine's tailnet address, never one
+  the request names. `T3REX_JOIN_PORT` moves the port.
 - **SSH**: the same command on the other machine, over `ssh -o BatchMode=yes <host>`, as T3's
   desktop app does for its SSH machines. It finds `t3` on the PATH, in `~/.local/bin` or in
   `~/.t3/runtime/versions`. SSH never prompts; a host that wants a password says so and stops.
+  A tailnet name's first host key is accepted, since Tailscale has already checked the machine.
 - **A link**: every form T3 accepts. `https://host/pair#token=…`, `?token=…`, the hosted
   `?host=…&token=…`, `t3code://pair?pairingUrl=…`, or a host and a code.
 
 `t3rex pair` finds machines from `tailscale status` and the linked environments T3 lists
 (`peerLinks.list`), each checked at `:3773/.well-known/t3/environment`, and matches them to
-the hosts in `~/.ssh/config` (and the files it includes) by `ssh -G`. Before a code is traded,
-the server's descriptor has to name the machine it came from.
+the hosts in `~/.ssh/config` (and the files it includes) by `ssh -G`. A machine with no entry
+there is tried at its tailnet name, and counts as SSH-reachable once `ssh` gets in with a key.
+The rest are offered the join command. Before a code is traded, the server's descriptor has to
+name the machine it came from.
 
 Each machine's id, name, alias, addresses and how it was paired are in `envs.json`; its token,
 scopes and expiry in `credentials.json` (mode 0600), both in t3rex's state directory and read
 by every t3rex process. A token is only sent to a server whose descriptor names the machine it
-was issued for, checked on every connection. One that's rejected or a day from running out is
-replaced the way the machine was paired, under `pair.lock`, so panes that find it at once pair
-only once, and the session it replaces is revoked through the machine's CLI. A machine paired
-with a link needs a new link. `t3rex env forget` revokes Rex's session through the machine's
-CLI where t3rex can run it. Rex asks for `orchestration:read`, `orchestration:operate`,
-`access:read`, `filesystem:read` and `source-control:write`.
+was issued for, checked on every connection. A day from running out, a token renews itself:
+it mints a pairing code at `/api/auth/pairing-token`, trades it, and the new token revokes the
+old session (T3 lets a token revoke another session, not its own). That needs `access:write`,
+so it works however the machine was paired. A token without it, or one that's rejected, is
+replaced the way the machine was paired: again through the CLI here or over SSH, while a
+joined or linked machine needs joining again. Either way it happens under `pair.lock`, so
+panes that find it at once pair only once, and a failed renewal waits 10 minutes before the
+next try. `t3rex env forget` revokes Rex's session through the machine's CLI where t3rex can
+run it. Rex asks for `orchestration:read`, `orchestration:operate`, `access:read`,
+`access:write`, `filesystem:read` and `source-control:write`.
 
 Panes Rex starts get the Rex server's environment, not their starter's, so sync and the panes
 hand on t3rex's own settings (`T3REX_STATE_DIR`, `T3CODE_HOME`, `XDG_CONFIG_HOME`) on the
@@ -194,7 +206,8 @@ command line as `--set-env`.
 5. reloads Rex's config, which starts sync,
 6. waits for the first sync and switches Rex to the **T3 Code** session. If sync doesn't
    arrive in 20 seconds, it prints the end of `sync.log` and exits with an error,
-7. offers each machine on the tailnet that runs T3: over SSH with one confirm, else a link.
+7. offers each machine on the tailnet that runs T3: over SSH with one confirm, else the join
+   command to run there, or a link.
 
 `t3rex uninstall` undoes all of it: it removes the `require` line and the actions, stops sync,
 closes only the sessions t3rex made, revokes Rex's session on each machine it can, and deletes
@@ -203,8 +216,8 @@ the binary, its state and its caches.
 `t3rex doctor` checks Rex, the config line, that Rex loaded the config without errors, T3 on
 each machine and the capabilities t3rex needs (`threadSettlement`, `threadSnooze`,
 orchestration protocol 2), that sync is running and what it last logged, and the session. A
-machine that needs pairing is a ✗; one that's out of reach, or a pairing link that ends within
-a week, is a warning. Machines on the tailnet that run T3 and aren't paired are listed. Each ✗ comes with its fix, and
+machine that needs pairing is a ✗; one that's out of reach, or a token that can't renew itself
+and ends within a week, is a warning. Machines on the tailnet that run T3 and aren't paired are listed. Each ✗ comes with its fix, and
 any ✗ exits non-zero. A missing headless Chromium is only a warning.
 
 ## Pane fading
@@ -226,7 +239,7 @@ the open question; the app only links the in-process change notification for its
 | Path | |
 |---|---|
 | `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `find.rs` (Find Thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
-| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
+| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`, `join.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
