@@ -515,10 +515,11 @@ impl Composer {
         let steer = matches!(mode, IfBusy::Steer);
         let tx = self.tx.clone();
         tokio::spawn(async move {
+            // A sent message shows in the conversation, which comes back to the bottom for it. A
+            // queued one doesn't until its turn, so only that gets a note.
             let done = match client.send_message(&state, &message, mode).await {
-                Ok(_) if busy && steer => Done::Note("Sent to the running turn".into(), false),
-                Ok(_) if busy => Done::Note("Queued".into(), false),
-                Ok(_) => Done::Note("Sent".into(), false),
+                Ok(_) if busy && !steer => Done::Note("Queued".into(), false),
+                Ok(_) => return,
                 Err(e) => {
                     let _ = tx.send(Done::Restore(message));
                     Done::Note(format!("{e:#}"), true)
