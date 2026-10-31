@@ -55,6 +55,7 @@ return {{}}"#,
 
 pub async fn run(thread_id: String, first: Field) -> Result<()> {
     let client = t3::connect(true).await?;
+    let _scheme = crate::scheme::listen();
     let (config, state) =
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
     let mut logos: HashMap<String, crate::icons::Icon> = HashMap::new();

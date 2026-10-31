@@ -1,17 +1,20 @@
 //! t3rex: Rex as the interface to T3 Code. T3 keeps running the agents and owns every thread's
 //! state; Rex shows each open thread as a window in one session.
 
+mod ask;
 mod chat;
 mod compose;
 mod fade;
 mod icons;
 mod install;
+mod link;
 mod media;
 mod new;
 mod pick;
 mod picker;
 mod render;
 mod rex;
+mod scheme;
 mod slash;
 mod state;
 mod sync;
@@ -222,6 +225,7 @@ fn main() {
         }
     });
     runtime.shutdown_timeout(Duration::from_millis(200));
+    scheme::stop();
     t3term::auth::revoke_all_sessions();
     std::process::exit(code);
 }

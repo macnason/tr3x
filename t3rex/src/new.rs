@@ -1,6 +1,7 @@
 //! A new thread from Rex: the window Rex's New Tab makes in the T3 Code session. It is T3's
 //! composer in a terminal: the first message, and under it the project, model, effort,
-//! access, workspace and device chips. Enter launches the thread through T3's
+//! access and workspace chips. The project chip also adds a folder as a project, and with no
+//! projects yet the composer opens on that. Enter launches the thread through T3's
 //! `orchestration.launchThread`, and the window becomes that thread's: this pane turns into the
 //! conversation and the Reply pane opens under it.
 //!
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -43,7 +44,6 @@ enum Field {
     Access,
     Workspace,
     Branch,
-    Device,
 }
 
 /// What arrives from work started in the background.
@@ -51,8 +51,9 @@ enum Loaded {
     Icons(HashMap<String, Icon>),
     Logos(HashMap<String, Icon>),
     Branches(String, Vec<Value>, bool),
-    Peers(Vec<Value>),
     Launched(Result<String, String>),
+    /// A folder T3 took as a project, or why it didn't.
+    Added(Result<Value, String>),
 }
 
 struct NewThread {
@@ -67,15 +68,13 @@ struct NewThread {
     /// The project's branches, by project id, and whether its folder is a git repository.
     branches: HashMap<String, (Vec<Value>, bool)>,
     base: Option<String>,
-    /// Linked environments T3 knows, from `peerLinks.list`.
-    peers: Vec<Value>,
-    /// None for this Mac, else a peer's environment id.
-    device: Option<String>,
     icons: HashMap<String, Icon>,
     logos: HashMap<String, Icon>,
     editor: Editor,
     focus: Option<usize>,
     menu: Option<(Field, Menu)>,
+    /// The folder being added as a project, from the project chip's Add folder….
+    folder: Option<Folder>,
     note: Option<(String, bool)>,
     launching: bool,
     welcome: bool,
@@ -86,6 +85,101 @@ struct NewThread {
     chip_row: u16,
     chat_width: crate::width::ChatWidth,
     tx: mpsc::UnboundedSender<Loaded>,
+}
+
+/// The project menu's item that adds a folder instead.
+const ADD_FOLDER: &str = "\u{0}add-folder";
+
+/// A folder being typed in to add as a project: its path, and the folders under the part
+/// typed so far that start with the rest.
+struct Folder {
+    path: Editor,
+    menu: Menu,
+}
+
+impl Folder {
+    fn new(path: &str) -> Folder {
+        let mut folder = Folder {
+            path: Editor::default(),
+            menu: Menu::default(),
+        };
+        folder.path.insert(path);
+        folder.list();
+        folder
+    }
+
+    fn list(&mut self) {
+        let typed = self.path.string();
+        let (dir, start) = split_path(&typed);
+        let mut names = subfolders(&expand(&dir), &start);
+        names.truncate(200);
+        self.menu = Menu::new(
+            names
+                .into_iter()
+                .map(|n| Item::new(format!("{dir}{n}/"), n))
+                .collect(),
+            None,
+        );
+    }
+
+    /// Completes the path to `to`, a folder from the list.
+    fn complete(&mut self, to: &str) {
+        self.path.take();
+        self.path.insert(to);
+        self.list();
+    }
+}
+
+/// `~` and `~/…` as the home folder.
+fn expand(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// A typed path as the folder it names so far, with its `/`, and the start of the next name.
+fn split_path(typed: &str) -> (String, String) {
+    match typed.rfind('/') {
+        Some(i) => (typed[..=i].to_string(), typed[i + 1..].to_string()),
+        None => (String::new(), typed.to_string()),
+    }
+}
+
+/// The folders in `dir` whose names start with `start`, ignoring case, sorted. Hidden ones
+/// only once a `.` is typed.
+fn subfolders(dir: &str, start: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(if dir.is_empty() { "." } else { dir }) else {
+        return Vec::new();
+    };
+    let start = start.to_lowercase();
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.to_lowercase().starts_with(&start))
+        .filter(|n| !n.starts_with('.') || start.starts_with('.'))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// A folder's absolute path for T3, without a trailing `/`, or why it can't be a project.
+fn folder_root(typed: &str) -> Result<String, String> {
+    let path = expand(typed.trim());
+    let path = if path.len() > 1 {
+        path.trim_end_matches('/').to_string()
+    } else {
+        path
+    };
+    if !path.starts_with('/') {
+        return Err("Type a full path, such as ~/Developer/app".into());
+    }
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("No folder at {}", crate::chat::short_home(&path)));
+    }
+    Ok(path)
 }
 
 /// The settings T3 starts a new thread in this project with: the project's default model,
@@ -158,9 +252,6 @@ impl NewThread {
                 out.push(Field::Branch);
             }
         }
-        if !self.peers.is_empty() {
-            out.push(Field::Device);
-        }
         out
     }
 
@@ -203,19 +294,6 @@ impl NewThread {
                 None,
                 format!("from {}", self.base.as_deref().unwrap_or("…")),
             ),
-            Field::Device => (
-                None,
-                match &self.device {
-                    None => "This Mac".to_string(),
-                    Some(id) => self
-                        .peers
-                        .iter()
-                        .find(|p| p["environmentId"].as_str() == Some(id.as_str()))
-                        .and_then(|p| p["label"].as_str())
-                        .unwrap_or("Device")
-                        .to_string(),
-                },
-            ),
         };
         Chip { icon, label }
     }
@@ -240,6 +318,7 @@ impl NewThread {
                             .unwrap_or_default();
                         Some(item)
                     })
+                    .chain(std::iter::once(Item::new(ADD_FOLDER, "Add folder…")))
                     .collect(),
                 Some(self.project.clone()),
             ),
@@ -284,37 +363,19 @@ impl NewThread {
                     .collect(),
                 self.base.clone(),
             ),
-            Field::Device => {
-                let mut items = vec![Item::new("", "This Mac")];
-                for p in &self.peers {
-                    let (Some(id), Some(label)) =
-                        (p["environmentId"].as_str(), p["label"].as_str())
-                    else {
-                        continue;
-                    };
-                    let mut item = Item::new(id, label);
-                    item.detail = if p["status"] == "reachable" {
-                        "in T3 Code".into()
-                    } else {
-                        p["status"].as_str().unwrap_or_default().to_string()
-                    };
-                    items.push(item);
-                }
-                (items, Some(self.device.clone().unwrap_or_default()))
-            }
         };
         self.menu = Some((field, Menu::new(items, current.as_deref())));
     }
 
     fn choose(&mut self, field: Field, id: String) {
         match field {
+            Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
             Field::Model => self.settings.set_model(&self.config, &id),
             Field::Effort => self.settings.effort = Some(id),
             Field::Access => self.settings.mode = id,
             Field::Workspace => self.worktree = id == "worktree",
             Field::Branch => self.base = Some(id),
-            Field::Device => self.device = (!id.is_empty()).then_some(id),
         }
     }
 
@@ -378,6 +439,103 @@ impl NewThread {
         });
     }
 
+    /// Adds the folder typed in as a project, through the same call `t3 project add` makes, or
+    /// picks the project that already has it.
+    fn add_folder(&mut self) {
+        let Some(folder) = self.folder.as_ref() else {
+            return;
+        };
+        let root = match folder_root(&folder.path.string()) {
+            Ok(root) => root,
+            Err(e) => {
+                self.note = Some((e, true));
+                return;
+            }
+        };
+        let known = self
+            .projects
+            .iter()
+            .find(|p| p["workspaceRoot"].as_str() == Some(root.as_str()))
+            .and_then(|p| p["id"].as_str())
+            .map(str::to_string);
+        if let Some(id) = known {
+            self.folder = None;
+            return self.set_project(id);
+        }
+        let title = std::path::Path::new(&root)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "project".into());
+        let (client, tx) = (self.client.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            let mutation = json!({
+                "type": "project.create",
+                "commandId": format!("t3rex:{}", uuid::Uuid::new_v4()),
+                "projectId": id,
+                "title": title,
+                "workspaceRoot": root,
+            });
+            let result = async {
+                let rpc = client.rpc().await?;
+                let made = rpc
+                    .call(
+                        "projects.mutate",
+                        mutation,
+                        std::time::Duration::from_secs(15),
+                    )
+                    .await?;
+                anyhow::Ok(made)
+            }
+            .await
+            .map(|made| {
+                if made["id"].is_string() {
+                    made
+                } else {
+                    json!({"id": id, "title": title, "workspaceRoot": root})
+                }
+            })
+            .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Loaded::Added(result));
+        });
+    }
+
+    fn folder_key(&mut self, key: KeyEvent) {
+        let alone = self.projects.is_empty();
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+        let at_end = folder.path.cursor == folder.path.text.len();
+        match key.code {
+            // With no project yet, there is nothing to go back to.
+            KeyCode::Esc if !alone => self.folder = None,
+            KeyCode::Enter => self.add_folder(),
+            KeyCode::Tab => {
+                let shown = folder.menu.shown();
+                if let Some(&i) = shown.get(folder.menu.selected) {
+                    let to = folder.menu.items[i].id.clone();
+                    folder.complete(&to);
+                }
+            }
+            KeyCode::Right if at_end => {
+                let shown = folder.menu.shown();
+                if let Some(&i) = shown.get(folder.menu.selected) {
+                    let to = folder.menu.items[i].id.clone();
+                    folder.complete(&to);
+                }
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                folder.menu.key(key);
+            }
+            _ => {
+                if edit(&mut folder.path, key) {
+                    folder.list();
+                }
+            }
+        }
+    }
+
     fn draw(&mut self) {
         // The column a thread's conversation reads in, as T3 lines its composer up with it.
         let (left, width) = self.chat_width.column(self.cols);
@@ -416,11 +574,37 @@ impl NewThread {
             .menu
             .as_ref()
             .and_then(|(f, _)| fields.iter().position(|x| x == f));
+        let open = if self.folder.is_some() {
+            fields.iter().position(|f| *f == Field::Project)
+        } else {
+            open
+        };
         let (row, spans) = picker::chips(&mut self.painter, &chips, self.focus, open, left);
         self.chip_row = lines.len() as u16;
         lines.push(format!("{pad}{row}"));
         self.chip_spans = spans;
-        if let Some((_, menu)) = self.menu.as_mut() {
+        let mut folder_cursor = None;
+        if let Some(folder) = self.folder.as_mut() {
+            lines.push(String::new());
+            let (shown, cursor) = wrap(
+                &folder.path.text,
+                folder.path.cursor,
+                width.saturating_sub(10),
+            );
+            let field = format!("{DIM}Folder{RESET}  ");
+            folder_cursor = Some((lines.len() + cursor.0 + 1, left + 9 + cursor.1));
+            for (i, line) in shown.iter().enumerate() {
+                let lead = if i == 0 { field.clone() } else { " ".repeat(8) };
+                lines.push(format!("{pad}{lead}{line}"));
+            }
+            let top = lines.len() as u16;
+            let room = self.rows.saturating_sub(lines.len() + 2).max(3);
+            if !folder.menu.items.is_empty() {
+                for line in folder.menu.lines(&mut self.painter, top, width, room) {
+                    lines.push(format!("{pad}{line}"));
+                }
+            }
+        } else if let Some((_, menu)) = self.menu.as_mut() {
             lines.push(String::new());
             let top = lines.len() as u16;
             let room = self.rows.saturating_sub(lines.len() + 2).max(3);
@@ -455,7 +639,9 @@ impl NewThread {
         for (i, line) in lines.iter().take(self.rows).enumerate() {
             text.push_str(&format!("\x1b[{};1H{line}", i + 1));
         }
-        if self.menu.is_none() && self.focus.is_none() {
+        if let Some((r, c)) = folder_cursor {
+            text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
+        } else if self.menu.is_none() && self.focus.is_none() {
             let (r, c) = (first_body + cursor.0 + 1, left + 3 + cursor.1);
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else {
@@ -467,6 +653,14 @@ impl NewThread {
 
     fn key(&mut self, key: KeyEvent) -> bool {
         self.note = None;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.folder.is_some() {
+            if ctrl && key.code == KeyCode::Char('c') {
+                return true;
+            }
+            self.folder_key(key);
+            return false;
+        }
         let fields = self.fields();
         if let Some((field, menu)) = self.menu.as_mut() {
             let field = *field;
@@ -480,7 +674,6 @@ impl NewThread {
             }
             return false;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, self.focus) {
             (KeyCode::Tab, f) => {
                 self.focus = match f {
@@ -532,6 +725,11 @@ impl NewThread {
 
     fn click(&mut self, col: u16, row: u16) {
         self.note = None;
+        if let Some(folder) = self.folder.as_mut()
+            && let Some(to) = folder.menu.click(row)
+        {
+            return folder.complete(&to);
+        }
         if let Some((field, menu)) = self.menu.as_ref() {
             let field = *field;
             if let Some(id) = menu.click(row) {
@@ -548,8 +746,12 @@ impl NewThread {
                 .iter()
                 .position(|(a, b)| (*a..=*b).contains(&col))
         {
-            let reopen = self.menu.as_ref().map(|(f, _)| *f) == fields.get(i).copied();
+            let reopen = self.menu.as_ref().map(|(f, _)| *f) == fields.get(i).copied()
+                || self.folder.is_some() && fields[i] == Field::Project;
             self.menu = None;
+            if !self.projects.is_empty() {
+                self.folder = None;
+            }
             self.focus = Some(i);
             if !reopen {
                 self.open(fields[i]);
@@ -558,6 +760,9 @@ impl NewThread {
         }
         self.menu = None;
         self.focus = None;
+        if !self.projects.is_empty() {
+            self.folder = None;
+        }
     }
 
     fn send(&mut self) {
@@ -568,34 +773,8 @@ impl NewThread {
         if prompt.trim().is_empty() {
             return;
         }
-        if let Some(device) = self.device.clone() {
-            // A linked environment takes launches only from a client paired with it, which T3
-            // Code is. Hand the message over.
-            let link = format!("t3code://new?environmentId={device}");
-            let copied = std::process::Command::new("/usr/bin/pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    child
-                        .stdin
-                        .take()
-                        .context("no stdin")
-                        .map_err(std::io::Error::other)?
-                        .write_all(prompt.as_bytes())?;
-                    child.wait()
-                })
-                .is_ok_and(|s| s.success());
-            let _ = std::process::Command::new("/usr/bin/open")
-                .arg(&link)
-                .status();
-            self.note = Some((
-                if copied {
-                    "Opened T3 Code. The message is on the clipboard.".into()
-                } else {
-                    "Opened T3 Code.".into()
-                },
-                false,
-            ));
+        if self.project.is_empty() {
+            self.folder.get_or_insert_with(|| Folder::new("~/"));
             return;
         }
         let plan =
@@ -693,9 +872,51 @@ return {{}}"#,
     Rex::find().lua(&session, &script).await.map(drop)
 }
 
+/// Whether T3's server isn't there to answer, rather than refusing.
+fn unavailable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|e| e.downcast_ref::<t3term::error::T3Error>())
+        .any(|e| e.exit_code == t3term::error::exit::UNAVAILABLE)
+}
+
+/// T3, once it answers. Until then the pane says what's wrong, in place of the composer, and
+/// tries again every few seconds, so it opens as soon as T3 Code does.
+async fn connect() -> Result<(Arc<Client>, Value, t3term::projection::ShellState)> {
+    let mut shown = false;
+    loop {
+        let attempt = async {
+            let client = t3::connect(true).await?;
+            let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
+            anyhow::Ok((client, config, shell))
+        }
+        .await;
+        let error = match attempt {
+            Ok(loaded) => {
+                if shown {
+                    out("\x1b[H\x1b[2J\x1b[?25h");
+                }
+                return Ok(loaded);
+            }
+            Err(e) if unavailable(&e) => "T3 Code isn't running. Open T3 Code.".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        let (cols, _) = crossterm::terminal::size().unwrap_or((100, 30));
+        let (left, width) = crate::width::current().0.column(cols as usize);
+        out(&format!(
+            "\x1b]2;New Thread\x07\x1b[H\x1b[2J\x1b[?25l\x1b[3;{}H{RED}{}{RESET}",
+            left + 1,
+            fit(&error, width)
+        ));
+        shown = true;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
 pub async fn run(welcome: bool) -> Result<()> {
-    let client = t3::connect(true).await?;
-    let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
+    let (client, config, shell) = connect().await?;
+    // The scheme first, so the logos loaded next are for the screen they're seen on.
+    let mut scheme = crate::scheme::listen();
     // Projects with the most recent work first, as T3's picker lists them.
     let mut recent: HashMap<String, Value> = HashMap::new();
     for t in &shell.threads {
@@ -727,8 +948,7 @@ pub async fn run(welcome: bool) -> Result<()> {
     let first = projects
         .first()
         .and_then(|p| p["id"].as_str())
-        .context("T3 has no projects yet. Add one in T3 Code.")?
-        .to_string();
+        .map(str::to_string);
     let (tx, mut loaded) = mpsc::unbounded_channel();
     let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 30));
     let mut ui = NewThread {
@@ -741,13 +961,12 @@ pub async fn run(welcome: bool) -> Result<()> {
         worktree: false,
         branches: HashMap::new(),
         base: None,
-        peers: Vec::new(),
-        device: None,
         icons: HashMap::new(),
         logos: HashMap::new(),
         editor: Editor::default(),
         focus: None,
         menu: None,
+        folder: None,
         note: None,
         launching: false,
         welcome,
@@ -759,7 +978,14 @@ pub async fn run(welcome: bool) -> Result<()> {
         chat_width: crate::width::current().0,
         tx: tx.clone(),
     };
-    ui.set_project(first);
+    match first {
+        Some(first) => ui.set_project(first),
+        // No projects yet: a folder first, and the model T3 would start any thread with.
+        None => {
+            ui.settings = defaults(&ui.config, &Value::Null, None);
+            ui.folder = Some(Folder::new("~/"));
+        }
+    }
     {
         let (c, t, projects) = (client.clone(), tx.clone(), ui.projects.clone());
         tokio::spawn(async move {
@@ -768,26 +994,6 @@ pub async fn run(welcome: bool) -> Result<()> {
         let (t, providers) = (tx.clone(), models::providers(&ui.config).to_vec());
         tokio::spawn(async move {
             let _ = t.send(Loaded::Logos(logos(&providers).await));
-        });
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            // Linked environments need the access:read scope, which only this call asks for.
-            let Ok(access) = t3::connect_access().await else {
-                return;
-            };
-            let Ok(rpc) = access.rpc().await else { return };
-            if let Ok(r) = rpc
-                .call(
-                    "peerLinks.list",
-                    json!({}),
-                    std::time::Duration::from_secs(10),
-                )
-                .await
-            {
-                let _ = tx.send(Loaded::Peers(
-                    r["links"].as_array().cloned().unwrap_or_default(),
-                ));
-            }
         });
     }
     crossterm::terminal::enable_raw_mode()?;
@@ -824,10 +1030,26 @@ pub async fn run(welcome: bool) -> Result<()> {
                     None => return Ok(()),
                     _ => continue,
                 },
+                Ok(()) = scheme.changed() => {
+                    let (t, providers) = (ui.tx.clone(), models::providers(&ui.config).to_vec());
+                    tokio::spawn(async move {
+                        let _ = t.send(Loaded::Logos(logos(&providers).await));
+                    });
+                }
                 Some(event) = loaded.recv() => match event {
                     Loaded::Icons(icons) => ui.icons = icons,
                     Loaded::Logos(logos) => ui.logos = logos,
-                    Loaded::Peers(peers) => ui.peers = peers,
+                    Loaded::Added(Ok(project)) => {
+                        let id = project["id"].as_str().unwrap_or_default().to_string();
+                        ui.projects.insert(0, project);
+                        ui.folder = None;
+                        ui.set_project(id);
+                        let (c, t, projects) = (ui.client.clone(), ui.tx.clone(), ui.projects.clone());
+                        tokio::spawn(async move {
+                            let _ = t.send(Loaded::Icons(icons::projects(&c, &projects).await));
+                        });
+                    }
+                    Loaded::Added(Err(e)) => ui.note = Some((e, true)),
                     Loaded::Branches(project, refs, repo) => {
                         ui.branches.insert(project, (refs, repo));
                         ui.pick_base();
@@ -869,6 +1091,7 @@ pub async fn run(welcome: bool) -> Result<()> {
     // would revoke it.
     drop(ui);
     drop(client);
+    crate::scheme::stop();
     t3term::auth::revoke_all_sessions();
     use std::os::unix::process::CommandExt;
     let error = std::process::Command::new(&program)
@@ -878,9 +1101,9 @@ pub async fn run(welcome: bool) -> Result<()> {
     Err(error.into())
 }
 
-/// Every provider's logo, by instance id.
+/// Every provider's logo, by instance id, for the screen's scheme.
 pub async fn logos(providers: &[Value]) -> HashMap<String, Icon> {
-    let dark = crate::media::mac_is_dark();
+    let dark = crate::scheme::dark_soon().await;
     let mut out = HashMap::new();
     for p in providers {
         if let Some(id) = p["instanceId"].as_str() {
@@ -888,4 +1111,41 @@ pub async fn logos(providers: &[Value]) -> HashMap<String, Icon> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_typed_path_lists_the_folders_it_could_be() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["Apps", "api", ".hidden", "zeta"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        std::fs::write(dir.path().join("app.txt"), "").unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(subfolders(&root, "a"), vec!["api", "Apps"]);
+        assert_eq!(subfolders(&root, "."), vec![".hidden"]);
+        assert_eq!(subfolders(&root, ""), vec!["api", "Apps", "zeta"]);
+        assert_eq!(
+            split_path("~/Developer/t3"),
+            ("~/Developer/".to_string(), "t3".to_string())
+        );
+        let mut folder = Folder::new(&format!("{root}/A"));
+        assert_eq!(folder.menu.items.len(), 2);
+        let first = folder.menu.items[0].id.clone();
+        folder.complete(&first);
+        assert_eq!(folder.path.string(), format!("{root}/api/"));
+    }
+
+    #[test]
+    fn only_a_full_path_to_a_folder_is_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(folder_root(&format!("{root}/")), Ok(root.clone()));
+        assert!(folder_root("relative/path").is_err());
+        assert!(folder_root(&format!("{root}/missing")).is_err());
+        assert_eq!(folder_root("/"), Ok("/".to_string()));
+    }
 }

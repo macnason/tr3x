@@ -40,7 +40,6 @@ thread_action("t3_snooze_3h", "Snooze Thread for 3 Hours", { "snooze", "3h" }, "
 thread_action("t3_snooze_tomorrow", "Snooze Thread Until Tomorrow", { "snooze", "tomorrow" }, "t3 later")
 thread_action("t3_pin", "Pin Thread", { "pin" }, "t3 keep")
 thread_action("t3_unpin", "Unpin Thread", { "pin", "--off" }, "t3")
-thread_action("t3_open", "Open Thread in T3 Code", { "open" }, "t3 app desktop")
 thread_action("t3_archive", "Archive Thread", { "archive" }, "t3 delete")
 
 rex.action{
@@ -90,3 +89,43 @@ rex.bind("ctrl+cmd+o", "t3_open")
 rex.bind("ctrl+cmd+i", "t3_inbox")
 rex.bind("ctrl+cmd+n", "t3_new")
 rex.bind("ctrl+cmd+m", "t3_model")
+
+-- The client that ran an action, from the server's list: its principal says where it is.
+local function caller(ctx)
+  local r = rex.call("client.list", {})
+  for _, c in ipairs((r and r.clients) or {}) do
+    if c.client_id == ctx.client_id then return c end
+  end
+end
+
+-- Opens T3 Code on this Mac. From a laptop or phone attached over the tailnet, opening it here
+-- would open it on the wrong screen, so the thread's title, a link that device opens, does it.
+rex.action{
+  name = "t3_open",
+  title = "Open Thread in T3 Code",
+  category = "T3 Code",
+  keywords = "t3 app desktop",
+  run = function(ctx)
+    local c = caller(ctx)
+    if c and c.principal and c.principal.transport ~= "unix" then
+      error("Click the thread's title to open it on this device", 0)
+    end
+    t3rex(ctx, { "open" })
+  end,
+}
+
+-- The device that runs this takes the T3 Code session's panes, so they size to its screen and
+-- follow its appearance. The others show that size until one of them takes the panes back.
+rex.action{
+  name = "t3_fit",
+  title = "Fit to This Device",
+  category = "T3 Code",
+  keywords = "t3 size resize screen phone ipad laptop layout own",
+  run = function(ctx)
+    local r = rex.exec({ T3REX, "inbox" }, { timeout = 10 })
+    if not (r and r.ok) then error("t3rex isn't syncing", 0) end
+    local sid = rex.json.decode(r.stdout).session_id
+    local _, err = rex.session.own_block{ session_id = sid, mode = "take" }
+    if err then error(err, 0) end
+  end,
+}

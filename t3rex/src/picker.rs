@@ -265,6 +265,50 @@ pub fn chips(
     (line, spans)
 }
 
+/// Each button's columns on a line, 1-based and inclusive, and its index.
+pub type Spans = Vec<((usize, usize), usize)>;
+
+/// Labels drawn as buttons, styled as chips are, two spaces apart, wrapped at `width` columns.
+/// The first is bold when it is the one to press. Returns each line, and each button's columns
+/// on it, 1-based and inclusive, with its index.
+pub fn buttons(
+    labels: &[String],
+    focused: Option<usize>,
+    primary: bool,
+    left: usize,
+    width: usize,
+) -> Vec<(String, Spans)> {
+    let mut lines: Vec<(String, Spans)> = Vec::new();
+    let mut line = String::new();
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (i, label) in labels.iter().enumerate() {
+        let label = fit(label, width.max(4));
+        let w = unicode_width::UnicodeWidthStr::width(label.as_str());
+        if used > 0 && used + 2 + w > width {
+            lines.push((std::mem::take(&mut line), std::mem::take(&mut spans)));
+            used = 0;
+        }
+        if used > 0 {
+            line.push_str("  ");
+            used += 2;
+        }
+        let style = match (focused == Some(i), primary && i == 0) {
+            (true, _) => INVERSE,
+            (false, true) => BOLD,
+            (false, false) => DIM,
+        };
+        line.push_str(&format!("{style}{label}{RESET}"));
+        let start = left + 1 + used;
+        spans.push(((start, start + w - 1), i));
+        used += w;
+    }
+    if !spans.is_empty() {
+        lines.push((line, spans));
+    }
+    lines
+}
+
 /// The model, effort and access a thread or a new thread goes out with.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Settings {
@@ -531,6 +575,23 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn buttons_wrap_and_know_their_columns() {
+        let labels: Vec<String> = ["Approve", "Always", "Decline"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let lines = buttons(&labels, Some(1), true, 2, 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1, vec![((3, 9), 0), ((12, 17), 1), ((20, 26), 2)]);
+        assert!(lines[0].0.contains(&format!("{INVERSE}Always{RESET}")));
+        assert!(lines[0].0.starts_with(&format!("{BOLD}Approve")));
+        // Too narrow for all three: the third starts a line of its own, at the left again.
+        let lines = buttons(&labels, None, false, 0, 16);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].1, vec![((1, 7), 2)]);
     }
 
     #[test]
