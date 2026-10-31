@@ -1115,6 +1115,15 @@ async fn follow(first: bool) -> Result<std::convert::Infallible> {
             continue;
         }
 
+        // A machine's capabilities come from its descriptor. Until that has loaded, T3's rules
+        // can't be read (without settlement every settled thread looks open), so the machine
+        // counts as not ready: it adds nothing, and keeps the windows it has.
+        let described: HashSet<String> = hub
+            .envs()
+            .iter()
+            .filter(|e| e.descriptor().is_some())
+            .map(|e| e.id().to_string())
+            .collect();
         let badges = hub.paired() >= 2;
         let names: HashMap<String, String> = hub
             .envs()
@@ -1126,7 +1135,7 @@ async fn follow(first: bool) -> Result<std::convert::Infallible> {
             .iter()
             .filter_map(|e| {
                 let track = tracks.get(e.id())?;
-                track.shell.synchronized.then(|| MachineShell {
+                (track.shell.synchronized && described.contains(e.id())).then(|| MachineShell {
                     env: e.id(),
                     badge: (badges && e.id() != home).then(|| names[e.id()].as_str()),
                     local: e.is_local(),
@@ -1149,7 +1158,11 @@ async fn follow(first: bool) -> Result<std::convert::Infallible> {
             .collect();
         let envs: Vec<String> = hub.envs().iter().map(|e| e.id().to_string()).collect();
         let health = |env: &str| match tracks.get(env) {
-            Some(track) => track.health(now),
+            Some(track) => {
+                let mut health = track.health(now);
+                health.ready &= described.contains(env);
+                health
+            }
             // A machine t3rex no longer follows: its windows go.
             None => Health::READY,
         };
