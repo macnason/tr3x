@@ -80,8 +80,16 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
         .map(|l| &l["layout"])
         .and_then(|n| n["split"]["split_id"].as_str().or(n["block_id"].as_str()))
         .context("that window has no panes")?;
+    // The window's width: the pane's columns over its share of the window, as the layout has it
+    // now. A pane's size follows a change of layout a moment later.
     let size = rex.block_method(&session, block, "size").await?;
-    let wide = size["columns"].as_u64().unwrap_or(0) >= ROOM;
+    let share = window["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|l| share_of(&l["layout"], block))
+        .unwrap_or(1.0);
+    let wide = size["columns"].as_f64().unwrap_or(0.0) / share >= ROOM as f64;
     let exe = crate::icons::real_exe().to_string_lossy().into_owned();
     let mut args = vec!["pr-pane", thread];
     if create {
@@ -113,6 +121,15 @@ return {{}}"#,
         lua_str(&data.to_string())
     );
     rex.lua(&session, &script).await.map(drop)
+}
+
+/// The fraction of the window's width `block` takes in `node`'s layout.
+fn share_of(node: &Value, block: &str) -> Option<f64> {
+    if node["block_id"] == block {
+        return node["rect"][2].as_f64().filter(|w| *w > 0.0);
+    }
+    let split = node.get("split")?;
+    share_of(&split["before"], block).or_else(|| share_of(&split["after"], block))
 }
 
 fn blocks(window: &Value) -> impl Iterator<Item = &Value> {
@@ -350,4 +367,21 @@ async fn wait_key() {
     })
     .await;
     let _ = crossterm::terminal::disable_raw_mode();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_of_a_pane_in_a_split() {
+        let layout = json!({"rect": [0, 0, 1, 1], "split": {
+            "before": {"rect": [0, 0, 0.55, 1], "split": {
+                "before": {"rect": [0, 0, 0.55, 0.86], "block_id": "chat"},
+                "after": {"rect": [0, 0.86, 0.55, 0.14], "block_id": "reply"}}},
+            "after": {"rect": [0.55, 0, 0.45, 1], "block_id": "drawer"}}});
+        assert_eq!(share_of(&layout, "reply"), Some(0.55));
+        assert_eq!(share_of(&layout, "drawer"), Some(0.45));
+        assert_eq!(share_of(&layout, "gone"), None);
+    }
 }
