@@ -473,16 +473,27 @@ fn shell_words(args: &[String]) -> String {
         .join(" ")
 }
 
-/// A script for an SSH machine that finds its `t3` as T3's desktop app looks for it, then runs
-/// `body` with it as `$T3` and its T3 home as `$H`.
+/// A script for another machine that finds its `t3` as T3's desktop app looks for it, or the
+/// CLI inside the T3 Code app, then runs `body` with it as `t3run` and its T3 home as `$H`.
 fn ssh_script(body: &str) -> String {
     format!(
         r#"set -u
 H="${{T3CODE_HOME:-$HOME/.t3}}"
 T3="$(command -v t3 2>/dev/null || true)"
 [ -n "$T3" ] || [ ! -x "$HOME/.local/bin/t3" ] || T3="$HOME/.local/bin/t3"
-[ -n "$T3" ] || T3="$(ls -1d "$H"/runtime/versions/*/t3 2>/dev/null | sort | tail -n 1)"
-[ -n "$T3" ] || {{ echo "t3rex: no t3 on this machine" >&2; exit 3; }}
+APP=""
+if [ -z "$T3" ]; then
+  for a in "/Applications/T3 Code"*.app "$HOME/Applications/T3 Code"*.app; do
+    if [ -x "$a/Contents/MacOS/$(basename "$a" .app)" ]; then APP="$a"; break; fi
+  done
+fi
+[ -n "$T3$APP" ] || T3="$(ls -1d "$H"/runtime/versions/*/t3 2>/dev/null | sort | tail -n 1)"
+[ -n "$T3$APP" ] || {{ echo "t3rex: no t3 on this machine" >&2; exit 3; }}
+t3run() {{
+  if [ -n "$T3" ]; then "$T3" "$@"
+  else ELECTRON_RUN_AS_NODE=1 "$APP/Contents/MacOS/$(basename "$APP" .app)" "$APP/Contents/Resources/app.asar/{SERVER_ENTRY_SUFFIX}" "$@"
+  fi
+}}
 {body}
 "#
     )
@@ -493,7 +504,7 @@ fn pairing_script(label: &str) -> String {
     ssh_script(&format!(
         r#"printf 'ENV %s\n' "$(cat "$H/userdata/environment-id" 2>/dev/null)"
 printf 'RUNTIME %s\n' "$(tr -d '\n' < "$H/userdata/server-runtime.json" 2>/dev/null)"
-printf 'PAIRING %s\n' "$("$T3" {} | tr -d '\n')""#,
+printf 'PAIRING %s\n' "$(t3run {} | tr -d '\n')""#,
         shell_words(&pairing_args(label))
     ))
 }
@@ -620,7 +631,7 @@ impl Cli<'_> {
     async fn run(&self, args: &[String]) -> Result<String> {
         match self {
             Cli::Ssh(host) => {
-                ssh_run(host, ssh_script(&format!(r#""$T3" {}"#, shell_words(args)))).await
+                ssh_run(host, ssh_script(&format!("t3run {}", shell_words(args)))).await
             }
             Cli::Local(local) => {
                 let t3 = T3Command::local(local)?;
