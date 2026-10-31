@@ -95,13 +95,15 @@ const COMMANDS: &[&str] = &[
     "effort", "mode", "steer", "width",
 ];
 
-/// Agent-written text as one plain line: no escape sequences or other controls, which could
-/// redraw the pane and show something other than what is being asked.
-fn clean(text: &str) -> String {
-    t3term::transcript::plain(text)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+/// What a click or a focused chip does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Hit {
+    /// Opens the model picker on a field.
+    Field(Field),
+    /// Answers the pending approval.
+    Decide(&'static str),
+    /// Picks the pending question's option, by index.
+    Choose(usize),
 }
 
 /// What came back from work started in the background.
@@ -111,6 +113,8 @@ enum Done {
     Restore(String),
     Config(Value),
     Logos(HashMap<String, Icon>),
+    /// A link to open the thread with, on the device it's clicked on.
+    Link(String),
 }
 
 struct Composer {
@@ -124,14 +128,18 @@ struct Composer {
     /// A line under the input: what just happened, or what went wrong, and when it goes.
     note: Option<(String, bool)>,
     note_until: Option<tokio::time::Instant>,
+    /// The thread's link, under the input until the next key.
+    link: Option<String>,
     cols: usize,
     rows: usize,
     title: String,
     tx: mpsc::UnboundedSender<Done>,
     logos: HashMap<String, Icon>,
     painter: Painter,
-    /// Each chip's columns on the bottom row, for clicks.
-    chip_spans: Vec<((usize, usize), Field)>,
+    /// Each chip's and button's screen row and columns, for clicks.
+    spans: Vec<(usize, (usize, usize), Hit)>,
+    /// The approval or question button Tab moved to, by index.
+    focus: Option<usize>,
     /// Started again under the provider's name once already; don't loop if that failed.
     renamed: bool,
     /// The chat width setting: the input sits in the conversation's column.
@@ -140,13 +148,56 @@ struct Composer {
 
 impl Composer {
     fn pending(&self) -> Option<(Value, Value)> {
-        let state = self.state.as_ref()?;
-        let request = state.pending_requests().into_iter().next()?.clone();
-        let item = state
-            .request_item(request["id"].as_str().unwrap_or_default())
-            .cloned()
-            .unwrap_or(Value::Null);
-        Some((request, item))
+        crate::ask::pending(self.state.as_ref()?)
+    }
+
+    /// The buttons that answer what's pending: Approve, Always and Decline for an approval, or
+    /// the question's options, numbered as the number keys pick them.
+    fn buttons(&self) -> Vec<(String, Hit)> {
+        let Some((request, item)) = self.pending() else {
+            return Vec::new();
+        };
+        if !crate::ask::is_question(&request) {
+            return vec![
+                ("Approve".into(), Hit::Decide("accept")),
+                ("Always".into(), Hit::Decide("acceptForSession")),
+                ("Decline".into(), Hit::Decide("decline")),
+            ];
+        }
+        let Some(q) = self.question(&item) else {
+            return Vec::new();
+        };
+        q["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, o)| {
+                let label = crate::ask::clean(o["label"].as_str().unwrap_or(""));
+                (format!("{} {label}", i + 1), Hit::Choose(i))
+            })
+            .collect()
+    }
+
+    fn press(&mut self, hit: Hit) {
+        self.focus = None;
+        match hit {
+            Hit::Field(field) => self.pick(field),
+            Hit::Decide(decision) => self.respond(decision),
+            Hit::Choose(i) => {
+                if let Some((request, item)) = self.pending()
+                    && let Some(q) = self.question(&item).cloned()
+                    && let Some(option) = q["options"].get(i)
+                {
+                    let value = option["value"]
+                        .as_str()
+                        .or(option["label"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.answer(&request, &item, &q, value);
+                }
+            }
+        }
     }
 
     fn question<'a>(&self, item: &'a Value) -> Option<&'a Value> {
@@ -226,58 +277,38 @@ impl Composer {
         };
         let room = self.rows.saturating_sub(reserved).max(1);
         let mut rows: Vec<String> = Vec::new();
+        // The buttons on each row, by the row's index in `rows`.
+        let mut hits: Vec<(usize, (usize, usize), Hit)> = Vec::new();
         if let Some((request, item)) = self.pending() {
-            if request["kind"] == "user_input" {
-                if let Some(q) = self.question(&item) {
-                    let prompt = clean(
-                        q["question"]
-                            .as_str()
-                            .or(q["header"].as_str())
-                            .unwrap_or("Question"),
-                    );
-                    rows.push(format!(
+            let ask = if crate::ask::is_question(&request) {
+                self.question(&item).map(|q| {
+                    format!(
                         "{YELLOW}{BOLD}◆{RESET} {BOLD}{}{RESET}",
-                        fit(&prompt, width - 2)
-                    ));
-                    let opts: Vec<String> = q["options"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .enumerate()
-                        .take(6)
-                        .map(|(i, o)| {
-                            format!(
-                                "{DIM}{}{RESET} {}",
-                                i + 1,
-                                clean(o["label"].as_str().unwrap_or(""))
-                            )
-                        })
-                        .collect();
-                    if !opts.is_empty() {
-                        rows.push(fit_ansi(&opts.join("   "), width));
-                    }
-                }
+                        fit(&crate::ask::question_text(q), width - 2)
+                    )
+                })
             } else {
-                let what = item["prompt"]
-                    .as_str()
-                    .or(item["title"].as_str())
-                    .or(request["summary"].as_str())
-                    .unwrap_or("The agent is asking to continue");
-                let what = clean(what);
-                let verb = match request["kind"].as_str().unwrap_or_default() {
-                    k if k.contains("command") => "Run",
-                    k if k.contains("file-change") || k.contains("file_change") => "Change",
-                    k if k.contains("read") => "Read",
-                    k if k.contains("network") || k.contains("fetch") => "Fetch",
-                    _ => "Allow",
-                };
-                rows.push(format!(
+                let state = self.state.as_ref().expect("a pending request has a thread");
+                let (verb, what) = crate::ask::approval(state, &request, &item);
+                Some(format!(
                     "{YELLOW}{BOLD}◆{RESET} {BOLD}{verb}{RESET} {}?",
                     fit(&what, width.saturating_sub(8))
-                ));
-                rows.push(format!(
-                    "{BOLD}a ⏎{RESET} Accept   {BOLD}s ⏎{RESET} Accept for session   {BOLD}d ⏎{RESET} Decline"
-                ));
+                ))
+            };
+            if let Some(ask) = ask {
+                rows.push(ask);
+                let buttons = self.buttons();
+                if self.focus.is_some_and(|f| f >= buttons.len()) {
+                    self.focus = None;
+                }
+                let labels: Vec<String> = buttons.iter().map(|(l, _)| l.clone()).collect();
+                let primary = !crate::ask::is_question(&request);
+                for (line, spans) in picker::buttons(&labels, self.focus, primary, left, width) {
+                    for (cols, i) in spans {
+                        hits.push((rows.len(), cols, buttons[i].1));
+                    }
+                    rows.push(line);
+                }
             }
         }
         // The input, wrapped, with the cursor where it is.
@@ -291,6 +322,11 @@ impl Composer {
         if let Some((note, error)) = &self.note {
             let color = if *error { RED } else { DIM };
             rows.push(format!("{color}{}{RESET}", fit(note, width)));
+        } else if let Some(url) = &self.link {
+            rows.push(format!(
+                "{DIM}{}{RESET}",
+                crate::link::osc8(url, "Open in T3 ↗")
+            ));
         }
         // Keep the cursor's row on screen in a pane shorter than the text.
         let cursor_row = first_input + cursor.0;
@@ -301,6 +337,11 @@ impl Composer {
         for (i, row) in shown.iter().enumerate() {
             text.push_str(&format!("\x1b[{};{}H{row}", i + 1, left + 1));
         }
+        self.spans = hits
+            .into_iter()
+            .filter(|(row, _, _)| (start..start + room).contains(row))
+            .map(|(row, cols, hit)| (row - start + 1, cols, hit))
+            .collect();
         if !chips.is_empty() {
             let only: Vec<Chip> = chips
                 .iter()
@@ -310,14 +351,19 @@ impl Composer {
                 })
                 .collect();
             let (line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
-            self.chip_spans = spans
-                .into_iter()
-                .zip(chips.iter().map(|(_, f)| *f))
-                .collect();
+            let bottom = self.rows;
+            self.spans.extend(
+                spans
+                    .into_iter()
+                    .zip(chips.iter().map(|(_, f)| Hit::Field(*f)))
+                    .map(|(cols, hit)| (bottom, cols, hit)),
+            );
             text.push_str(&format!("\x1b[{};{}H{line}", self.rows, left + 1));
         }
         let (r, c) = (cursor_row.saturating_sub(start) + 1, left + 3 + cursor.1);
-        text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h\x1b[?2026l"));
+        // The cursor hides while a button has focus, as it does on a chip in a new thread.
+        let cursor = if self.focus.is_some() { "?25l" } else { "?25h" };
+        text.push_str(&format!("\x1b[{r};{c}H\x1b[{cursor}\x1b[?2026l"));
         out(&text);
     }
 
@@ -361,6 +407,30 @@ impl Composer {
         });
     }
 
+    /// Records the answer to question `q`, and sends every answer once each question has one.
+    fn answer(&mut self, request: &Value, item: &Value, q: &Value, answer: String) {
+        let answer = if q["multiSelect"] == true {
+            json!([answer])
+        } else {
+            json!(answer)
+        };
+        self.answers
+            .insert(q["id"].as_str().unwrap_or_default().to_string(), answer);
+        let total = item["questions"].as_array().map_or(0, Vec::len);
+        if self.answers.len() >= total {
+            let answers = Value::Object(std::mem::take(&mut self.answers));
+            let (client, thread, id) = (
+                self.client.clone(),
+                self.thread_id.clone(),
+                request["id"].as_str().unwrap_or_default().to_string(),
+            );
+            self.spawn(async move {
+                client.answer(&thread, &id, answers).await?;
+                Ok("Answered".into())
+            });
+        }
+    }
+
     fn submit(&mut self) {
         let text = self.editor.string();
         let trimmed = text.trim();
@@ -381,27 +451,8 @@ impl Composer {
                     .to_string(),
                 _ => trimmed.to_string(),
             };
-            let answer = if q["multiSelect"] == true {
-                json!([answer])
-            } else {
-                json!(answer)
-            };
-            self.answers
-                .insert(q["id"].as_str().unwrap_or_default().to_string(), answer);
             self.editor.take();
-            let total = item["questions"].as_array().map_or(0, Vec::len);
-            if self.answers.len() >= total {
-                let answers = Value::Object(std::mem::take(&mut self.answers));
-                let (client, thread, id) = (
-                    self.client.clone(),
-                    self.thread_id.clone(),
-                    request["id"].as_str().unwrap_or_default().to_string(),
-                );
-                self.spawn(async move {
-                    client.answer(&thread, &id, answers).await?;
-                    Ok("Answered".into())
-                });
-            }
+            self.answer(&request, &item, &q, answer);
             return;
         }
         // An approval takes a, s or d and Enter. A reply that starts with one of those letters
@@ -512,10 +563,27 @@ impl Composer {
                 }
                 Err(e) => self.note(format!("{e:#}"), true),
             },
-            "open" => self.spawn(async move {
-                crate::install::open_in_t3(&thread).await?;
-                Ok("Opened in T3 Code".into())
-            }),
+            // Opening goes to the Mac this runs on. With a laptop or phone attached, which
+            // may be where this was typed, the note is a link to click there instead.
+            "open" => {
+                let link = crate::link::thread(
+                    self.config.as_ref(),
+                    &self.client.runtime.environment_id,
+                    &self.thread_id,
+                );
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let done = if !crate::link::only_here().await {
+                        Done::Link(link)
+                    } else {
+                        match crate::install::open_in_t3(&thread).await {
+                            Ok(()) => Done::Note("Opened in T3 Code".into(), false),
+                            Err(e) => Done::Note(format!("{e:#}"), true),
+                        }
+                    };
+                    let _ = tx.send(done);
+                });
+            }
             "model" | "effort" | "mode" if arg.is_empty() => self.pick(match name {
                 "model" => Field::Model,
                 "effort" => Field::Effort,
@@ -553,6 +621,52 @@ impl Composer {
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
+        self.link = None;
+        // Tab moves through what's pending's buttons, then on to the model picker. On a
+        // button, the arrows move and Enter presses it; anything else goes back to typing.
+        let buttons = self.buttons();
+        match (key.code, self.focus) {
+            (KeyCode::Tab, f) if !buttons.is_empty() => {
+                self.focus = match f {
+                    None => Some(0),
+                    Some(i) if i + 1 < buttons.len() => Some(i + 1),
+                    Some(_) => {
+                        self.focus = None;
+                        self.pick(Field::Model);
+                        return;
+                    }
+                };
+                return;
+            }
+            (KeyCode::BackTab, f) if !buttons.is_empty() => {
+                self.focus = match f {
+                    None => Some(buttons.len() - 1),
+                    Some(0) => None,
+                    Some(i) => Some(i - 1),
+                };
+                return;
+            }
+            (KeyCode::Left, Some(i)) => {
+                self.focus = Some(i.saturating_sub(1));
+                return;
+            }
+            (KeyCode::Right, Some(i)) => {
+                self.focus = Some((i + 1).min(buttons.len().saturating_sub(1)));
+                return;
+            }
+            (KeyCode::Enter | KeyCode::Char(' '), Some(i)) => {
+                if let Some((_, hit)) = buttons.get(i) {
+                    self.press(*hit);
+                }
+                return;
+            }
+            (KeyCode::Esc | KeyCode::Up, Some(_)) => {
+                self.focus = None;
+                return;
+            }
+            (_, Some(_)) => self.focus = None,
+            _ => {}
+        }
         match key.code {
             KeyCode::Enter
                 if !key
@@ -676,16 +790,10 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
     (lines, at)
 }
 
-/// Cuts a styled line to `width` visible columns.
-fn fit_ansi(line: &str, width: usize) -> String {
-    if crate::render::visible_width(line) <= width {
-        return line.to_string();
-    }
-    fit(&crate::render::strip_ansi(line), width)
-}
-
 pub async fn run(thread_id: String) -> Result<()> {
     let client = t3::connect(true).await?;
+    // The scheme first, so the logos loaded next are for the screen they're seen on.
+    let mut scheme = crate::scheme::listen();
     let mut events = client.watch_thread(&thread_id, None);
     let (tx, mut done) = mpsc::unbounded_channel();
     {
@@ -708,13 +816,15 @@ pub async fn run(thread_id: String) -> Result<()> {
         answers: serde_json::Map::new(),
         note: None,
         note_until: None,
+        link: None,
         cols: cols as usize,
         rows: rows as usize,
         title: String::new(),
         tx,
         logos: HashMap::new(),
         painter: Painter,
-        chip_spans: Vec::new(),
+        spans: Vec::new(),
+        focus: None,
         renamed: false,
         chat_width: Follow::new(),
     };
@@ -750,8 +860,18 @@ pub async fn run(thread_id: String) -> Result<()> {
                         }
                     }
                     Some(Done::Config(config)) => composer.config = Some(config),
+                    Some(Done::Link(url)) => composer.link = Some(url),
                     Some(Done::Logos(logos)) => composer.logos = logos,
                     None => {}
+                },
+                Ok(()) = scheme.changed() => if let Some(config) = composer.config.as_ref() {
+                    let (tx, providers) = (composer.tx.clone(), models::providers(config).to_vec());
+                    tokio::spawn(async move {
+                        let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
+                    });
+                    continue;
+                } else {
+                    continue;
                 },
                 _ = tick.tick() => if !composer.chat_width.changed() {
                     continue;
@@ -763,15 +883,17 @@ pub async fn run(thread_id: String) -> Result<()> {
                 event = input.next() => match event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => composer.key(key),
                     Some(Ok(Event::Mouse(m))) => {
-                        let col = m.column as usize + 1;
+                        let (row, col) = (m.row as usize + 1, m.column as usize + 1);
                         let hit = composer
-                            .chip_spans
+                            .spans
                             .iter()
-                            .find(|((a, b), _)| (*a..=*b).contains(&col))
-                            .map(|(_, f)| *f);
+                            .find(|(r, (a, b), _)| *r == row && (*a..=*b).contains(&col))
+                            .map(|(_, _, hit)| *hit);
                         match (m.kind, hit) {
-                            (MouseEventKind::Down(MouseButton::Left), Some(field))
-                                if m.row as usize + 1 == composer.rows => composer.pick(field),
+                            (MouseEventKind::Down(MouseButton::Left), Some(hit)) => {
+                                composer.note = None;
+                                composer.press(hit);
+                            }
                             _ => continue,
                         }
                     }

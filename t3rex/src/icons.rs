@@ -256,7 +256,7 @@ const LOGOS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The provider's logo as T3 shows it, for the Mac's appearance, or its initials.
+/// The provider's logo as T3 shows it, for a light or dark screen, or its initials.
 pub async fn provider(provider: &Value, dark: bool) -> Icon {
     let driver = provider["driver"]
         .as_str()
@@ -362,6 +362,7 @@ pub fn become_program(driver: &str) {
     let exe = real_exe();
     let program = as_program(&exe, driver);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    crate::scheme::stop();
     t3term::auth::revoke_all_sessions();
     use std::os::unix::process::CommandExt;
     let _ = std::process::Command::new(&program)

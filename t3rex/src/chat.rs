@@ -307,7 +307,7 @@ struct Ctx<'a> {
     embeds: &'a HashMap<String, Embed>,
     /// Pictures draw only in output that prints for good, never in the live tail.
     media: Option<&'a Media>,
-    /// Opens the thread in T3 Code.
+    /// Opens the thread in T3, where it's clicked.
     link: &'a str,
 }
 
@@ -362,7 +362,7 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(embed) = ctx.embeds.get(&block.item_id) {
         lines.push(String::new());
-        let open = format!("\x1b]8;;{}\x1b\\Open in T3 Code ↗\x1b]8;;\x1b\\", ctx.link);
+        let open = crate::link::osc8(ctx.link, "Open in T3 Code ↗");
         lines.push(format!(
             "{BOLD}◇ {}{RESET}  {DIM}{open}{RESET}",
             fit(&one_line(&embed.title), width.saturating_sub(22))
@@ -554,8 +554,22 @@ fn settled(block: &Block, last: bool, run_active: bool) -> bool {
     !(is_running(block) || (last && run_active) || waiting)
 }
 
-/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it.
-fn status_sequence(word: Option<&str>, kind: Option<&str>, title: &str) -> String {
+/// Text cut to at most `max` bytes of UTF-8, on a character boundary, with no controls.
+fn within(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it. `msg` says what the
+/// thread is waiting on you for, when it is, else the status word; `title` names the thread.
+/// Both are cut to the protocol's limits: 2048 and 192 bytes.
+fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String {
     let (state, extra) = match word {
         Some("Approval") => ("blocked", ":kind=permission"),
         Some("Input") => ("blocked", ":kind=question"),
@@ -564,14 +578,21 @@ fn status_sequence(word: Option<&str>, kind: Option<&str>, title: &str) -> Strin
         Some("Done" | "Woke") => ("done", ""),
         _ => ("idle", ""),
     };
-    let _ = kind;
-    let msg: String = match word {
-        Some(w) => format!("{w} · {title}"),
-        None => title.to_string(),
+    let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut seq = format!("\x1b]7501;state={state}{extra}:app=t3code");
+    let title = within(title, 192);
+    if !title.is_empty() {
+        seq.push_str(&format!(":title={}", b64(&title)));
+    }
+    let msg = match (state, ask) {
+        ("blocked", Some(ask)) => within(ask, 2048),
+        _ => word.map(str::to_string).unwrap_or_default(),
     };
-    let msg: String = msg.chars().filter(|c| !c.is_control()).take(180).collect();
-    let b64 = base64::engine::general_purpose::STANDARD.encode(msg.as_bytes());
-    format!("\x1b]7501;state={state}{extra}:app=t3code:msg={b64}\x1b\\")
+    if !msg.is_empty() {
+        seq.push_str(&format!(":msg={}", b64(&msg)));
+    }
+    seq.push_str("\x1b\\");
+    seq
 }
 
 impl Pane {
@@ -769,21 +790,21 @@ impl Pane {
         }
         let mut text = String::new();
         let p = " ".repeat(left);
-        text.push_str(&format!(
-            "\r\n{p}{BOLD}{}{RESET}\r\n",
-            fit(&one_line(title), width)
-        ));
+        // The title opens the thread in T3 on whichever device it's clicked on.
+        let title = crate::link::osc8(&self.link, &fit(&one_line(title), width));
+        text.push_str(&format!("\r\n{p}{BOLD}{title}{RESET}\r\n"));
         if !meta.is_empty() {
             text.push_str(&format!("{p}{DIM}{}{RESET}\r\n", meta.join(" · ")));
         }
         text
     }
 
-    fn set_status(&mut self, thread: Option<&Value>) {
+    fn set_status(&mut self, thread: Option<&Value>, state: Option<&ThreadState>) {
         let Some(thread) = thread else { return };
         let word = t3term::tui::status_label(thread, t3::now_ms());
         let title = one_line(thread["title"].as_str().unwrap_or(""));
-        let seq = status_sequence(word, t3term::tui::pending_kind(thread), &title);
+        let ask = state.and_then(crate::ask::line);
+        let seq = status_sequence(word, ask.as_deref(), &title);
         if seq != self.status {
             out(&seq);
             self.status = seq;
@@ -867,6 +888,7 @@ pub async fn run(thread_id: String) -> Result<()> {
     let client = t3::connect(true).await?;
     let mut thread_events = client.watch_thread(&thread_id, None);
     let mut shell_events = client.watch_shell(None);
+    let scheme = crate::scheme::listen();
     crossterm::terminal::enable_raw_mode()?;
     // Clear what the login printed, hide the cursor, and ask for focus reports.
     out("\x1b[H\x1b[2J\x1b[3J\x1b[?25l\x1b[?1004h");
@@ -876,7 +898,14 @@ pub async fn run(thread_id: String) -> Result<()> {
             percent(&cwd.to_string_lossy())
         ));
     }
-    let result = event_loop(&client, &thread_id, &mut thread_events, &mut shell_events).await;
+    let result = event_loop(
+        &client,
+        &thread_id,
+        &mut thread_events,
+        &mut shell_events,
+        scheme,
+    )
+    .await;
     out("\x1b[?1004l\x1b[?25h");
     let _ = crossterm::terminal::disable_raw_mode();
     result
@@ -887,12 +916,13 @@ async fn event_loop(
     thread_id: &str,
     thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    mut scheme: tokio::sync::watch::Receiver<Option<bool>>,
 ) -> Result<()> {
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
-    let link = format!(
-        "t3code://threads/{}/{}",
-        client.runtime.environment_id, thread_id
-    );
+    // The provider's driver for each instance, so the pane can take its provider's name, and
+    // the address T3 serves its web app at, for the thread's link.
+    let config = client.server_config().await.ok();
+    let link = crate::link::thread(config.as_ref(), &client.runtime.environment_id, thread_id);
     let handoff = spawn_handoff();
     let mut pane = Pane::new(
         Media::new(client.runtime.state_dir.as_deref()),
@@ -906,8 +936,6 @@ async fn event_loop(
     let mut visited_for = String::new();
     let mut dirty = false;
     let mut focused = true;
-    // The provider's driver for each instance, so the pane can take its provider's name.
-    let config = client.server_config().await.ok();
     let mut renamed = false;
     loop {
         tokio::select! {
@@ -927,7 +955,7 @@ async fn event_loop(
             event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
                 let thread = t3term::tui::find_thread_in(&shell, thread_id);
-                pane.set_status(thread);
+                pane.set_status(thread, state.as_ref());
             },
             event = input.next() => match event {
                 Some(Ok(Event::Resize(cols, rows))) => {
@@ -953,6 +981,15 @@ async fn event_loop(
                 Some(Err(_)) | None => {}
                 _ => {}
             },
+            // A screen that turns light or dark: snapshots again in its scheme.
+            Ok(()) = scheme.changed() => {
+                let dark = crate::scheme::dark();
+                if dark != pane.media.dark {
+                    pane.media.set_dark(dark);
+                    pane.reflow = true;
+                    dirty = true;
+                }
+            }
             Some((attachment, png)) = snap_rx.recv() => {
                 pane.media.snapshots.insert(attachment, png);
                 pane.reflow = true;
@@ -991,6 +1028,7 @@ async fn event_loop(
                 .and_then(|p| shell.projects.iter().find(|x| x["id"] == p))
                 .and_then(|p| p["title"].as_str());
             pane.set_title(s, project);
+            pane.set_status(thread, Some(s));
             pane.draw(s, thread);
             dirty = false;
         }
@@ -1117,6 +1155,38 @@ mod tests {
         assert!(status_sequence(Some("Working"), None, "t").contains("state=working"));
         assert!(status_sequence(Some("Done"), None, "t").contains("state=done"));
         assert!(status_sequence(None, None, "t").contains("state=idle"));
+    }
+
+    #[test]
+    fn status_says_what_is_asked_within_the_limits() {
+        let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+        let seq = status_sequence(Some("Approval"), Some("Run pnpm test?"), "Fix the build");
+        assert_eq!(
+            seq,
+            format!(
+                "\x1b]7501;state=blocked:kind=permission:app=t3code:title={}:msg={}\x1b\\",
+                b64("Fix the build"),
+                b64("Run pnpm test?")
+            )
+        );
+        // Not blocked: the status word, whatever was asked before.
+        assert!(
+            status_sequence(Some("Working"), Some("x"), "t")
+                .ends_with(&format!(":msg={}\x1b\\", b64("Working")))
+        );
+        // Over the limits: cut on a character, never mid-way through one.
+        let long = "é".repeat(2000);
+        let seq = status_sequence(Some("Input"), Some(&long), &long);
+        let field = |key: &str| {
+            let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
+            let end = seq[at..].find([':', '\x1b']).unwrap() + at;
+            base64::engine::general_purpose::STANDARD
+                .decode(&seq[at..end])
+                .unwrap()
+        };
+        assert_eq!(field("title").len(), 192);
+        assert_eq!(field("msg").len(), 2048);
+        assert!(seq.len() < 4096);
     }
 
     #[test]

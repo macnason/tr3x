@@ -60,7 +60,7 @@ pub struct Media {
     /// T3's attachments folder, where each embed's HTML is `<attachment>.html`.
     pub attachments: Option<PathBuf>,
     cache: PathBuf,
-    /// Snapshots match the Mac's appearance, as the closest guess at the terminal's.
+    /// Snapshots match the terminal's scheme, else the Mac's appearance.
     pub dark: bool,
     /// A cell's width over its height, for working out how many rows a picture takes.
     pub cell_ratio: f64,
@@ -133,13 +133,20 @@ impl Media {
                 .map(|d| d.join("attachments"))
                 .filter(|d| d.is_dir()),
             cache: home().join("Library/Caches/t3rex"),
-            dark: mac_is_dark(),
+            dark: crate::scheme::dark(),
             cell_ratio: ratio,
             snapshots: HashMap::new(),
             asked: HashSet::new(),
             chrome: find_chrome(),
             held: RefCell::default(),
         }
+    }
+
+    /// Follows a screen that turned light or dark: snapshots are taken again in its scheme.
+    pub fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
+        self.snapshots.clear();
+        self.asked.clear();
     }
 
     /// Frees every picture, for printing the thread again from the top.
