@@ -2,10 +2,14 @@
 //! question when there is one. Its header, set with OSC 2, names the model, effort and access
 //! the next message goes out with.
 //!
-//! Enter sends, and queues behind a running turn. Alt+Enter or Ctrl+J adds a line. A line that
+//! Enter sends. To a running turn it steers or queues, as T3's Follow-up behavior says, and
+//! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
 //! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3. `/` first opens a menu of
 //! those, the provider's commands and skills (`slash`).
+//!
+//! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
+//! over the input; its ✕, or Backspace at the start of the input, takes it off.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -25,8 +29,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, YELLOW, fit};
 use crate::icons::{Icon, Painter};
+use crate::paste::{self, Got, Image};
 use crate::pick::Field;
 use crate::picker::{self, Chip, Settings};
+use crate::picture::{self, Tray};
 use crate::slash::{self, Slash};
 use crate::t3::{self, Lifecycle};
 use crate::width::Follow;
@@ -132,13 +138,17 @@ enum Hit {
     Decide(&'static str),
     /// Picks the pending question's option, by index.
     Choose(usize),
+    /// Takes an attached picture off, by index.
+    Remove(usize),
 }
 
 /// What came back from work started in the background.
 enum Done {
     Note(String, bool),
     /// A message that failed to send, back into the input if it's empty.
-    Restore(String),
+    Restore(String, Vec<Image>),
+    /// A picture made ready to send.
+    Picture(picture::Ready),
     Config(Value),
     Logos(HashMap<String, Icon>),
     /// A link to open the thread with, on the device it's clicked on.
@@ -283,6 +293,9 @@ struct Composer {
     slash: Slash,
     /// None outside a Rex window, where there is no split to move.
     grow: Option<Grow>,
+    /// The pictures the next message takes.
+    images: Tray,
+    clipboard: paste::Reader,
 }
 
 impl Composer {
@@ -322,6 +335,7 @@ impl Composer {
         self.focus = None;
         match hit {
             Hit::Field(field) => self.pick(field),
+            Hit::Remove(i) => self.images.remove(i),
             Hit::Decide(decision) => self.respond(decision),
             Hit::Choose(i) => {
                 if let Some((request, item)) = self.pending()
@@ -441,6 +455,13 @@ impl Composer {
                 }
             }
         }
+        if !self.images.is_empty() {
+            let (line, spans, _) = self.images.row(&mut self.painter, left, width + 2);
+            for (i, x) in spans.into_iter().enumerate() {
+                hits.push((rows.len(), (x, x), Hit::Remove(i)));
+            }
+            rows.push(line);
+        }
         // The input, wrapped, with the cursor where it is.
         let prompt = format!("{BLUE}{BOLD}›{RESET} ");
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
@@ -520,6 +541,30 @@ impl Composer {
         out(&text);
     }
 
+    /// Pictures to send with the next message, made ready on the way.
+    fn attach(&mut self, images: Vec<Image>) {
+        let tx = self.tx.clone();
+        self.images.add(images, move |ready| {
+            let _ = tx.send(Done::Picture(ready));
+        });
+    }
+
+    /// What a paste came to: pictures, or text to type.
+    fn pasted(&mut self, got: Got) {
+        match got {
+            Got::Offer(request) => out(&request),
+            Got::Text(text) => match paste::dropped(&text) {
+                Some(got) => self.pasted(got),
+                None => self
+                    .editor
+                    .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            },
+            Got::Images(images) => self.attach(images),
+            Got::Nothing(Some(why)) => self.note(why, true),
+            Got::Nothing(None) => {}
+        }
+    }
+
     fn note(&mut self, text: impl Into<String>, error: bool) {
         self.note = Some((text.into(), error));
         // A confirmation fades after a few seconds. An error stays until the next key.
@@ -584,18 +629,24 @@ impl Composer {
         }
     }
 
-    fn submit(&mut self) {
+    /// Sends what's typed, or answers what's pending with it. `other` is ⌘Enter: the follow-up
+    /// T3's setting doesn't pick.
+    fn submit(&mut self, other: bool) {
         let text = self.editor.string();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && self.images.is_empty() {
             return;
+        }
+        if self.images.preparing() {
+            return self.note("Getting the picture ready…", false);
         }
         // Out of reach: nothing goes, and the text stays for when the machine is back.
         if let Some(offline) = self.offline.clone() {
             return self.note(offline, true);
         }
         // A pending question takes the input as its answer: a number picks an option.
-        if let Some((request, item)) = self.pending()
+        if !trimmed.is_empty()
+            && let Some((request, item)) = self.pending()
             && request["kind"] == "user_input"
             && let Some(q) = self.question(&item).cloned()
         {
@@ -643,7 +694,8 @@ impl Composer {
             self.command(&command);
             return;
         }
-        self.send(IfBusy::Queue);
+        let steer = crate::width::follow_up_steers() != other;
+        self.send(if steer { IfBusy::Steer } else { IfBusy::Queue });
     }
 
     /// Sends the input. Queue waits for the running turn; Steer goes to it now. A send that
@@ -653,6 +705,8 @@ impl Composer {
             return;
         };
         let message = self.editor.take();
+        let images = self.images.take();
+        let uploads: Vec<Value> = images.iter().map(Image::upload).collect();
         let client = self.client.clone();
         let busy = state.active_run().is_some();
         let steer = matches!(mode, IfBusy::Steer);
@@ -660,11 +714,11 @@ impl Composer {
         tokio::spawn(async move {
             // A sent message shows in the conversation, which comes back to the bottom for it. A
             // queued one doesn't until its turn, so only that gets a note.
-            let done = match client.send_message(&state, &message, mode).await {
+            let done = match client.send_message(&state, &message, mode, &uploads).await {
                 Ok(_) if busy && !steer => Done::Note("Queued".into(), false),
                 Ok(_) => return,
                 Err(e) => {
-                    let _ = tx.send(Done::Restore(message));
+                    let _ = tx.send(Done::Restore(message, images));
                     Done::Note(format!("{e:#}"), true)
                 }
             };
@@ -782,7 +836,7 @@ impl Composer {
             match self.slash.key(&mut self.editor, key) {
                 slash::Key::Pass => {}
                 slash::Key::Done => return,
-                slash::Key::Send => return self.submit(),
+                slash::Key::Send => return self.submit(false),
             }
         }
         self.link = None;
@@ -837,10 +891,14 @@ impl Composer {
                     .modifiers
                     .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
-                self.submit()
+                self.submit(key.modifiers.contains(KeyModifiers::SUPER))
             }
             KeyCode::Char('c') if ctrl => {
                 self.editor.take();
+                self.images.clear();
+            }
+            KeyCode::Backspace if self.editor.cursor == 0 && !self.images.is_empty() => {
+                self.images.pop();
             }
             KeyCode::Char('x') if ctrl => self.command("stop"),
             KeyCode::Tab | KeyCode::BackTab => self.pick(Field::Model),
@@ -1002,6 +1060,8 @@ pub async fn run(thread: String) -> Result<()> {
         renamed: false,
         chat_width: Follow::new(),
         slash,
+        images: Tray::default(),
+        clipboard: paste::Reader::default(),
         grow: match (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK")) {
             (Ok(session), Ok(block)) => Some(Grow {
                 session,
@@ -1015,8 +1075,13 @@ pub async fn run(thread: String) -> Result<()> {
         },
     };
     crossterm::terminal::enable_raw_mode()?;
-    // The alternate screen, bracketed paste, and clicks on the chips.
+    // The alternate screen, bracketed paste, and clicks on the chips. Paste events too, where
+    // the filter can take the clipboard's replies.
+    let mut clipboard = crate::scheme::clipboard();
     out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    if clipboard.is_some() {
+        out(paste::ON);
+    }
     let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -1044,11 +1109,17 @@ pub async fn run(thread: String) -> Result<()> {
                 },
                 event = done.recv() => match event {
                     Some(Done::Note(text, error)) => if !text.is_empty() { composer.note(text, error) },
-                    Some(Done::Restore(text)) => {
+                    Some(Done::Restore(text, images)) => {
                         if composer.editor.text.is_empty() {
                             composer.editor.insert(&text);
                         }
+                        if composer.images.is_empty() {
+                            composer.attach(images);
+                        }
                     }
+                    Some(Done::Picture(ready)) => if let Some(why) = composer.images.ready(ready) {
+                        composer.note(why, true);
+                    },
                     Some(Done::Config(config)) => composer.config = Some(config),
                     Some(Done::Link(url)) => composer.link = Some(url),
                     Some(Done::Logos(logos)) => composer.logos = logos,
@@ -1073,6 +1144,15 @@ pub async fn run(thread: String) -> Result<()> {
                     continue;
                 } else {
                     continue;
+                },
+                Some(packet) = async {
+                    match clipboard.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match composer.clipboard.feed(&packet) {
+                    Some(got) => composer.pasted(got),
+                    None => continue,
                 },
                 _ = tick.tick() => if !composer.chat_width.changed() {
                     continue;
@@ -1114,7 +1194,7 @@ pub async fn run(thread: String) -> Result<()> {
                             _ => continue,
                         }
                     }
-                    Some(Ok(Event::Paste(text))) => composer.editor.insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
+                    Some(Ok(Event::Paste(text))) => composer.pasted(Got::Text(text)),
                     Some(Ok(Event::Resize(c, r))) => {
                         composer.cols = c as usize;
                         composer.rows = r as usize;
@@ -1156,6 +1236,7 @@ pub async fn run(thread: String) -> Result<()> {
     }
     .await;
     drop(keys);
+    out(paste::OFF);
     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result
