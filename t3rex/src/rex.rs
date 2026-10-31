@@ -116,6 +116,12 @@ impl Rex {
         self.json(&["api", "call", method, args], None).await
     }
 
+    /// Calls one of a block's own methods, such as a terminal's `size`.
+    pub async fn block_method(&self, session: &str, block: &str, method: &str) -> Result<Value> {
+        self.json(&["block", "call", "-s", session, "-b", block, method], None)
+            .await
+    }
+
     /// Runs a Lua script against `session` and returns what it returned.
     pub async fn lua(&self, session: &str, script: &str) -> Result<Value> {
         self.json(&["do", "-s", session, "-"], Some(script)).await

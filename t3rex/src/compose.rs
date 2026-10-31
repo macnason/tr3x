@@ -1049,6 +1049,17 @@ impl Composer {
                     let _ = tx.send(done);
                 });
             }
+            "pr" if matches!(arg, "" | "create") => {
+                let key = format!("{}/{}", self.client.id(), self.thread_id);
+                let create = arg == "create";
+                match std::env::var("REX_BLOCK") {
+                    Ok(block) => self.spawn(async move {
+                        crate::pr::open(&key, &block, create).await?;
+                        Ok(String::new())
+                    }),
+                    Err(_) => self.note("Run this in Rex", true),
+                }
+            }
             "model" | "effort" | "mode" if arg.is_empty() => self.pick(match name {
                 "model" => Field::Model,
                 "effort" => Field::Effort,
