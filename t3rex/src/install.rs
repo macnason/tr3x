@@ -209,7 +209,10 @@ fn log_tail(n: usize) -> Vec<String> {
 
 /// A line of sync's log that says something went wrong, rather than what it synced.
 fn is_error(line: &str) -> bool {
-    !(line.contains(" thread(s)") || line.ends_with(" is back") || line.contains(": following "))
+    !(line.contains(" thread(s)")
+        || line.ends_with(" is back")
+        || line.ends_with(" joined")
+        || line.contains(": following "))
 }
 
 /// Waits for a sync that started after `since` to save the session.
