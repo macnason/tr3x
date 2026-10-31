@@ -8,6 +8,7 @@ mod fade;
 mod icons;
 mod install;
 mod link;
+mod machines;
 mod media;
 mod new;
 mod pick;
@@ -37,7 +38,7 @@ struct Cli {
     command: Command,
 }
 
-// What a user runs is install, uninstall, doctor and width. The rest is what Rex's actions,
+// What a user runs is install, uninstall, doctor, width, pair, envs, env and sessions. The rest is what Rex's actions,
 // panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
 enum Command {
@@ -127,12 +128,37 @@ enum Command {
     /// Show or set how wide conversations read: comfortable, wide, full, a column count, or
     /// t3 to follow T3 Code's Chat width.
     Width { width: Option<String> },
+    /// Pair with T3 on another machine: over SSH, or with a pairing link from T3 there. Alone,
+    /// finds the machines on your tailnet that run T3.
+    Pair {
+        /// A machine's name, an SSH host, or a pairing link.
+        machine: Option<String>,
+        /// A pairing link for that machine.
+        link: Option<String>,
+    },
+    /// List the machines Rex follows.
+    Envs,
+    /// Rename or forget a machine.
+    Env {
+        #[command(subcommand)]
+        action: EnvAction,
+    },
+    /// Show or set how the T3 Code session holds your machines: merged or per-machine.
+    Sessions { split: Option<String> },
     /// Set up t3rex: the Rex config that runs it, and a first sync.
     Install,
     /// Undo `install`: stop sync, remove the config, close t3rex's session.
     Uninstall,
     /// Check each part of the setup, with a fix for what's wrong.
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum EnvAction {
+    /// Call a machine something else in Rex. An empty name goes back to T3's.
+    Rename { machine: String, name: String },
+    /// Unpair a machine.
+    Forget { machine: String },
 }
 
 /// Which thread a command acts on. Without flags, the thread of the Rex block it runs in.
@@ -352,6 +378,16 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Width { width } => {
             println!("{}", width::apply(width.as_deref().unwrap_or(""))?);
+            Ok(())
+        }
+        Command::Pair { machine, link } => machines::pair_command(machine, link).await,
+        Command::Envs => machines::list().await,
+        Command::Env { action } => match action {
+            EnvAction::Rename { machine, name } => machines::rename(&machine, &name).await,
+            EnvAction::Forget { machine } => machines::forget(&machine).await,
+        },
+        Command::Sessions { split } => {
+            println!("{}", machines::set_sessions(split.as_deref())?);
             Ok(())
         }
         Command::Install => install::install().await,

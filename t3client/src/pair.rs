@@ -106,7 +106,20 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
     let found = reach(&origins, expect.as_deref()).await?;
     found.require_supported_protocol()?;
     let credential = exchange(&found.origin, &code, &label).await?;
+    let previous = store.credential(&found.environment_id);
     store.save_credential(&found.environment_id, credential)?;
+    // The token this one replaces, so T3's Connections lists Rex once.
+    if let Some(previous) = previous {
+        let local = Local::read();
+        let cli = match (via, ssh.as_deref()) {
+            (Via::Local, _) => Some(auth::Cli::Local(&local)),
+            (Via::Ssh, Some(host)) => Some(auth::Cli::Ssh(host)),
+            _ => None,
+        };
+        if let Some(cli) = cli {
+            let _ = auth::revoke(cli, &previous).await;
+        }
+    }
     let mut registry = store.registry();
     let alias = ssh
         .as_deref()
@@ -134,6 +147,40 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
         .get(&found.environment_id)
         .cloned()
         .expect("just saved"))
+}
+
+/// What forgetting a machine did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Forgot {
+    /// Its session in T3 was revoked too.
+    Revoked,
+    /// T3 lists the session until it's removed in T3 → Connections on that machine.
+    Kept,
+}
+
+/// Forgets `machine`: revokes t3rex's session through the machine's CLI where t3rex can run
+/// it, then drops its token and its entry.
+pub async fn forget(store: &Store, machine: &Machine) -> Result<Forgot> {
+    let _lock = store.lock().await?;
+    let mut forgot = Forgot::Kept;
+    if let Some(credential) = store.credential(&machine.id) {
+        let local = Local::read();
+        let cli = match (machine.via, machine.ssh.as_deref()) {
+            (Via::Local, _) => Some(auth::Cli::Local(&local)),
+            (Via::Ssh, Some(host)) => Some(auth::Cli::Ssh(host)),
+            _ => None,
+        };
+        if let Some(cli) = cli
+            && auth::revoke(cli, &credential).await.unwrap_or(false)
+        {
+            forgot = Forgot::Revoked;
+        }
+        store.remove_credential(&machine.id)?;
+    }
+    let mut registry = store.registry();
+    registry.machines.retain(|m| m.id != machine.id);
+    store.save_registry(&registry)?;
+    Ok(forgot)
 }
 
 /// A name a person would type, like `omarchy`, rather than an address.
@@ -215,34 +262,51 @@ async fn tailnet_origins(port: u16) -> Vec<String> {
         .collect()
 }
 
-/// The hosts in `~/.ssh/config` and where each reaches, by `ssh -G`.
-async fn ssh_hosts() -> Vec<(String, String)> {
-    let config = descriptor::home_dir().join(".ssh/config");
-    let text = std::fs::read_to_string(config).unwrap_or_default();
-    let aliases: Vec<String> = text
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            let rest = l
-                .strip_prefix("Host ")
-                .or_else(|| l.strip_prefix("Host\t"))?;
-            Some(
+/// The `Host` names in an SSH config and the files it includes, without patterns.
+fn ssh_aliases(path: &std::path::Path, depth: usize, out: &mut Vec<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let ssh_dir = descriptor::home_dir().join(".ssh");
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("host") {
+            out.extend(
                 rest.split_whitespace()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .flatten()
-        .filter(|a| !a.contains(['*', '?', '!']))
-        .take(40)
-        .collect();
-    let mut out = Vec::new();
-    for alias in aliases {
-        if let Some(host) = auth::ssh_hostname(&alias).await {
-            out.push((alias, host.trim_end_matches('.').to_ascii_lowercase()));
+                    .filter(|a| !a.contains(['*', '?', '!']))
+                    .map(str::to_string),
+            );
+        } else if key.eq_ignore_ascii_case("include") && depth < 3 {
+            for file in rest.split_whitespace().filter(|f| !f.contains(['*', '?'])) {
+                let file = match file.strip_prefix("~/") {
+                    Some(rel) => descriptor::home_dir().join(rel),
+                    None if file.starts_with('/') => file.into(),
+                    None => ssh_dir.join(file),
+                };
+                ssh_aliases(&file, depth + 1, out);
+            }
         }
     }
-    out
+}
+
+/// The hosts in `~/.ssh/config` and where each reaches, by `ssh -G`.
+async fn ssh_hosts() -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    ssh_aliases(&descriptor::home_dir().join(".ssh/config"), 0, &mut aliases);
+    aliases.dedup();
+    aliases.truncate(40);
+    let lookups = aliases.into_iter().map(|alias| async move {
+        let host = auth::ssh_hostname(&alias).await?;
+        Some((alias, host.trim_end_matches('.').to_ascii_lowercase()))
+    });
+    futures_util::future::join_all(lookups)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// The machines on the tailnet and among the home machine's linked environments that run T3
@@ -315,6 +379,26 @@ pub async fn candidates(home: Option<&Env>, registry: &Registry) -> Vec<Candidat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_hosts_come_from_included_files_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("inner_config");
+        std::fs::write(
+            &inner,
+            "Host box\n  HostName box.example\nHost *\n  User me\n",
+        )
+        .unwrap();
+        let outer = dir.path().join("config");
+        std::fs::write(
+            &outer,
+            format!("Include {}\nHost one two\nHost web-*\n", inner.display()),
+        )
+        .unwrap();
+        let mut aliases = Vec::new();
+        ssh_aliases(&outer, 0, &mut aliases);
+        assert_eq!(aliases, ["box", "one", "two"]);
+    }
 
     #[test]
     fn only_plain_names_become_aliases() {

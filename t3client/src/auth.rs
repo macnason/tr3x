@@ -450,23 +450,7 @@ fn read_pairing(text: &str) -> Result<String> {
 
 /// A pairing code from this machine's own T3.
 pub async fn local_code(local: &Local, label: &str) -> Result<String> {
-    let t3 = T3Command::local(local)?;
-    let mut command = t3.command();
-    command
-        .args(pairing_args(label))
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
-        .await
-        .context("T3's CLI took over a minute to make a pairing code")?
-        .with_context(|| format!("couldn't run {}", t3.program.display()))?;
-    if !output.status.success() {
-        bail!(
-            "T3's CLI couldn't make a pairing code: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    read_pairing(&String::from_utf8_lossy(&output.stdout))
+    read_pairing(&Cli::Local(local).run(&pairing_args(label)).await?)
 }
 
 /// What pairing over SSH learns about the machine.
@@ -479,13 +463,17 @@ pub struct SshPairing {
     pub hostname: Option<String>,
 }
 
-/// The script run on an SSH machine: its environment id, its server's port, and a pairing
-/// code from its `t3`, found as T3's desktop app looks for it.
-fn ssh_script(label: &str) -> String {
-    let args: Vec<String> = pairing_args(label)
-        .iter()
+/// `args` quoted for a POSIX shell.
+fn shell_words(args: &[String]) -> String {
+    args.iter()
         .map(|a| format!("'{}'", a.replace('\'', r"'\''")))
-        .collect();
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A script for an SSH machine that finds its `t3` as T3's desktop app looks for it, then runs
+/// `body` with it as `$T3` and its T3 home as `$H`.
+fn ssh_script(body: &str) -> String {
     format!(
         r#"set -u
 H="${{T3CODE_HOME:-$HOME/.t3}}"
@@ -493,17 +481,24 @@ T3="$(command -v t3 2>/dev/null || true)"
 [ -n "$T3" ] || [ ! -x "$HOME/.local/bin/t3" ] || T3="$HOME/.local/bin/t3"
 [ -n "$T3" ] || T3="$(ls -1d "$H"/runtime/versions/*/t3 2>/dev/null | sort | tail -n 1)"
 [ -n "$T3" ] || {{ echo "t3rex: no t3 on this machine" >&2; exit 3; }}
-printf 'ENV %s\n' "$(cat "$H/userdata/environment-id" 2>/dev/null)"
-printf 'RUNTIME %s\n' "$(tr -d '\n' < "$H/userdata/server-runtime.json" 2>/dev/null)"
-printf 'PAIRING %s\n' "$("$T3" {args} | tr -d '\n')"
-"#,
-        args = args.join(" ")
+{body}
+"#
     )
 }
 
-/// A pairing code from `host`'s T3, over SSH. Batch mode: it never prompts, so a host that
-/// wants a password or a new host key fails at once with SSH's own words.
-pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
+/// The pairing script: the machine's environment id, its server's port, and a pairing code.
+fn pairing_script(label: &str) -> String {
+    ssh_script(&format!(
+        r#"printf 'ENV %s\n' "$(cat "$H/userdata/environment-id" 2>/dev/null)"
+printf 'RUNTIME %s\n' "$(tr -d '\n' < "$H/userdata/server-runtime.json" 2>/dev/null)"
+printf 'PAIRING %s\n' "$("$T3" {} | tr -d '\n')""#,
+        shell_words(&pairing_args(label))
+    ))
+}
+
+/// Runs `script` on `host`. Batch mode: it never prompts, so a host that wants a password or
+/// a new host key fails at once with SSH's own words.
+async fn ssh_run(host: &str, script: String) -> Result<String> {
     if host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("{host:?} isn't an SSH host");
     }
@@ -511,7 +506,7 @@ pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
         Duration::from_secs(60),
         tokio::process::Command::new("ssh")
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", host])
-            .arg(ssh_script(label))
+            .arg(script)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -519,14 +514,19 @@ pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
     .await
     .context("SSH took over a minute")?
     .context("couldn't run ssh")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "couldn't pair over SSH with {host}: {}",
+            "SSH to {host} failed: {}",
             stderr.trim().lines().last().unwrap_or("ssh failed")
         );
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A pairing code from `host`'s T3, over SSH.
+pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
+    let stdout = ssh_run(host, pairing_script(label)).await?;
     let line = |tag: &str| {
         stdout
             .lines()
@@ -545,6 +545,72 @@ pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
         code: read_pairing(&line("PAIRING ").unwrap_or_default())?,
         hostname: ssh_hostname(host).await,
     })
+}
+
+/// Where a machine's `t3` runs: here, or over SSH.
+pub enum Cli<'a> {
+    Local(&'a Local),
+    Ssh(&'a str),
+}
+
+impl Cli<'_> {
+    async fn run(&self, args: &[String]) -> Result<String> {
+        match self {
+            Cli::Ssh(host) => {
+                ssh_run(host, ssh_script(&format!(r#""$T3" {}"#, shell_words(args)))).await
+            }
+            Cli::Local(local) => {
+                let t3 = T3Command::local(local)?;
+                let mut command = t3.command();
+                command
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true);
+                let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+                    .await
+                    .context("T3's CLI took over a minute")?
+                    .with_context(|| format!("couldn't run {}", t3.program.display()))?;
+                if !output.status.success() {
+                    bail!(
+                        "T3's CLI failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+        }
+    }
+}
+
+/// The id of the session `credential` belongs to, in `t3 auth session list --json`: the one
+/// with t3rex's label that expires when the credential does.
+fn session_of(list: &str, label: &str, credential: &Credential) -> Option<String> {
+    let start = list.find(['[', '{'])?;
+    let value: Value = serde_json::from_str(&list[start..]).ok()?;
+    let sessions = value.as_array().or(value["sessions"].as_array())?.clone();
+    sessions.into_iter().find_map(|s| {
+        let expires = s["expiresAt"]
+            .as_str()
+            .and_then(crate::inbox::parse_iso_ms)?;
+        let ours = s["client"]["label"] == label && (expires - credential.expires_at).abs() < 2_000;
+        ours.then(|| s["sessionId"].as_str().map(str::to_string))
+            .flatten()
+    })
+}
+
+/// Revokes the session `credential` belongs to, through the machine's own CLI. Returns
+/// whether it found one.
+pub async fn revoke(cli: Cli<'_>, credential: &Credential) -> Result<bool> {
+    let label = client_label();
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let list = cli
+        .run(&args(&["auth", "session", "list", "--json"]))
+        .await?;
+    let Some(id) = session_of(&list, &label, credential) else {
+        return Ok(false);
+    };
+    cli.run(&args(&["auth", "session", "revoke", &id])).await?;
+    Ok(true)
 }
 
 /// The host name `ssh` connects to for `host`, after its config.
@@ -631,9 +697,29 @@ mod tests {
 
     #[test]
     fn the_ssh_script_quotes_its_arguments() {
-        let script = ssh_script("Rex on Kim's Mac");
+        let script = pairing_script("Rex on Kim's Mac");
         assert!(script.contains(r"'Rex on Kim'\''s Mac'"));
         assert!(script.contains("'--scope' 'orchestration:read'"));
+    }
+
+    #[test]
+    fn the_session_to_revoke_is_the_one_that_expires_with_the_token() {
+        let credential = Credential {
+            token: String::new(),
+            scopes: Vec::new(),
+            issued_at: 0,
+            expires_at: crate::inbox::parse_iso_ms("2026-11-30T01:29:08.857Z").unwrap(),
+        };
+        let list = r#"[
+          {"sessionId": "other", "client": {"label": "Rex on Mac mini"}, "expiresAt": "2026-11-29T00:00:00.000Z"},
+          {"sessionId": "bot", "client": {"label": "t3term"}, "expiresAt": "2026-11-30T01:29:08.857Z"},
+          {"sessionId": "ours", "client": {"label": "Rex on Mac mini"}, "expiresAt": "2026-11-30T01:29:08.857Z"}
+        ]"#;
+        assert_eq!(
+            session_of(list, "Rex on Mac mini", &credential).as_deref(),
+            Some("ours")
+        );
+        assert_eq!(session_of("[]", "Rex on Mac mini", &credential), None);
     }
 
     #[tokio::test]
