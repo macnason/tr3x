@@ -162,6 +162,7 @@ fn lua(bin: &Path, rex: &Path) -> String {
             &t3client::descriptor::t3_home().to_string_lossy(),
         )
         .replace("@STATE@", &state::dir().to_string_lossy())
+        .replace("@ACTIONS@", crate::actions::lua().trim_end())
 }
 
 /// Boots out and deletes the launchd agent an earlier install made. Returns whether there was
@@ -734,5 +735,7 @@ mod tests {
         let text = lua(Path::new("/b/t3rex"), Path::new("/r/rex"));
         assert!(!text.contains('@'), "an unfilled placeholder");
         assert!(text.contains("\"/b/t3rex\"") && text.contains("\"/r/rex\""));
+        assert!(text.contains("\nthread_action(\"t3_settle\", \"Settle Thread\", { \"settle\" }"));
+        assert!(text.contains("\nlayer_action(\"t3_delete\""));
     }
 }

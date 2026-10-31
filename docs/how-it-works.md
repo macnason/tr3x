@@ -102,6 +102,42 @@ over the tailnet only draws.
   the client that ran it connects over the local socket. `/open` in Reply opens T3 Code when no
   app is attached from elsewhere, and otherwise shows the link to click.
 
+## Actions
+
+Every action on a thread is one entry in `t3rex/src/actions.rs`: a palette action under
+**T3 Code**, a `/` command in Reply, or both. `install` writes the palette's half into
+`t3rex.lua` (`@ACTIONS@`); Reply's `/` menu reads the rest. An entry can name the capability
+T3 needs for it (`threadForceStop`, `threadTitleRegeneration`): Reply leaves it out of `/` on a
+machine whose T3 lacks it, and the palette's action says to update T3 there. An action that
+asks first, Rename Thread… and Delete Thread…, runs in a floating layer (`prompt.rs`); `/delete`
+takes two in a row.
+
+Each sends what T3's own menu sends: `thread.metadata.update` with a title or
+`regenerateTitle`, `thread.fork` from the thread's latest stable point, `thread.delete`,
+`thread.stop` (else `run.interrupt` on an older T3), and `orchestration.forceStopThread`.
+
+## Keeping up with T3
+
+T3 ships a nightly most days. `t3rex/t3-surface.json` is what t3rex was last checked against:
+T3's capability flags, the commands `orchestration.dispatchCommand` and `projects.mutate` take,
+its RPC methods and its keybinding commands, which are also what its command palette runs.
+`t3rex surface` reads the same lists from a T3 build's own source (`surface.rs` in t3client),
+which every build carries as text: a runtime's `t3`, the desktop app's `app.asar`, or a
+release tarball.
+
+```sh
+t3rex surface --check t3rex/t3-surface.json                 # the newest T3 on this Mac
+t3rex surface --from ./t3 --label 0.1.6-nightly.… --check t3rex/t3-surface.json --write t3rex/t3-surface.json
+```
+
+`.github/workflows/surface.yml` does that each day with the newest `t3@nightly` release
+(checked against its `SHA256SUMS`). When something changed it pushes the new surface to the
+`t3-surface` branch and keeps one issue up to date: what T3 added, which is what t3rex could
+offer next, what it removed, and whether t3rex's tests pass against it.
+`t3rex_only_uses_what_t3_has` fails when a command, method or capability t3rex's source uses
+isn't in the surface, so a nightly that drops one shows there. Merging the branch moves the
+baseline.
+
 ## Find Thread
 
 **Find Thread…** opens `t3rex find` in a floating layer. It reads each machine's shell, its
@@ -225,11 +261,11 @@ the open question; the app only links the in-process change notification for its
 
 | Path | |
 |---|---|
-| `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `find.rs` (Find Thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
-| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
+| `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `actions.rs` (every action, for the palette and `/`), `slash.rs` (the `/` menu), `prompt.rs` (Rename and Delete's question), `surface.rs` (`t3rex surface`), `new.rs` (new thread), `find.rs` (Find Thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
+| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch, transcripts, and what a T3 build offers (`surface.rs`). The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
-| `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
+| `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `t3rex/t3-surface.json`. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
 | `scripts/dev-restart` | A sync of your own build, with its own state, for development. |
 | `docs/` | This file, screenshots (`screens/`) and frames drawn from Rex's screen data (`frames/`). |
 

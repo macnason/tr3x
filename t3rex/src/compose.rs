@@ -117,12 +117,6 @@ impl Editor {
     }
 }
 
-/// The `/` commands. Anything else starting with `/`, such as a path, is a message.
-const COMMANDS: &[&str] = &[
-    "settle", "unsettle", "snooze", "wake", "pin", "unpin", "archive", "stop", "open", "model",
-    "effort", "mode", "steer", "width",
-];
-
 /// What a click or a focused chip does.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
@@ -282,6 +276,8 @@ struct Composer {
     slash: Slash,
     /// None outside a Rex window, where there is no split to move.
     grow: Option<Grow>,
+    /// The last command was `/delete`, so the next one deletes.
+    deleting: bool,
 }
 
 impl Composer {
@@ -393,6 +389,7 @@ impl Composer {
             &self.editor,
             self.config.as_ref(),
             self.state.as_ref().map(|s| s.thread()),
+            &self.client.capabilities(),
         );
         // The conversation's column, less the prompt's two.
         let (left, column) = self.chat_width.width.column(self.cols);
@@ -625,7 +622,9 @@ impl Composer {
             return;
         }
         if let Some(command) = trimmed.strip_prefix('/')
-            && COMMANDS.contains(&command.split_whitespace().next().unwrap_or(""))
+            // The `/` commands are actions.rs's. Anything else starting with `/`, such as a
+            // path, is a message.
+            && crate::actions::is_slash(command.split_whitespace().next().unwrap_or(""))
             && !self.slash.is_theirs(trimmed)
         {
             let command = command.to_string();
@@ -673,6 +672,7 @@ impl Composer {
         let (name, arg) = line
             .split_once(' ')
             .map_or((line, ""), |(a, b)| (a, b.trim()));
+        let deleting = std::mem::take(&mut self.deleting);
         let (client, thread) = (self.client.clone(), self.thread_id.clone());
         let lifecycle = |action: Lifecycle, note: &'static str| {
             let (client, thread) = (client.clone(), thread.clone());
@@ -695,23 +695,64 @@ impl Composer {
                     true,
                 ),
             },
-            "stop" => {
+            "stop" | "force-stop" => {
                 let run = self
                     .state
                     .as_ref()
                     .and_then(|s| s.active_run())
                     .and_then(|r| r["id"].as_str())
                     .map(str::to_string);
-                match run {
-                    Some(run) => self.spawn(async move {
-                        client
-                            .dispatch(json!({"type": "run.interrupt", "threadId": thread, "runId": run, "reason": "Interrupted from Rex"}))
-                            .await?;
-                        Ok("Stopped".into())
-                    }),
-                    None => self.note("Nothing is running", false),
+                if name == "force-stop" {
+                    return self.spawn(async move {
+                        t3::force_stop(&client, &thread, run.as_deref()).await
+                    });
                 }
+                if run.is_none() && !client.has_capability("threadStop") {
+                    return self.note("Nothing is running", false);
+                }
+                self.spawn(async move {
+                    Ok(match t3::stop(&client, &thread, run.as_deref()).await? {
+                        true => "Stopped".into(),
+                        false => "Nothing is running".into(),
+                    })
+                })
             }
+            // Alone, `/rename` puts the title in the input to edit.
+            "rename" if arg.is_empty() => {
+                let title = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.thread()["title"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                self.editor.insert(&format!("/rename {title}"));
+            }
+            "rename" => {
+                let title = arg.to_string();
+                self.spawn(async move {
+                    t3::rename(&client, &thread, Some(&title)).await?;
+                    Ok("Renamed".into())
+                })
+            }
+            "retitle" => self.spawn(async move {
+                t3::rename(&client, &thread, None).await?;
+                Ok("T3 is writing a title".into())
+            }),
+            "fork" => {
+                let title = (!arg.is_empty()).then(|| arg.to_string());
+                let env = client.id().to_string();
+                self.spawn(async move {
+                    let new = t3::fork(&client, &thread, title.as_deref()).await?;
+                    let key = t3client::hub::ThreadRef::new(&env, &new).to_string();
+                    crate::find::go_to(&key, None).await?;
+                    Ok("Forked".into())
+                })
+            }
+            // Deleting can't be undone, so it takes `/delete` twice in a row.
+            "delete" if !deleting => {
+                self.deleting = true;
+                self.note("Deleting can't be undone. /delete again to delete", true);
+            }
+            "delete" => self.spawn(lifecycle(Lifecycle::Delete, "Deleted")),
             "width" => match crate::width::apply(arg) {
                 Ok(note) => {
                     self.chat_width.width = crate::width::current().0;
@@ -1011,6 +1052,7 @@ pub async fn run(thread: String) -> Result<()> {
             }),
             _ => None,
         },
+        deleting: false,
     };
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks on the chips.
