@@ -93,6 +93,7 @@ holds one **New Thread** window instead, with the four keys that matter under it
 | Model | Click a chip under Reply, press Tab there, type `/model` alone, or ⌃⌘M: a picker opens over the window with every enabled provider's models under its logo, then the model's efforts; ← → for effort and access. A choice applies to the next message and the chips follow. `/model haiku`, `/effort high`, `/mode ask` still work. |
 | Approve | With an approval pending: `a` then Enter accepts, `s` then Enter accepts for the session, `d` then Enter declines. Anything else you type is a reply. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
+| Settle | Close the thread's tab: its ×, or Close Tab in the palette. A thread that is working or waiting on you only hides until it changes, since settling it would stop the run. ⌃⌘S and `/settle` settle it whatever it's doing. |
 | Commands | `/steer …`, `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model`, `/effort`, `/mode`, `/open`, `/width` |
 | Keys | ⌃⌘N new thread · ⌃⌘M model · ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code |
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
@@ -125,9 +126,10 @@ it settles, and any subagent while it works or needs you. A provider's own subag
 history, which T3 shows inside the parent thread.
 
 Settling, snoozing or archiving a thread closes its window. T3 brings it back when the thread
-needs you again, and so does t3rex. Closing a window yourself hides that thread until it
-changes. Looking at a finished thread clears its Done marker in T3, as opening it in the app
-does.
+needs you again, and so does t3rex. Closing a window yourself settles the thread, or for one
+that's running or waiting on you, hides it until it changes. Snooze puts a thread away
+without settling it. Looking at a finished thread clears its Done marker in T3, as opening it
+in the app does.
 
 ## How it works
 
@@ -167,6 +169,10 @@ does.
 
 ## Known limits
 
+- Rex has no API for context-menu items, buttons on a tab or sidebar row, or a tab's icon, so
+  closing the tab is the one click that can settle. `t3rex sync` sees the window go on its next
+  pass (at most 5 seconds) and settles the thread then. Closing every window at once, as when
+  the session closes, settles nothing.
 - Rex has no per-pane setting for its pane-header buttons (split, float, zoom, close), so the
   Reply pane still shows them. The app has a global `Workspace.hiddenPaneButtons` preference,
   but `defaults write` with the button names (`splitRight splitDown float zoom close`, as an

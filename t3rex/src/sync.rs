@@ -31,6 +31,9 @@ pub struct Want {
     pub place: Place,
     /// The provider instance the thread runs on, for the window's icon.
     pub instance: String,
+    /// Closing the window settles the thread. A thread that is running or waiting on you only
+    /// hides, since T3 won't settle it without stopping the run.
+    pub settles: bool,
 }
 
 /// The windows T3's shell asks for at `now`: T3's sidebar order, with each subagent thread
@@ -69,6 +72,11 @@ pub fn wanted(
                 .or(thread["providerInstanceId"].as_str())
                 .unwrap_or_default()
                 .to_string(),
+            settles: caps.settlement
+                && !matches!(
+                    t3term::tui::status_label(thread, now),
+                    Some("Approval" | "Input" | "Working" | "Goal" | "Waiting")
+                ),
         })
     };
     let by_id: HashMap<&str, &Value> = shell
@@ -155,6 +163,8 @@ pub struct Plan {
     /// Every t3rex window, existing by id or new by thread id, in the order they should end
     /// up. Empty when the order is already right.
     pub order: Vec<Slot>,
+    /// Threads whose window the user closed, to settle in T3.
+    pub settle: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,7 +183,8 @@ impl Plan {
 }
 
 /// Works out the plan from what T3 wants and the session's windows as Rex lists them, and
-/// updates `state` for windows the user closed.
+/// updates `state` for windows the user closed. Closing a window settles its thread; the
+/// window stays closed until T3 reports it settled, or until the thread changes if T3 won't.
 pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> Plan {
     let present_ids: HashSet<&str> = present.iter().map(|(id, _)| id.as_str()).collect();
     let wanted_ids: HashMap<&str, &Want> =
@@ -187,9 +198,15 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
         .filter(|(_, w)| !present_ids.contains(w.window_id.as_str()))
         .map(|(thread, _)| thread.clone())
         .collect();
+    // Every window gone at once is the session going, not the user closing threads.
+    let teardown = gone.len() > 1 && gone.len() == state.windows.len();
+    let mut settle = Vec::new();
     for thread in gone {
         state.windows.remove(&thread);
         if let Some(want) = wanted_ids.get(thread.as_str()) {
+            if want.settles && !teardown {
+                settle.push(thread.clone());
+            }
             state.dismissed.insert(thread, want.updated_at.clone());
         }
     }
@@ -199,7 +216,10 @@ pub fn plan(wants: &[Want], present: &[(String, String)], state: &mut State) -> 
             .is_some_and(|want| &want.updated_at == at)
     });
 
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        settle,
+        ..Plan::default()
+    };
     let mut kept: BTreeMap<String, Window> = BTreeMap::new();
     for (thread, window) in std::mem::take(&mut state.windows) {
         if wanted_ids.contains_key(thread.as_str()) {
@@ -416,6 +436,8 @@ pub struct Syncer {
     pub watcher: Option<(String, tokio::process::Child)>,
     /// T3's server config, for each provider instance's driver.
     pub config: Option<Value>,
+    /// Threads whose window the user closed since the last reconcile, for `run` to settle.
+    pub closed: Vec<String>,
 }
 
 /// Turns each window made in the session by Rex's New Tab, its + button or the palette, which
@@ -552,6 +574,7 @@ impl Syncer {
             return Ok(true);
         }
         let mut plan = plan(wants, &present, &mut self.state);
+        self.closed.append(&mut plan.settle);
         plan.close.append(&mut extra);
         if plan.is_empty() {
             self.state.save()?;
@@ -592,7 +615,8 @@ pub async fn run(first: bool) -> Result<()> {
     if lock.try_lock().is_err() {
         anyhow::bail!("another t3rex sync is already running");
     }
-    let client = t3::connect(false).await.context("couldn't reach T3")?;
+    // Operate, to settle a thread whose window is closed.
+    let client = t3::connect(true).await.context("couldn't reach T3")?;
     let caps = t3::capabilities(&client);
     let mut syncer = Syncer {
         rex: Rex::find(),
@@ -601,6 +625,7 @@ pub async fn run(first: bool) -> Result<()> {
         first,
         watcher: None,
         config: client.server_config().await.ok(),
+        closed: Vec::new(),
     };
     let mut events = client.watch_shell(None);
     let mut shell = ShellState::default();
@@ -658,6 +683,17 @@ pub async fn run(first: bool) -> Result<()> {
             Ok(_) => {}
             Err(e) => eprintln!("t3rex: {e:#}"),
         }
+        // A plain settle, never stopping a run: a thread that started again since stays hidden
+        // until it changes.
+        for thread in syncer.closed.drain(..) {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let command = t3::command(&thread, &t3::Lifecycle::Settle);
+                if let Err(e) = client.dispatch(command).await {
+                    eprintln!("t3rex: couldn't settle {thread}: {e:#}");
+                }
+            });
+        }
         last = wants;
     }
 }
@@ -674,6 +710,7 @@ mod tests {
             updated_at: "u1".into(),
             place: Place::Open,
             instance: String::new(),
+            settles: true,
         }
     }
 
@@ -717,6 +754,44 @@ mod tests {
         let plan2 = plan(&[changed], &[], &mut state);
         assert_eq!(plan2.create.len(), 1);
         assert!(state.dismissed.is_empty());
+    }
+
+    #[test]
+    fn closing_a_window_settles_its_thread_unless_it_is_running() {
+        let mut state = State::default();
+        state.windows.insert("a".into(), win("w-a", "A"));
+        state.windows.insert("b".into(), win("w-b", "B"));
+        state.windows.insert("c".into(), win("w-c", "C"));
+        let mut running = want("b", "B");
+        running.settles = false;
+        let present = vec![("w-c".into(), "C".into())];
+        let plan = plan(
+            &[want("a", "A"), running, want("c", "C")],
+            &present,
+            &mut state,
+        );
+        assert_eq!(plan.settle, vec!["a".to_string()]);
+        assert!(plan.create.is_empty());
+        assert!(state.dismissed.contains_key("a") && state.dismissed.contains_key("b"));
+    }
+
+    #[test]
+    fn every_window_going_at_once_settles_nothing() {
+        let mut state = State::default();
+        state.windows.insert("a".into(), win("w-a", "A"));
+        state.windows.insert("b".into(), win("w-b", "B"));
+        assert!(
+            plan(&[want("a", "A"), want("b", "B")], &[], &mut state)
+                .settle
+                .is_empty()
+        );
+        // The last window, closed on its own, is the user's.
+        let mut state = State::default();
+        state.windows.insert("a".into(), win("w-a", "A"));
+        assert_eq!(
+            plan(&[want("a", "A")], &[], &mut state).settle,
+            vec!["a".to_string()]
+        );
     }
 
     #[test]
