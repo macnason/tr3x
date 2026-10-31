@@ -24,7 +24,8 @@ Each thread window is two panes:
 - **Conversation** (top): the thread as plain terminal output, so Rex's scrollback, find,
   selection and links all work. Markdown renders with headings, lists, tables, syntax-highlighted
   code and OSC 8 links, using only the terminal's 16 colours so it follows any light or dark
-  theme. Its header reads `T3 · project · branch`.
+  theme. Its header reads `T3 · project · branch`. Text reads in a centred column, as in T3
+  (see [Chat width](#chat-width)).
 - **Reply** (bottom): one input, with T3's composer chips under it: the provider's logo and
   model, the effort, and the access the next message goes out with. Click a chip, or press Tab,
   to change it. A pending approval or question shows here.
@@ -92,9 +93,32 @@ holds one **New Thread** window instead, with the four keys that matter under it
 | Model | Click a chip under Reply, press Tab there, type `/model` alone, or ⌃⌘M: a picker opens over the window with every enabled provider's models under its logo, then the model's efforts; ← → for effort and access. A choice applies to the next message and the chips follow. `/model haiku`, `/effort high`, `/mode ask` still work. |
 | Approve | With an approval pending: `a` then Enter accepts, `s` then Enter accepts for the session, `d` then Enter declines. Anything else you type is a reply. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
-| Commands | `/steer …`, `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model`, `/effort`, `/mode`, `/open` |
+| Commands | `/steer …`, `/settle`, `/snooze 2h`, `/snooze tomorrow`, `/wake`, `/pin`, `/unpin`, `/archive`, `/stop`, `/model`, `/effort`, `/mode`, `/open`, `/width` |
 | Keys | ⌃⌘N new thread · ⌃⌘M model · ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code |
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
+
+### Chat width
+
+The conversation, Reply and the new-thread composer share one centred column, like T3's chat
+lane. It follows T3 Code's **Chat width** setting (`chatWidth` in
+`~/.t3/userdata/client-settings.json`), so it works as installed:
+
+| T3 setting | T3 lane | t3rex column |
+|---|---|---|
+| Comfortable (default) | 46rem | 96 columns |
+| Wide | 72rem | 150 columns |
+| Full | the window | the pane, 2 columns clear each side |
+
+46rem of T3's 15–16px sans holds about 92–100 characters a line; 96 sits in that range, and
+wide keeps T3's 72/46 ratio. A pane narrower than the column uses its full width.
+
+To differ from T3, `/width wide` in Reply, or `t3rex width comfortable|wide|full|N`, writes
+`chatWidth` to `~/.config/t3rex/settings.json` (a number is a column count). `/width t3` goes
+back to following T3. Open panes pick a change up within a couple of seconds.
+
+| Full (before) | Comfortable |
+|---|---|
+| ![](docs/frames/width-full-dark.png) | ![](docs/frames/width-comfortable-dark.png) |
 
 Subagents show under the thread they work for, as `↳ title`: a task delegated through T3 until
 it settles, and any subagent while it works or needs you. A provider's own subagent at rest is

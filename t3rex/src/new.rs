@@ -84,6 +84,7 @@ struct NewThread {
     painter: Painter,
     chip_spans: Vec<(usize, usize)>,
     chip_row: u16,
+    chat_width: crate::width::ChatWidth,
     tx: mpsc::UnboundedSender<Loaded>,
 }
 
@@ -378,8 +379,8 @@ impl NewThread {
     }
 
     fn draw(&mut self) {
-        let width = self.cols.saturating_sub(4).clamp(20, 100);
-        let left = 2;
+        // The column a thread's conversation reads in, as T3 lines its composer up with it.
+        let (left, width) = self.chat_width.column(self.cols);
         let pad = " ".repeat(left);
         let mut lines: Vec<String> = vec![String::new()];
         // The message, in a rounded box like T3's composer.
@@ -755,6 +756,7 @@ pub async fn run(welcome: bool) -> Result<()> {
         painter: Painter,
         chip_spans: Vec::new(),
         chip_row: 0,
+        chat_width: crate::width::current().0,
         tx: tx.clone(),
     };
     ui.set_project(first);

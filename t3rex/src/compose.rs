@@ -4,7 +4,7 @@
 //!
 //! Enter sends, and queues behind a running turn. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
-//! /model NAME, /effort LEVEL, /open.
+//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ use crate::icons::{Icon, Painter};
 use crate::pick::Field;
 use crate::picker::{self, Chip, Settings};
 use crate::t3::{self, Lifecycle};
+use crate::width::Follow;
 
 fn out(text: &str) {
     let mut stdout = std::io::stdout().lock();
@@ -91,7 +92,7 @@ impl Editor {
 /// The `/` commands. Anything else starting with `/`, such as a path, is a message.
 const COMMANDS: &[&str] = &[
     "settle", "unsettle", "snooze", "wake", "pin", "unpin", "archive", "stop", "open", "model",
-    "effort", "mode", "steer",
+    "effort", "mode", "steer", "width",
 ];
 
 /// Agent-written text as one plain line: no escape sequences or other controls, which could
@@ -133,6 +134,8 @@ struct Composer {
     chip_spans: Vec<((usize, usize), Field)>,
     /// Started again under the provider's name once already; don't loop if that failed.
     renamed: bool,
+    /// The chat width setting: the input sits in the conversation's column.
+    chat_width: Follow,
 }
 
 impl Composer {
@@ -211,7 +214,9 @@ impl Composer {
         }
         text.push_str("\x1b[H\x1b[2J");
         text.push_str(Painter::clear());
-        let width = self.cols.saturating_sub(4).max(10);
+        // The conversation's column, less the prompt's two.
+        let (left, column) = self.chat_width.width.column(self.cols);
+        let width = column.saturating_sub(2).max(10);
         // The chips take the bottom row, and a blank row above them when there is room.
         let chips: Vec<(Chip, Field)> = self.chips();
         let reserved = match (chips.is_empty(), self.rows) {
@@ -294,7 +299,7 @@ impl Composer {
             .min(rows.len().saturating_sub(room.min(rows.len())));
         let shown: Vec<&String> = rows.iter().skip(start).take(room).collect();
         for (i, row) in shown.iter().enumerate() {
-            text.push_str(&format!("\x1b[{};1H {row}", i + 1));
+            text.push_str(&format!("\x1b[{};{}H{row}", i + 1, left + 1));
         }
         if !chips.is_empty() {
             let only: Vec<Chip> = chips
@@ -304,14 +309,14 @@ impl Composer {
                     label: c.label.clone(),
                 })
                 .collect();
-            let (line, spans) = picker::chips(&mut self.painter, &only, None, None, 1);
+            let (line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
             self.chip_spans = spans
                 .into_iter()
                 .zip(chips.iter().map(|(_, f)| *f))
                 .collect();
-            text.push_str(&format!("\x1b[{};1H {line}", self.rows));
+            text.push_str(&format!("\x1b[{};{}H{line}", self.rows, left + 1));
         }
-        let (r, c) = (cursor_row.saturating_sub(start) + 1, cursor.1 + 4);
+        let (r, c) = (cursor_row.saturating_sub(start) + 1, left + 3 + cursor.1);
         text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h\x1b[?2026l"));
         out(&text);
     }
@@ -500,6 +505,13 @@ impl Composer {
                     None => self.note("Nothing is running", false),
                 }
             }
+            "width" => match crate::width::apply(arg) {
+                Ok(note) => {
+                    self.chat_width.width = crate::width::current().0;
+                    self.note(note, false);
+                }
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
             "open" => self.spawn(async move {
                 crate::install::open_in_t3(&thread).await?;
                 Ok("Opened in T3 Code".into())
@@ -704,11 +716,13 @@ pub async fn run(thread_id: String) -> Result<()> {
         painter: Painter,
         chip_spans: Vec::new(),
         renamed: false,
+        chat_width: Follow::new(),
     };
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks on the chips.
     out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
     let mut input = EventStream::new();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     composer.draw();
     let result: Result<()> = async {
         loop {
@@ -738,6 +752,9 @@ pub async fn run(thread_id: String) -> Result<()> {
                     Some(Done::Config(config)) => composer.config = Some(config),
                     Some(Done::Logos(logos)) => composer.logos = logos,
                     None => {}
+                },
+                _ = tick.tick() => if !composer.chat_width.changed() {
+                    continue;
                 },
                 _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
                     composer.note = None;

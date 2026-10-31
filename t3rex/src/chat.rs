@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use crate::media::{self, Embed, Media};
 use crate::render::{self, visible_width};
 use crate::t3;
+use crate::width::Follow;
 
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
@@ -35,8 +36,6 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const BLUE: &str = "\x1b[34m";
 pub const MAGENTA: &str = "\x1b[35m";
 
-/// Columns of padding on the left of everything, and the least on the right.
-const PAD: usize = 2;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// The terminal's size and what this pane has written to it.
@@ -54,8 +53,10 @@ struct Pane {
     status: String,
     title: String,
     header: bool,
-    /// Set by a resize: the whole thread prints again at the new width.
+    /// Set by a resize or a new chat width: the whole thread prints again at the new width.
     reflow: bool,
+    /// The chat width setting, which places the column everything draws in.
+    chat_width: Follow,
     /// Whether the last frame drew a spinner or a clock, which the tick moves on.
     animating: bool,
     /// The newest message of yours drawn, so a new one can bring the view to the bottom.
@@ -165,14 +166,15 @@ pub fn one_line(text: &str) -> String {
         .join(" ")
 }
 
-fn pad(lines: Vec<String>) -> Vec<String> {
+/// `lines` moved right by `left` columns, into the conversation's column.
+fn pad(lines: Vec<String>, left: usize) -> Vec<String> {
     lines
         .into_iter()
         .map(|l| {
             if l.is_empty() {
                 l
             } else {
-                format!("{}{l}", " ".repeat(PAD))
+                format!("{}{l}", " ".repeat(left))
             }
         })
         .collect()
@@ -589,6 +591,7 @@ impl Pane {
             title: String::new(),
             header: false,
             reflow: false,
+            chat_width: Follow::new(),
             animating: false,
             last_user: String::new(),
             frame: 0,
@@ -599,8 +602,9 @@ impl Pane {
         }
     }
 
-    fn width(&self) -> usize {
-        self.cols.saturating_sub(PAD * 2).max(20)
+    /// The column the conversation draws in: its left edge and its width.
+    fn column(&self) -> (usize, usize) {
+        self.chat_width.width.column(self.cols)
     }
 
     /// Prints the thread's blocks: what's new and finished for good, then the live tail.
@@ -647,7 +651,7 @@ impl Pane {
             text.push_str(&self.header_lines(state, shell_thread));
             self.header = true;
         }
-        let width = self.width();
+        let (left, width) = self.column();
         let shown = visible_tools(&blocks);
         let embeds = media::embeds(state);
         if self.media.can_snapshot() {
@@ -672,7 +676,7 @@ impl Pane {
         while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active)
         {
             let block = &blocks[index];
-            let lines = pad(lines_at(&blocks, &shown, index, &fixed));
+            let lines = pad(lines_at(&blocks, &shown, index, &fixed), left);
             // The top of this block may already be on screen, printed while it was live.
             let skip = self.spilled.min(lines.len());
             self.spilled -= skip;
@@ -689,7 +693,7 @@ impl Pane {
         }
         let mut live: Vec<String> = Vec::new();
         for i in index..blocks.len() {
-            live.extend(pad(lines_at(&blocks, &shown, i, &moving)));
+            live.extend(pad(lines_at(&blocks, &shown, i, &moving), left));
         }
         // Lines that already printed for good stay where they are.
         let skip = self.spilled.min(live.len());
@@ -704,7 +708,7 @@ impl Pane {
                 .unwrap_or_default();
             live.push(format!(
                 "{}{BLUE}{}{RESET} {DIM}Working {since}{RESET}",
-                " ".repeat(PAD),
+                " ".repeat(left),
                 SPINNER[self.frame % SPINNER.len()]
             ));
         } else if let Some(footer) = self.footer(state) {
@@ -742,12 +746,12 @@ impl Pane {
             Some("interrupted" | "cancelled") => format!("{DIM}■ Stopped"),
             _ => format!("{DIM}{at} · {}", duration(took)),
         };
-        Some(format!("{}{mark}{RESET}", " ".repeat(PAD)))
+        Some(format!("{}{mark}{RESET}", " ".repeat(self.column().0)))
     }
 
     fn header_lines(&self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
         let thread = state.thread();
-        let width = self.width();
+        let (left, width) = self.column();
         let title = thread["title"].as_str().unwrap_or("Untitled");
         let mut meta: Vec<String> = Vec::new();
         if let Some(branch) = thread["branch"].as_str() {
@@ -764,7 +768,7 @@ impl Pane {
             }
         }
         let mut text = String::new();
-        let p = " ".repeat(PAD);
+        let p = " ".repeat(left);
         text.push_str(&format!(
             "\r\n{p}{BOLD}{}{RESET}\r\n",
             fit(&one_line(title), width)
@@ -957,6 +961,10 @@ async fn event_loop(
             _ = tick.tick() => {
                 if pane.animating {
                     pane.frame += 1;
+                    dirty = true;
+                }
+                if pane.chat_width.changed() {
+                    pane.reflow = true;
                     dirty = true;
                 }
             }

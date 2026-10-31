@@ -14,6 +14,7 @@ mod rex;
 mod state;
 mod sync;
 mod t3;
+mod width;
 
 use std::time::Duration;
 
@@ -99,6 +100,9 @@ enum Command {
     Inbox,
     /// Print the thread a Rex block belongs to.
     Which(Target),
+    /// Show or set how wide conversations read: comfortable, wide, full, a column count, or
+    /// t3 to follow T3 Code's Chat width.
+    Width { width: Option<String> },
     /// Set up t3rex: the Rex config, the launchd agent, and a first sync.
     Install,
     /// Undo `install`: stop the agent, remove the config line, close t3rex's session.
@@ -326,6 +330,10 @@ async fn run(cli: Cli) -> Result<()> {
             for want in sync::wanted(&shell, &mut inbox, caps, t3::now_ms()) {
                 println!("{:?}\t{}\t{}", want.place, want.thread_id, want.label);
             }
+            Ok(())
+        }
+        Command::Width { width } => {
+            println!("{}", width::apply(width.as_deref().unwrap_or(""))?);
             Ok(())
         }
         Command::Install => install::install().await,
