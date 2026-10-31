@@ -4,7 +4,8 @@
 //!
 //! Enter sends, and queues behind a running turn. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
-//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3.
+//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3. `/` first opens a menu of
+//! those, the provider's commands and skills (`slash`).
 
 use std::io::Write;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use crate::chat::{BLUE, BOLD, DIM, RED, RESET, YELLOW, fit};
 use crate::icons::{Icon, Painter};
 use crate::pick::Field;
 use crate::picker::{self, Chip, Settings};
+use crate::slash::{self, Slash};
 use crate::t3::{self, Lifecycle};
 use crate::width::Follow;
 
@@ -136,6 +138,7 @@ struct Composer {
     renamed: bool,
     /// The chat width setting: the input sits in the conversation's column.
     chat_width: Follow,
+    slash: Slash,
 }
 
 impl Composer {
@@ -200,6 +203,11 @@ impl Composer {
         }
         text.push_str("\x1b[H\x1b[2J");
         text.push_str(Painter::clear());
+        self.slash.sync(
+            &self.editor,
+            self.config.as_ref(),
+            self.state.as_ref().map(|s| s.thread()),
+        );
         // The conversation's column, less the prompt's two.
         let (left, column) = self.chat_width.width.column(self.cols);
         let width = column.saturating_sub(2).max(10);
@@ -303,6 +311,20 @@ impl Composer {
             text.push_str(&format!("\x1b[{};{}H{line}", self.rows, left + 1));
         }
         let (r, c) = (cursor_row.saturating_sub(start) + 1, left + 3 + cursor.1);
+        let input_top = (first_input + 1).saturating_sub(start).max(1);
+        let input_bottom = (first_input + lines.len()).saturating_sub(start).min(room);
+        text.push_str(&self.slash.draw(
+            &mut self.painter,
+            (input_top, input_bottom),
+            self.rows,
+            left,
+            column,
+        ));
+        let hint_room = width.saturating_sub(cursor.1 + 1);
+        if let Some(hint) = self.slash.hint().filter(|_| hint_room >= 4) {
+            let hint = fit(hint, hint_room);
+            text.push_str(&format!("\x1b[{r};{c}H{DIM}{hint}{RESET}"));
+        }
         text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h\x1b[?2026l"));
         out(&text);
     }
@@ -407,6 +429,7 @@ impl Composer {
         }
         if let Some(command) = trimmed.strip_prefix('/')
             && COMMANDS.contains(&command.split_whitespace().next().unwrap_or(""))
+            && !self.slash.is_theirs(trimmed)
         {
             let command = command.to_string();
             if let Some(text) = command.strip_prefix("steer") {
@@ -539,6 +562,11 @@ impl Composer {
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
+        match self.slash.key(&mut self.editor, key) {
+            slash::Key::Pass => {}
+            slash::Key::Done => return,
+            slash::Key::Send => return self.submit(),
+        }
         match key.code {
             KeyCode::Enter
                 if !key
@@ -685,6 +713,7 @@ pub async fn run(thread_id: String) -> Result<()> {
         });
     }
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 5));
+    let slash = Slash::new(client.clone());
     let mut composer = Composer {
         thread_id,
         client,
@@ -703,6 +732,7 @@ pub async fn run(thread_id: String) -> Result<()> {
         chip_spans: Vec::new(),
         renamed: false,
         chat_width: Follow::new(),
+        slash,
     };
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks on the chips.
@@ -748,6 +778,7 @@ pub async fn run(thread_id: String) -> Result<()> {
                 }
                 event = input.next() => match event {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => composer.key(key),
+                    Some(Ok(Event::Mouse(m))) if composer.slash.hits(&m) => composer.slash.click(&mut composer.editor, &m),
                     Some(Ok(Event::Mouse(m))) => {
                         let col = m.column as usize + 1;
                         let hit = composer
