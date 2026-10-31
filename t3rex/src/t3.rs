@@ -46,7 +46,9 @@ pub fn machine(query: &str) -> Result<Arc<Env>> {
 pub fn thread(text: &str) -> Result<(Arc<Env>, ThreadRef)> {
     let home = hub().home_id().unwrap_or_default().to_string();
     let r = ThreadRef::parse(text, &home);
-    Ok((machine(&r.env)?, r))
+    let env = machine(&r.env)?;
+    // An alias or a shortened id names the machine; the reference holds its id.
+    Ok((env.clone(), ThreadRef::new(env.id(), r.thread)))
 }
 
 pub fn capabilities(env: &Env) -> Capabilities {

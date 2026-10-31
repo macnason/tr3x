@@ -39,7 +39,7 @@ pub async fn float(session: &str, thread: &str, field: Field) -> Result<()> {
         Field::Effort => "effort",
         Field::Access => "access",
     };
-    let data = json!({"argv": [exe, "pick", thread, "--field", field]});
+    let data = json!({"argv": crate::rex::pane_argv(&exe, &["pick", thread, "--field", field])});
     let script = format!(
         r#"local d = rex.json.decode({})
 local _, err = rex.session.new_layer{{ bounds = {{ 0.2, 0.12, 0.6, 0.76 }}, focus = true,

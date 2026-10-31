@@ -5,7 +5,11 @@
 //! `orchestration.launchThread`, and the window becomes that thread's: this pane turns into the
 //! conversation and the Reply pane opens under it.
 //!
-//! The pane labels itself `t3:<thread>` before it launches, with the id the launch will use, so
+//! With more than one machine to choose from, a machine chip comes first: each paired machine,
+//! and the ones on the tailnet that run T3 and aren't paired, which pair from there. Choosing
+//! one loads its projects, models and branches, and the thread launches there.
+//!
+//! The pane labels itself `t3:<env8>/<thread>` before it launches, with the id the launch will use, so
 //! sync takes the window as the thread's as soon as T3 reports the thread.
 
 use std::collections::HashMap;
@@ -22,6 +26,8 @@ use t3client::env::Env;
 use t3client::hub::ThreadRef;
 use t3client::launch::{LaunchRequest, Workspace};
 use t3client::models;
+use t3client::pair::Candidate;
+use t3client::projection::ShellState;
 use tokio::sync::mpsc;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
@@ -39,6 +45,7 @@ fn out(text: &str) {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Field {
+    Machine,
     Project,
     Model,
     Effort,
@@ -55,10 +62,20 @@ enum Loaded {
     Launched(Result<String, String>),
     /// A folder T3 took as a project, or why it didn't.
     Added(Result<Value, String>),
+    /// The machines on the tailnet that run T3 and aren't paired.
+    Candidates(Vec<Candidate>),
+    /// Whether a paired machine answers.
+    Reachable(String, bool),
+    /// Another machine, loaded: its connection, config and shell, or why not.
+    Switched(Result<(Arc<Env>, Value, ShellState), String>),
 }
 
 struct NewThread {
     client: Arc<Env>,
+    /// Every paired machine, and whether each answers.
+    machines: Vec<Arc<Env>>,
+    reachable: HashMap<String, bool>,
+    candidates: Vec<Candidate>,
     config: Value,
     projects: Vec<Value>,
     /// The most recent thread of each project, for its model.
@@ -90,6 +107,8 @@ struct NewThread {
 
 /// The project menu's item that adds a folder instead.
 const ADD_FOLDER: &str = "\u{0}add-folder";
+/// The start of a machine menu item that pairs a machine instead.
+const PAIR: &str = "\u{0}pair:";
 
 /// A folder being typed in to add as a project: its path, and the folders under the part
 /// typed so far that start with the rest.
@@ -242,7 +261,12 @@ impl NewThread {
     }
 
     fn fields(&self) -> Vec<Field> {
-        let mut out = vec![Field::Project, Field::Model];
+        let mut out = Vec::new();
+        // Only with a choice to make: one machine and nothing to pair reads as it always has.
+        if self.machines.len() > 1 || !self.candidates.is_empty() {
+            out.push(Field::Machine);
+        }
+        out.extend([Field::Project, Field::Model]);
         if !picker::effort_items(&self.config, &self.settings).is_empty() {
             out.push(Field::Effort);
         }
@@ -258,6 +282,7 @@ impl NewThread {
 
     fn chip(&self, field: Field) -> Chip {
         let (icon, label) = match field {
+            Field::Machine => (None, self.client.name().to_string()),
             Field::Project => {
                 let p = self.project_value();
                 (
@@ -301,6 +326,24 @@ impl NewThread {
 
     fn open(&mut self, field: Field) {
         let (items, current): (Vec<Item>, Option<String>) = match field {
+            Field::Machine => (
+                self.machines
+                    .iter()
+                    .map(|m| {
+                        let mut item = Item::new(m.id(), m.name());
+                        if self.reachable.get(m.id()) == Some(&false) {
+                            item.detail = "offline".into();
+                        }
+                        item
+                    })
+                    .chain(self.candidates.iter().map(|c| {
+                        let mut item = Item::new(format!("{PAIR}{}", c.id), &c.label);
+                        item.detail = "Pair…".into();
+                        item
+                    }))
+                    .collect(),
+                Some(self.client.id().to_string()),
+            ),
             Field::Project => (
                 self.projects
                     .iter()
@@ -319,7 +362,12 @@ impl NewThread {
                             .unwrap_or_default();
                         Some(item)
                     })
-                    .chain(std::iter::once(Item::new(ADD_FOLDER, "Add folder…")))
+                    // Folders are this Mac's; a project on another machine is added there.
+                    .chain(
+                        self.client
+                            .is_local()
+                            .then(|| Item::new(ADD_FOLDER, "Add folder…")),
+                    )
                     .collect(),
                 Some(self.project.clone()),
             ),
@@ -370,6 +418,10 @@ impl NewThread {
 
     fn choose(&mut self, field: Field, id: String) {
         match field {
+            Field::Machine => match id.strip_prefix(PAIR) {
+                Some(candidate) => self.pair(candidate.to_string()),
+                None => self.switch(&id),
+            },
             Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
             Field::Model => self.settings.set_model(&self.config, &id),
@@ -378,6 +430,107 @@ impl NewThread {
             Field::Workspace => self.worktree = id == "worktree",
             Field::Branch => self.base = Some(id),
         }
+    }
+
+    /// Loads machine `id`'s projects, models and branches, to launch there.
+    fn switch(&mut self, id: &str) {
+        if id == self.client.id() {
+            return;
+        }
+        let Some(env) = self.machines.iter().find(|m| m.id() == id).cloned() else {
+            return;
+        };
+        self.note = Some((format!("Loading {}…", env.name()), false));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let loaded = async {
+                let (config, shell) = tokio::try_join!(env.server_config(), env.shell())?;
+                anyhow::Ok((env.clone(), config, shell))
+            };
+            let result =
+                match tokio::time::timeout(std::time::Duration::from_secs(15), loaded).await {
+                    Ok(Ok(loaded)) => Ok(loaded),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err(format!("{} didn't answer", env.name())),
+                };
+            let _ = tx.send(Loaded::Switched(result));
+        });
+    }
+
+    /// Pairs a machine found on the tailnet, in a floating window: over SSH, or with a pasted
+    /// link. The machine joins the list once it's paired.
+    fn pair(&mut self, candidate: String) {
+        let Ok(session) = std::env::var("REX_SESSION") else {
+            self.note = Some(("Run `t3rex pair` to pair it".into(), true));
+            return;
+        };
+        let exe = icons::real_exe().to_string_lossy().into_owned();
+        let data = json!({"argv": crate::rex::pane_argv(&exe, &["pair", &candidate, "--wait"])});
+        let script = format!(
+            r#"local d = rex.json.decode({})
+local _, err = rex.session.new_layer{{ bounds = {{ 0.15, 0.2, 0.7, 0.5 }}, focus = true,
+  layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Pair",
+    options = {{ shell = "none", login = false, command = d.argv }} }} }} }}
+rex.session.disown_block{{}}
+if err then error(err, 0) end
+return {{}}"#,
+            lua_str(&data.to_string())
+        );
+        tokio::spawn(async move {
+            let _ = Rex::find().lua(&session, &script).await;
+        });
+    }
+
+    /// Takes in machines paired since the list was made.
+    fn refresh_machines(&mut self) {
+        let hub = t3::hub();
+        let known: Vec<String> = self.machines.iter().map(|m| m.id().to_string()).collect();
+        for env in hub.envs() {
+            if !known.iter().any(|k| k == env.id()) {
+                self.candidates.retain(|c| c.id != env.id());
+                self.machines.push(env.clone());
+                check(env.clone(), self.tx.clone());
+            }
+        }
+    }
+
+    /// Takes the projects of the machine just loaded, newest work first, and starts on the
+    /// latest.
+    fn load(&mut self, config: Value, shell: &ShellState) {
+        let (projects, recent) = projects_by_recent(shell);
+        self.config = config;
+        self.projects = projects;
+        self.recent = recent;
+        self.branches.clear();
+        self.icons.clear();
+        self.project = String::new();
+        self.folder = None;
+        match self
+            .projects
+            .first()
+            .and_then(|p| p["id"].as_str())
+            .map(str::to_string)
+        {
+            Some(first) => self.set_project(first),
+            // No projects yet: a folder first, on this Mac, and the model T3 would start any
+            // thread with.
+            None => {
+                self.settings = defaults(&self.config, &Value::Null, None);
+                if self.client.is_local() {
+                    self.folder = Some(Folder::new("~/"));
+                } else {
+                    self.note = Some((format!("No projects on {} yet", self.client.name()), true));
+                }
+            }
+        }
+        let (c, t, projects) = (self.client.clone(), self.tx.clone(), self.projects.clone());
+        tokio::spawn(async move {
+            let _ = t.send(Loaded::Icons(icons::projects(&c, &projects).await));
+        });
+        let (t, providers) = (self.tx.clone(), models::providers(&self.config).to_vec());
+        tokio::spawn(async move {
+            let _ = t.send(Loaded::Logos(logos(&providers).await));
+        });
     }
 
     fn set_project(&mut self, id: String) {
@@ -854,7 +1007,7 @@ async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) 
         return Ok(());
     };
     let exe = program.to_string_lossy().into_owned();
-    let data = json!({"block": block, "argv": [exe, "compose", thread], "cwd": cwd});
+    let data = json!({"block": block, "argv": crate::rex::pane_argv(&exe, &["compose", thread]), "cwd": cwd});
     let script = format!(
         r#"local d = rex.json.decode({})
 local r, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
@@ -881,17 +1034,43 @@ fn unavailable(error: &anyhow::Error) -> bool {
         .any(|e| e.exit_code == t3client::error::exit::UNAVAILABLE)
 }
 
-/// T3, once it answers. Until then the pane says what's wrong, in place of the composer, and
+/// One machine's config and shell.
+async fn open(client: Arc<Env>) -> Result<(Arc<Env>, Value, ShellState)> {
+    let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
+    Ok((client, config, shell))
+}
+
+/// T3, once it answers: the machine asked for, else this Mac's, else the first paired machine
+/// that answers. Until one does, the pane says what's wrong, in place of the composer, and
 /// tries again every few seconds, so it opens as soon as T3 Code does.
-async fn connect(env: &str) -> Result<(Arc<Env>, Value, t3client::projection::ShellState)> {
+async fn connect(env: &str) -> Result<(Arc<Env>, Value, ShellState)> {
     let mut shown = false;
     loop {
-        let attempt = async {
-            let client = t3::machine(env)?;
-            let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
-            anyhow::Ok((client, config, shell))
-        }
-        .await;
+        let attempt = match t3::machine(env) {
+            Ok(client) => open(client).await,
+            Err(e) => Err(e),
+        };
+        let attempt = match attempt {
+            Err(e) if env.is_empty() && unavailable(&e) => {
+                let others = t3::hub()
+                    .envs()
+                    .iter()
+                    .filter(|m| !m.is_local())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut found = Err(e);
+                for other in others {
+                    if let Ok(Ok(loaded)) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), open(other)).await
+                    {
+                        found = Ok(loaded);
+                        break;
+                    }
+                }
+                found
+            }
+            other => other,
+        };
         let error = match attempt {
             Ok(loaded) => {
                 if shown {
@@ -899,7 +1078,13 @@ async fn connect(env: &str) -> Result<(Arc<Env>, Value, t3client::projection::Sh
                 }
                 return Ok(loaded);
             }
-            Err(e) if unavailable(&e) => "T3 Code isn't running. Open T3 Code.".to_string(),
+            Err(e) if unavailable(&e) && env.is_empty() => {
+                "T3 Code isn't running. Open T3 Code.".to_string()
+            }
+            Err(e) if unavailable(&e) => format!(
+                "{} is offline",
+                t3::machine(env).map_or(env.to_string(), |m| m.name().to_string())
+            ),
             Err(e) => format!("{e:#}"),
         };
         let (cols, _) = crossterm::terminal::size().unwrap_or((100, 30));
@@ -914,11 +1099,9 @@ async fn connect(env: &str) -> Result<(Arc<Env>, Value, t3client::projection::Sh
     }
 }
 
-pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
-    let (client, config, shell) = connect(env.as_deref().unwrap_or("")).await?;
-    // The scheme first, so the logos loaded next are for the screen they're seen on.
-    let mut scheme = crate::scheme::listen();
-    // Projects with the most recent work first, as T3's picker lists them.
+/// Projects with the most recent work first, as T3's picker lists them, and each project's
+/// most recent thread, for its model.
+fn projects_by_recent(shell: &ShellState) -> (Vec<Value>, HashMap<String, Value>) {
     let mut recent: HashMap<String, Value> = HashMap::new();
     for t in &shell.threads {
         if t["lineage"]["relationshipToParent"] == "subagent" {
@@ -946,17 +1129,35 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         };
         at(b).cmp(&at(a))
     });
-    let first = projects
-        .first()
-        .and_then(|p| p["id"].as_str())
-        .map(str::to_string);
+    (projects, recent)
+}
+
+/// Checks whether `env` answers, for the machine menu.
+fn check(env: Arc<Env>, tx: mpsc::UnboundedSender<Loaded>) {
+    tokio::spawn(async move {
+        let up = tokio::time::timeout(std::time::Duration::from_secs(5), env.route())
+            .await
+            .is_ok_and(|r| r.is_ok());
+        let _ = tx.send(Loaded::Reachable(env.id().to_string(), up));
+    });
+}
+
+pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
+    let (client, config, shell) = connect(env.as_deref().unwrap_or("")).await?;
+    // The scheme first, so the logos loaded next are for the screen they're seen on.
+    let mut scheme = crate::scheme::listen();
     let (tx, mut loaded) = mpsc::unbounded_channel();
     let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 30));
+    let hub = t3::hub();
+    let machines: Vec<Arc<Env>> = hub.envs().to_vec();
     let mut ui = NewThread {
         client: client.clone(),
-        config,
-        projects,
-        recent,
+        machines: machines.clone(),
+        reachable: HashMap::new(),
+        candidates: Vec::new(),
+        config: Value::Null,
+        projects: Vec::new(),
+        recent: HashMap::new(),
         project: String::new(),
         settings: Settings::default(),
         worktree: false,
@@ -979,24 +1180,26 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         chat_width: crate::width::current().0,
         tx: tx.clone(),
     };
-    match first {
-        Some(first) => ui.set_project(first),
-        // No projects yet: a folder first, and the model T3 would start any thread with.
-        None => {
-            ui.settings = defaults(&ui.config, &Value::Null, None);
-            ui.folder = Some(Folder::new("~/"));
-        }
+    ui.load(config, &shell);
+    for m in machines {
+        check(m, tx.clone());
     }
     {
-        let (c, t, projects) = (client.clone(), tx.clone(), ui.projects.clone());
+        let tx = tx.clone();
         tokio::spawn(async move {
-            let _ = t.send(Loaded::Icons(icons::projects(&c, &projects).await));
-        });
-        let (t, providers) = (tx.clone(), models::providers(&ui.config).to_vec());
-        tokio::spawn(async move {
-            let _ = t.send(Loaded::Logos(logos(&providers).await));
+            let hub = t3::hub();
+            let home = hub.home();
+            let found = t3client::pair::candidates(home.as_deref(), &hub.registry).await;
+            let _ = tx.send(Loaded::Candidates(found));
         });
     }
+    let stamp = |hub: &t3client::hub::Hub| {
+        std::fs::metadata(hub.store.dir.join("envs.json"))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    let mut paired_at = stamp(&hub);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks (SGR mouse reports).
     out("\x1b]2;New Thread\x07\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
@@ -1031,6 +1234,15 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     None => return Ok(()),
                     _ => continue,
                 },
+                _ = tick.tick() => {
+                    // A machine paired from the menu joins it.
+                    let now = stamp(&t3::hub());
+                    if now == paired_at {
+                        continue;
+                    }
+                    paired_at = now;
+                    ui.refresh_machines();
+                }
                 Ok(()) = scheme.changed() => {
                     let (t, providers) = (ui.tx.clone(), models::providers(&ui.config).to_vec());
                     tokio::spawn(async move {
@@ -1063,6 +1275,19 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         ui.launching = false;
                         ui.note = Some((e, true));
                     }
+                    Loaded::Candidates(found) => {
+                        let paired: Vec<String> = ui.machines.iter().map(|m| m.id().to_string()).collect();
+                        ui.candidates = found.into_iter().filter(|c| !paired.contains(&c.id)).collect();
+                    }
+                    Loaded::Reachable(id, up) => {
+                        ui.reachable.insert(id, up);
+                    }
+                    Loaded::Switched(Ok((env, config, shell))) => {
+                        ui.note = None;
+                        ui.client = env;
+                        ui.load(config, &shell);
+                    }
+                    Loaded::Switched(Err(e)) => ui.note = Some((e, true)),
                 },
             }
             ui.draw();
@@ -1075,9 +1300,11 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     let Some(thread) = launched else {
         return Ok(());
     };
+    // A project on another machine is a folder there, not here.
     let cwd = ui
         .project_value()
         .and_then(|p| p["workspaceRoot"].as_str())
+        .filter(|_| ui.client.is_local())
         .map(str::to_string);
     // Both panes run under the provider's name, so Rex's sidebar shows its glyph.
     let driver = icons::driver_of(Some(&ui.config), &ui.settings.instance).to_string();

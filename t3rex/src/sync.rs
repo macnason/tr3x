@@ -539,7 +539,7 @@ pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Valu
                 "label": want.label,
                 "cwd": want.cwd,
                 "chat": chat_argv(&program, &key),
-                "compose": [program, "compose", key],
+                "compose": crate::rex::pane_argv(&program, &["compose", &key]),
             })
         })
         .collect();
@@ -598,7 +598,7 @@ return out
 /// A conversation pane's command line. A development sync (`T3REX_PASSIVE`) starts panes that
 /// only read, beside an installed one.
 fn chat_argv(program: &str, key: &str) -> Value {
-    let mut argv = vec![program.to_string(), "chat".into(), key.to_string()];
+    let mut argv = crate::rex::pane_argv(program, &["chat", key]);
     if std::env::var_os("T3REX_PASSIVE").is_some() {
         argv.push("--passive".into());
     }
@@ -607,7 +607,7 @@ fn chat_argv(program: &str, key: &str) -> Value {
 
 /// The `t3rex new` command line for a session: on its machine, in a session per machine.
 fn new_argv(exe: &str, env: Option<&str>, welcome: bool) -> Value {
-    let mut argv = vec![exe.to_string(), "new".to_string()];
+    let mut argv = crate::rex::pane_argv(exe, &["new"]);
     if let Some(env) = env {
         argv.push("--env".into());
         argv.push(env.into());

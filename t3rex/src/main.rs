@@ -34,6 +34,9 @@ use crate::t3::Lifecycle;
 #[derive(Parser)]
 #[command(name = "t3rex", version, about = "Rex as the interface to T3 Code.")]
 struct Cli {
+    /// `KEY=VALUE` for one of t3rex's own settings, as a pane's starter hands them on.
+    #[arg(long = "set-env", global = true, hide = true)]
+    set_env: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -147,6 +150,9 @@ enum Command {
         machine: Option<String>,
         /// A pairing link for that machine.
         link: Option<String>,
+        /// Wait before leaving, so a floating window shows how it went.
+        #[arg(long, hide = true)]
+        wait: bool,
     },
     /// List the machines Rex follows.
     Envs,
@@ -252,6 +258,14 @@ fn main() {
         unsafe { std::env::set_var("PATH", joined) };
     }
     let cli = Cli::parse();
+    for pair in &cli.set_env {
+        if let Some((key, value)) = pair.split_once('=')
+            && rex::PANE_ENV.contains(&key)
+        {
+            // SAFETY: no other thread exists yet.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -432,7 +446,20 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", width::apply(width.as_deref().unwrap_or(""))?);
             Ok(())
         }
-        Command::Pair { machine, link } => machines::pair_command(machine, link).await,
+        Command::Pair {
+            machine,
+            link,
+            wait,
+        } => {
+            let result = machines::pair_command(machine, link).await;
+            if wait {
+                if let Err(e) = &result {
+                    println!("✗ {e:#}");
+                }
+                tokio::time::sleep(Duration::from_secs(if result.is_ok() { 2 } else { 6 })).await;
+            }
+            result
+        }
         Command::Envs => machines::list().await,
         Command::Env { action } => match action {
             EnvAction::Rename { machine, name } => machines::rename(&machine, &name).await,
