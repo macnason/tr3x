@@ -19,6 +19,7 @@ use crossterm::event::{
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use t3client::env::Env;
+use t3client::hub::ThreadRef;
 use t3client::launch::{LaunchRequest, Workspace};
 use t3client::models;
 use tokio::sync::mpsc;
@@ -817,11 +818,11 @@ impl NewThread {
         self.launching = true;
         let (client, tx) = (self.client.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let thread = request.thread_id().to_string();
+            let thread = ThreadRef::new(client.id(), request.thread_id());
             // Named first, so sync finds this window when T3 reports the thread.
             let _ = set_label(&crate::sync::tag(&thread)).await;
             let result = match client.launch_thread(&request).await {
-                Ok(receipt) => Ok(receipt.thread_id),
+                Ok(receipt) => Ok(ThreadRef::new(client.id(), receipt.thread_id).to_string()),
                 Err(e) => {
                     let _ = set_label("New Thread").await;
                     Err(format!("{e:#}"))
@@ -882,11 +883,11 @@ fn unavailable(error: &anyhow::Error) -> bool {
 
 /// T3, once it answers. Until then the pane says what's wrong, in place of the composer, and
 /// tries again every few seconds, so it opens as soon as T3 Code does.
-async fn connect() -> Result<(Arc<Env>, Value, t3client::projection::ShellState)> {
+async fn connect(env: &str) -> Result<(Arc<Env>, Value, t3client::projection::ShellState)> {
     let mut shown = false;
     loop {
         let attempt = async {
-            let client = t3::connect().await?;
+            let client = t3::machine(env)?;
             let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
             anyhow::Ok((client, config, shell))
         }
@@ -913,8 +914,8 @@ async fn connect() -> Result<(Arc<Env>, Value, t3client::projection::ShellState)
     }
 }
 
-pub async fn run(welcome: bool) -> Result<()> {
-    let (client, config, shell) = connect().await?;
+pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
+    let (client, config, shell) = connect(env.as_deref().unwrap_or("")).await?;
     // The scheme first, so the logos loaded next are for the screen they're seen on.
     let mut scheme = crate::scheme::listen();
     // Projects with the most recent work first, as T3's picker lists them.

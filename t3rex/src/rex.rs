@@ -111,6 +111,11 @@ impl Rex {
         .map(drop)
     }
 
+    /// Calls one of the server's API methods with `args`, a JSON object.
+    pub async fn call(&self, method: &str, args: &str) -> Result<Value> {
+        self.json(&["api", "call", method, args], None).await
+    }
+
     /// Runs a Lua script against `session` and returns what it returned.
     pub async fn lua(&self, session: &str, script: &str) -> Result<Value> {
         self.json(&["do", "-s", session, "-"], Some(script)).await

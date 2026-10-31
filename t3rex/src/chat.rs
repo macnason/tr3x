@@ -67,6 +67,8 @@ struct Pane {
     /// `t3code://threads/<environment>/<thread>`, which opens the thread in T3 Code.
     link: String,
     snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
+    /// What the pane says while the thread's machine is out of reach.
+    offline: Option<String>,
 }
 
 fn out(text: &str) {
@@ -595,7 +597,28 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String
     seq
 }
 
+/// What a pane says while its machine is out of reach: that it is, or that it needs pairing.
+pub fn offline_line(machine: &str, reason: &str, retry_in: Duration) -> String {
+    if let Some(at) = reason.find("Run `t3rex pair") {
+        return reason[at..].trim_end_matches('.').to_string();
+    }
+    let secs = retry_in.as_secs().max(1);
+    format!("{machine} is offline · retrying in {secs}s")
+}
+
 impl Pane {
+    /// Before the thread has loaded: the offline line alone, at the top.
+    fn waiting(&self) {
+        if let Some(offline) = &self.offline {
+            let (left, width) = self.column();
+            out(&format!(
+                "\x1b[H\x1b[2J\r\n{}{DIM}○ {}{RESET}\r\n",
+                " ".repeat(left),
+                fit(offline, width)
+            ));
+        }
+    }
+
     fn new(
         media: Media,
         link: String,
@@ -620,6 +643,7 @@ impl Pane {
             media,
             link,
             snapshots,
+            offline: None,
         }
     }
 
@@ -719,7 +743,10 @@ impl Pane {
         // Lines that already printed for good stay where they are.
         let skip = self.spilled.min(live.len());
         live.drain(..skip);
-        if run_active {
+        if let Some(offline) = &self.offline {
+            live.push(String::new());
+            live.push(format!("{}{DIM}○ {offline}{RESET}", " ".repeat(left)));
+        } else if run_active {
             live.push(String::new());
             let since = state
                 .active_run()
@@ -884,8 +911,9 @@ fn spawn_handoff() -> mpsc::UnboundedSender<String> {
     tx
 }
 
-pub async fn run(thread_id: String) -> Result<()> {
-    let client = t3::connect().await?;
+pub async fn run(thread: String, passive: bool) -> Result<()> {
+    let (client, thread) = t3::thread(&thread)?;
+    let thread_id = thread.thread;
     let mut thread_events = client.watch_thread(&thread_id, None);
     let mut shell_events = client.watch_shell(None);
     let scheme = crate::scheme::listen();
@@ -899,6 +927,7 @@ pub async fn run(thread_id: String) -> Result<()> {
         ));
     }
     let result = event_loop(
+        passive,
         &client,
         &thread_id,
         &mut thread_events,
@@ -912,6 +941,7 @@ pub async fn run(thread_id: String) -> Result<()> {
 }
 
 async fn event_loop(
+    passive: bool,
     client: &std::sync::Arc<t3client::env::Env>,
     thread_id: &str,
     thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -920,9 +950,23 @@ async fn event_loop(
 ) -> Result<()> {
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
     // The provider's driver for each instance, so the pane can take its provider's name, and
-    // the address T3 serves its web app at, for the thread's link.
-    let config = client.server_config().await.ok();
-    let link = crate::link::thread(config.as_ref(), client.id(), thread_id);
+    // the address T3 serves its web app at, for the thread's link. Asked for until the machine
+    // answers.
+    let (config_tx, mut config_rx) = mpsc::unbounded_channel();
+    {
+        let client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(config) = client.server_config().await {
+                    let _ = config_tx.send(config);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+    let mut config: Option<Value> = None;
+    let link = crate::link::thread(None, client.id(), thread_id);
     let handoff = spawn_handoff();
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
     let mut state: Option<ThreadState> = None;
@@ -942,9 +986,19 @@ async fn event_loop(
                     } else if let Some(s) = state.as_mut() {
                         s.apply(&item);
                     }
+                    pane.offline = None;
                     dirty = true;
                 }
-                Some(WatchEvent::Reconnecting { .. }) => {}
+                Some(WatchEvent::Reconnecting { reason, retry_in }) => {
+                    let said = offline_line(client.name(), &reason, retry_in);
+                    if pane.offline.as_deref() != Some(said.as_str()) {
+                        pane.offline = Some(said);
+                        dirty = true;
+                        if state.is_none() {
+                            pane.waiting();
+                        }
+                    }
+                }
                 Some(WatchEvent::Failed(message)) => anyhow::bail!("T3 refused the thread: {message}"),
                 None => anyhow::bail!("the thread's subscription ended"),
             },
@@ -985,6 +1039,12 @@ async fn event_loop(
                     pane.reflow = true;
                     dirty = true;
                 }
+            }
+            Some(found) = config_rx.recv() => {
+                pane.link = crate::link::thread(Some(&found), client.id(), thread_id);
+                pane.reflow = true;
+                config = Some(found);
+                dirty = true;
             }
             Some((attachment, png)) = snap_rx.recv() => {
                 pane.media.snapshots.insert(attachment, png);
@@ -1029,7 +1089,10 @@ async fn event_loop(
             dirty = false;
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
-        if focused && let Some(thread) = t3client::inbox::find_thread(&shell, thread_id) {
+        if focused
+            && !passive
+            && let Some(thread) = t3client::inbox::find_thread(&shell, thread_id)
+        {
             let word = t3client::inbox::status_label(thread, t3::now_ms());
             let key = thread["updatedAt"].as_str().unwrap_or_default().to_string();
             if matches!(word, Some("Done" | "Woke")) && visited_for != key {
@@ -1042,9 +1105,9 @@ async fn event_loop(
 }
 
 /// Prints a thread's blocks, for working on this pane.
-pub async fn dump(thread_id: String) -> Result<()> {
-    let client = t3::connect().await?;
-    let state = client.thread(&thread_id, true).await?;
+pub async fn dump(thread: String) -> Result<()> {
+    let (client, thread) = t3::thread(&thread)?;
+    let state = client.thread(&thread.thread, true).await?;
     for b in transcript::blocks(&state) {
         println!(
             "{:?} type={} status={} streaming={} exit={:?} header={:?} detail={:?} title={:?} body={:?}",

@@ -53,8 +53,9 @@ return {{}}"#,
     Rex::find().lua(session, &script).await.map(drop)
 }
 
-pub async fn run(thread_id: String, first: Field) -> Result<()> {
-    let client = t3::connect().await?;
+pub async fn run(thread: String, first: Field) -> Result<()> {
+    let (client, thread) = t3::thread(&thread)?;
+    let thread_id = thread.thread;
     let _scheme = crate::scheme::listen();
     let (config, state) =
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;

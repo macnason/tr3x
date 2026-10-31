@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use t3client::env::Env;
-use t3client::hub::Hub;
+use t3client::hub::{Hub, ThreadRef};
 use t3client::inbox::Capabilities;
 
 /// Every machine t3rex knows, from its state directory. Reads files only.
@@ -22,6 +22,31 @@ pub async fn connect() -> Result<Arc<Env>> {
         .context("T3 Code isn't set up on this Mac yet. Open T3 Code once.")?;
     env.rpc().await?;
     Ok(env)
+}
+
+/// The machine `query` names: an id, the start of one, an alias or T3's name, or this Mac's
+/// when it's empty. Not connected yet: a machine out of reach still gets a pane.
+pub fn machine(query: &str) -> Result<Arc<Env>> {
+    let hub = hub();
+    let found = if query.is_empty() {
+        hub.home()
+    } else {
+        hub.get(query).or_else(|| hub.by_prefix(query))
+    };
+    found.with_context(|| {
+        if query.is_empty() {
+            "T3 Code isn't set up on this Mac yet. Open T3 Code once.".to_string()
+        } else {
+            format!("Rex isn't paired with a machine called {query:?}. `t3rex envs` lists them.")
+        }
+    })
+}
+
+/// A pane's thread, `env/thread`, or a bare thread id on this Mac, with its machine.
+pub fn thread(text: &str) -> Result<(Arc<Env>, ThreadRef)> {
+    let home = hub().home_id().unwrap_or_default().to_string();
+    let r = ThreadRef::parse(text, &home);
+    Ok((machine(&r.env)?, r))
 }
 
 pub fn capabilities(env: &Env) -> Capabilities {

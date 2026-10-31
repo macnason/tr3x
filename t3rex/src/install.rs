@@ -227,7 +227,7 @@ async fn first_sync(since: SystemTime) -> Option<State> {
         let state = State::load();
         // The session comes first and its windows a moment later; with no threads, it stays
         // empty but for the new-thread window.
-        if state.session_id.is_some() && (!state.windows.is_empty() || i >= 12) {
+        if state.session().is_some() && (state.window_count() > 0 || i >= 12) {
             return Some(state);
         }
     }
@@ -316,11 +316,11 @@ pub async fn install() -> Result<()> {
         "Synced",
         &format!(
             "{} thread(s) in the \"{}\" session",
-            state.windows.len(),
+            state.window_count(),
             crate::sync::SESSION_LABEL
         ),
     );
-    if let Some(session) = &state.session_id {
+    if let Some(session) = &state.session() {
         let _ = rex
             .client_do("session.select", &[("session_id", session)])
             .await;
@@ -344,10 +344,10 @@ pub async fn uninstall() -> Result<()> {
     sync::stop().await;
     step(true, "Stopped sync", "");
     let state = State::load();
-    if let Some(session) = &state.session_id {
+    for session in state.sessions() {
         let gone = tokio::process::Command::new(&rex.bin)
             .args(crate::rex::NO_AUTOSTART)
-            .args(["kill", session])
+            .args(["kill", &session])
             .output()
             .await;
         step(
@@ -537,7 +537,7 @@ pub async fn doctor() -> Result<()> {
         None => {}
     }
     let state = State::load();
-    let session_ok = match (&state.session_id, &sessions) {
+    let session_ok = match (&state.session(), &sessions) {
         (Some(id), Ok(list)) => list.iter().any(|s| s["session_id"].as_str() == Some(id)),
         _ => false,
     };
@@ -545,7 +545,7 @@ pub async fn doctor() -> Result<()> {
         step(
             true,
             "T3 Code session",
-            &format!("{} window(s)", state.windows.len()),
+            &format!("{} window(s)", state.window_count()),
         );
     } else {
         fail(
@@ -574,8 +574,8 @@ pub async fn doctor() -> Result<()> {
 
 /// Opens the thread in the T3 Code desktop app.
 pub async fn open_in_t3(thread: &str) -> Result<()> {
-    let client = crate::t3::connect().await?;
-    let url = format!("t3code://threads/{}/{}", client.id(), thread);
+    let (_, thread) = crate::t3::thread(thread)?;
+    let url = format!("t3code://threads/{}/{}", thread.env, thread.thread);
     let opened = tokio::process::Command::new("/usr/bin/open")
         .arg(&url)
         .output()
@@ -586,30 +586,29 @@ pub async fn open_in_t3(thread: &str) -> Result<()> {
     Ok(())
 }
 
-/// Where to go for the thread that most needs you: the first window of the T3 session, which
-/// sync keeps in T3's order. Fails when sync isn't running, so Rex's actions start it.
+/// Where to go for the thread that most needs you, on any machine, as sync last worked it out
+/// in T3's order: `session_id` and `window_id`, as Rex's `session.select` takes them. Also
+/// `home`, the session new threads open in, and `sessions`, every session t3rex keeps. Fails
+/// when sync isn't running, so Rex's actions start it.
 pub async fn inbox() -> Result<()> {
     if sync::running().is_none() {
         bail!("t3rex isn't syncing");
     }
     let state = State::load();
-    let session = state.session_id.context("t3rex hasn't synced yet")?;
-    let view = Rex::find().inspect(&session).await?;
-    let mine: std::collections::HashSet<&str> = state
-        .windows
-        .values()
-        .map(|w| w.window_id.as_str())
-        .collect();
-    let first = view["windows"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|w| w["window_id"].as_str())
-        .find(|id| mine.contains(id));
-    let out = match first {
-        Some(window) => serde_json::json!({"session_id": session, "window_id": window}),
-        None => serde_json::json!({"session_id": session}),
+    let home = crate::t3::hub()
+        .home_id()
+        .and_then(|id| state.groups.get(id))
+        .and_then(|g| g.session_id.clone())
+        .or_else(|| state.session())
+        .context("t3rex hasn't synced yet")?;
+    let mut out = match &state.next {
+        Some(next) => {
+            serde_json::json!({"session_id": next.session_id, "window_id": next.window_id})
+        }
+        None => serde_json::json!({"session_id": home}),
     };
+    out["home"] = serde_json::json!(home);
+    out["sessions"] = serde_json::json!(state.sessions());
     println!("{out}");
     Ok(())
 }

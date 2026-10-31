@@ -54,13 +54,22 @@ enum Command {
     },
     /// The conversation pane of a thread's window.
     #[command(hide = true)]
-    Chat { thread: String },
+    Chat {
+        thread: String,
+        /// Only read: never mark the thread visited. For a development sync beside an
+        /// installed one.
+        #[arg(long)]
+        passive: bool,
+    },
     /// A new thread: the window Rex's New Tab makes in the T3 Code session.
     #[command(hide = true)]
     New {
         /// Show the keys that matter, for a session with no threads yet.
         #[arg(long)]
         welcome: bool,
+        /// The machine to start on.
+        #[arg(long)]
+        env: Option<String>,
     },
     /// The model picker, as the floating layer `model` opens runs it.
     #[command(hide = true)]
@@ -115,6 +124,9 @@ enum Command {
         method: String,
         #[arg(default_value = "{}")]
         payload: String,
+        /// The machine to call, else this Mac.
+        #[arg(long)]
+        env: Option<String>,
     },
     /// Print the windows sync wants, in order, for working on sync.
     #[command(hide = true)]
@@ -164,7 +176,7 @@ enum EnvAction {
 /// Which thread a command acts on. Without flags, the thread of the Rex block it runs in.
 #[derive(clap::Args, Clone)]
 struct Target {
-    /// A T3 thread id.
+    /// A T3 thread, `env/thread`, or a thread id on this Mac.
     #[arg(long)]
     thread: Option<String>,
     /// A Rex block in a t3rex window, as Rex actions pass `ctx.block_id`.
@@ -173,38 +185,51 @@ struct Target {
 }
 
 impl Target {
+    /// The thread, `env/thread`.
     async fn resolve(&self) -> Result<String> {
         if let Some(thread) = &self.thread {
-            return Ok(thread.clone());
+            return Ok(t3::thread(thread)?.1.to_string());
         }
         let Some(block) = &self.block else {
             bail!("name a thread with --thread, or run this in a T3 window in Rex");
         };
         let state = State::load();
-        let session = state
-            .session_id
-            .clone()
-            .context("t3rex hasn't synced yet")?;
-        let view = Rex::find().inspect(&session).await?;
-        let window = view["windows"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|w| {
-                w["layers"].as_array().into_iter().flatten().any(|layer| {
-                    layer["blocks"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|b| b["block_id"] == block.as_str())
+        let mut sessions = state.sessions();
+        if sessions.is_empty() {
+            bail!("t3rex hasn't synced yet");
+        }
+        // The session the action ran in first.
+        if let Ok(here) = std::env::var("REX_SESSION")
+            && let Some(at) = sessions.iter().position(|s| *s == here)
+        {
+            sessions.swap(0, at);
+        }
+        for session in sessions {
+            let Ok(view) = Rex::find().inspect(&session).await else {
+                continue;
+            };
+            let window = view["windows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|w| {
+                    w["layers"].as_array().into_iter().flatten().any(|layer| {
+                        layer["blocks"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|b| b["block_id"] == block.as_str())
+                    })
                 })
-            })
-            .and_then(|w| w["window_id"].as_str())
-            .context("that block isn't in a T3 window")?;
-        state
-            .thread_for_window(window)
-            .map(str::to_string)
-            .context("that window isn't one of t3rex's")
+                .and_then(|w| w["window_id"].as_str());
+            if let Some(window) = window {
+                return state
+                    .thread_for_window(window)
+                    .map(str::to_string)
+                    .context("that window isn't one of t3rex's");
+            }
+        }
+        bail!("that block isn't in a T3 window")
     }
 }
 
@@ -264,8 +289,8 @@ async fn terminated() -> i32 {
 }
 
 async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
-    let thread = target.resolve().await?;
-    let client = t3::connect().await?;
+    let (client, thread) = t3::thread(&target.resolve().await?)?;
+    let thread = thread.thread;
     let first = client.dispatch(t3::command(&thread, &action)).await;
     // T3 won't settle or archive a thread mid-run. Settling says the thread is finished, so
     // stop the run, wait for T3 to see it stop, and try again.
@@ -301,15 +326,15 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Sync { no_first, log } => sync::run(!no_first, log).await,
-        Command::Chat { thread } => chat::run(thread).await,
+        Command::Chat { thread, passive } => chat::run(thread, passive).await,
         Command::Compose { thread } => compose::run(thread).await,
-        Command::New { welcome } => new::run(welcome).await,
+        Command::New { welcome, env } => new::run(welcome, env).await,
         Command::Pick { thread, field } => pick::run(thread, field).await,
         Command::Model(t) => {
             let thread = t.resolve().await?;
             let session = std::env::var("REX_SESSION")
                 .ok()
-                .or(State::load().session_id)
+                .or(State::load().session())
                 .context("t3rex hasn't synced yet")?;
             pick::float(&session, &thread, pick::Field::Model).await
         }
@@ -344,8 +369,12 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Inbox => install::inbox().await,
-        Command::Rpc { method, payload } => {
-            let client = t3::connect().await?;
+        Command::Rpc {
+            method,
+            payload,
+            env,
+        } => {
+            let client = t3::machine(env.as_deref().unwrap_or(""))?;
             let answer = client
                 .rpc()
                 .await?
@@ -359,20 +388,43 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Wants => {
-            let client = t3::connect().await?;
-            // The same feed sync follows, up to its first synchronized state.
-            let mut events = client.watch_shell(None);
-            let mut shell = t3client::projection::ShellState::default();
-            while let Some(t3client::env::WatchEvent::Item(item)) = events.recv().await {
-                shell.apply(&item);
-                if item["kind"] == "synchronized" {
-                    break;
+            let hub = t3::hub();
+            // The same feeds sync follows, each up to its first synchronized state.
+            let mut shells = Vec::new();
+            for env in hub.envs() {
+                let mut events = env.watch_shell(None);
+                let mut shell = t3client::projection::ShellState::default();
+                let caught_up = tokio::time::timeout(Duration::from_secs(10), async {
+                    while let Some(t3client::env::WatchEvent::Item(item)) = events.recv().await {
+                        shell.apply(&item);
+                        if item["kind"] == "synchronized" {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .await;
+                match caught_up {
+                    Ok(true) => shells.push((env.clone(), shell)),
+                    _ => eprintln!("{} didn't answer", env.name()),
                 }
             }
-            let caps = t3::capabilities(&client);
+            let home = hub.home_id().unwrap_or_default().to_string();
+            let badges = hub.paired() >= 2;
+            let machines: Vec<sync::MachineShell> = shells
+                .iter()
+                .map(|(env, shell)| sync::MachineShell {
+                    env: env.id(),
+                    badge: (badges && env.id() != home).then(|| env.name()),
+                    local: env.is_local(),
+                    shell,
+                    caps: t3::capabilities(env),
+                    offline: false,
+                })
+                .collect();
             let mut inbox = t3client::inbox::Inbox::default();
-            for want in sync::wanted(&shell, &mut inbox, caps, t3::now_ms()) {
-                println!("{:?}\t{}\t{}", want.place, want.thread_id, want.label);
+            for want in sync::wanted(&machines, &mut inbox, t3::now_ms()) {
+                println!("{:?}\t{}\t{}", want.place, want.thread, want.label);
             }
             Ok(())
         }

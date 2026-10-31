@@ -136,7 +136,7 @@ pub async fn follow() {
             save(current.as_deref());
             current.clone()
         });
-        let in_t3 = State::load().session_id.is_some_and(|s| shown() == Some(s));
+        let in_t3 = shown().is_some_and(|s| State::load().sessions().contains(&s));
         let (want, adopt) = decide(in_t3, &current, &yours, wrote.as_ref());
         if adopt {
             save(current.as_deref());
