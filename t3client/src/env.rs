@@ -897,8 +897,13 @@ pub(crate) mod tests {
                 let socket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
                 return (path, socket);
             }
-            let ticket = head.starts_with("POST /api/auth/websocket-ticket/rpc ");
-            assert!(ticket, "{head}");
+            // Anything else is another program on this machine trying local ports, not t3rex.
+            if !head.starts_with("POST /api/auth/websocket-ticket/rpc ") {
+                let gone =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(gone.as_bytes()).await;
+                continue;
+            }
             *tickets += 1;
             let body = json!({"ticket": format!("ticket-{tickets}")}).to_string();
             let reply = format!(

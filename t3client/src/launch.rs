@@ -530,7 +530,7 @@ impl Env {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::SinkExt;
+    use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio_tungstenite::tungstenite::Message;
@@ -894,8 +894,21 @@ mod tests {
             let (_, mut socket) = open(&listener, &mut tickets).await;
             launch(&mut socket, &sent).await;
             drop(socket);
-            let again = tokio::time::timeout(Duration::from_millis(500), listener.accept());
-            again.await.is_err()
+            // t3rex may connect again, since other watches share the connection, but it must
+            // not send the launch again.
+            let resent = tokio::time::timeout(Duration::from_millis(500), async {
+                let (_, mut socket) = open(&listener, &mut tickets).await;
+                while let Some(Ok(frame)) = socket.next().await {
+                    if let Message::Text(text) = frame {
+                        let value: Value = serde_json::from_str(&text).unwrap();
+                        if value["tag"] == LAUNCH_THREAD {
+                            return true;
+                        }
+                    }
+                }
+                false
+            });
+            !matches!(resent.await, Ok(true))
         });
 
         let error = client.launch_thread(&request).await.unwrap_err();
@@ -915,7 +928,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(server.await.unwrap(), "t3rex connected again");
+        assert!(server.await.unwrap(), "t3rex sent the launch again");
     }
 
     /// A launch T3 holds past the timeout is unconfirmed too. The test shortens the 60 seconds
