@@ -66,6 +66,43 @@ pub struct Block {
     /// For `file_change` items: what the TUI shows under the row. The CLI prints only the
     /// header, so `describe_plain` leaves this `None`.
     pub change: Option<FileChange>,
+    /// For user messages: the pictures that went with it.
+    pub images: Vec<Picture>,
+}
+
+/// A picture on a message, as T3 keeps it in its attachments folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub name: String,
+    /// Its file in the attachments folder: the attachment's id and T3's extension for it.
+    pub file: String,
+}
+
+/// The pictures in an item's `attachments`.
+fn pictures(item: &Value) -> Vec<Picture> {
+    let list = item.get("attachments").and_then(Value::as_array);
+    list.into_iter()
+        .flatten()
+        .filter(|a| a["type"] == "image")
+        .filter_map(|a| {
+            let id = a["id"].as_str()?;
+            let safe = id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            // `inferImageExtension` in T3's server, for the types it hands a provider.
+            let ext = match a["mimeType"].as_str()?.to_ascii_lowercase().as_str() {
+                "image/png" => "png",
+                "image/jpeg" | "image/jpg" => "jpg",
+                "image/gif" => "gif",
+                "image/webp" => "webp",
+                _ => return None,
+            };
+            (safe && !id.is_empty()).then(|| Picture {
+                name: str_of(a, "name").to_string(),
+                file: format!("{id}.{ext}"),
+            })
+        })
+        .collect()
 }
 
 /// What one line under a file change's row is, which picks its color in the TUI.
@@ -912,13 +949,17 @@ fn describe_as(item: &Value, runs: &[Value], with_change: bool) -> Option<Block>
         tool_name: str_of(item, "toolName").to_string(),
         request_id: str_of(item, "requestId").to_string(),
         change: None,
+        images: Vec::new(),
     };
     Some(match item_type {
-        "user_message" => block(
-            BlockKind::User,
-            "You".into(),
-            str_of(item, "text").to_string(),
-        ),
+        "user_message" => Block {
+            images: pictures(item),
+            ..block(
+                BlockKind::User,
+                "You".into(),
+                str_of(item, "text").to_string(),
+            )
+        },
         "assistant_message" => block(
             BlockKind::Assistant,
             "Assistant".into(),
@@ -1130,6 +1171,25 @@ pub fn plain_text(state: &ThreadState, last: Option<usize>, include_reasoning: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_keeps_its_pictures() {
+        let item = json!({
+            "id": "i1", "type": "user_message", "text": "", "attachments": [
+                {"type": "image", "id": "t1-77d3960a", "name": "image.png",
+                 "mimeType": "image/png", "sizeBytes": 69},
+                {"type": "image", "id": "t1-aa", "name": "shot.jpeg", "mimeType": "image/jpeg",
+                 "sizeBytes": 9},
+                {"type": "image", "id": "../up", "name": "x.png", "mimeType": "image/png",
+                 "sizeBytes": 9},
+                {"type": "file", "id": "t1-bb", "name": "notes.txt", "mimeType": "text/plain",
+                 "sizeBytes": 9},
+            ]
+        });
+        let block = describe(&item, &[]).expect("a message has a block");
+        let files: Vec<&str> = block.images.iter().map(|p| p.file.as_str()).collect();
+        assert_eq!(files, ["t1-77d3960a.png", "t1-aa.jpg"]);
+    }
     use serde_json::json;
 
     #[test]

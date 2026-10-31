@@ -9,6 +9,8 @@
 //! and the ones on the tailnet that run T3 and aren't paired, which pair from there. Choosing
 //! one loads its projects, models and branches, and the thread launches there.
 //!
+//! Pictures pasted or dropped into the message go with it, shown over its text (`picture`).
+//!
 //! The pane labels itself `t3:<env8>/<thread>` before it launches, with the id the launch will use, so
 //! sync takes the window as the thread's as soon as T3 reports the thread.
 
@@ -33,7 +35,9 @@ use tokio::sync::mpsc;
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
 use crate::compose::{Editor, edit, wrap};
 use crate::icons::{self, Icon, Painter};
+use crate::paste::{self, Got, Image};
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
+use crate::picture::{self, Tray};
 use crate::rex::{Rex, lua_str};
 use crate::t3;
 
@@ -68,6 +72,8 @@ enum Loaded {
     Reachable(String, bool),
     /// Another machine, loaded: its connection, config and shell, or why not.
     Switched(Result<(Arc<Env>, Value, ShellState), String>),
+    /// A picture made ready to send.
+    Picture(picture::Ready),
 }
 
 struct NewThread {
@@ -103,6 +109,11 @@ struct NewThread {
     chip_row: u16,
     chat_width: crate::width::ChatWidth,
     tx: mpsc::UnboundedSender<Loaded>,
+    /// The pictures the message takes, and the row and columns of their ✕s.
+    images: Tray,
+    image_row: u16,
+    image_spans: Vec<usize>,
+    clipboard: paste::Reader,
 }
 
 /// The project menu's item that adds a folder instead.
@@ -703,6 +714,12 @@ return {{}}"#,
         if empty {
             body = vec![format!("{DIM}Ask anything{RESET}")];
         }
+        // The pictures take the box's first row, the text the rest.
+        let pictures =
+            (!self.images.is_empty()).then(|| self.images.row(&mut self.painter, left + 2, inner));
+        if pictures.is_some() {
+            body.insert(0, String::new());
+        }
         while body.len() < 3 {
             body.push(String::new());
         }
@@ -711,7 +728,19 @@ return {{}}"#,
             "─".repeat(width.saturating_sub(2))
         ));
         let first_body = lines.len();
-        for row in &body {
+        self.image_spans.clear();
+        for (i, row) in body.iter().enumerate() {
+            if i == 0
+                && let Some((row, spans, w)) = &pictures
+            {
+                self.image_row = lines.len() as u16;
+                self.image_spans = spans.clone();
+                lines.push(format!(
+                    "{pad}{DIM}│{RESET} {row}{} {DIM}│{RESET}",
+                    " ".repeat(inner.saturating_sub(*w))
+                ));
+                continue;
+            }
             let w = crate::render::visible_width(row);
             lines.push(format!(
                 "{pad}{DIM}│{RESET} {row}{} {DIM}│{RESET}",
@@ -795,7 +824,8 @@ return {{}}"#,
         if let Some((r, c)) = folder_cursor {
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else if self.menu.is_none() && self.focus.is_none() {
-            let (r, c) = (first_body + cursor.0 + 1, left + 3 + cursor.1);
+            let below = usize::from(pictures.is_some());
+            let (r, c) = (first_body + below + cursor.0 + 1, left + 3 + cursor.1);
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else {
             text.push_str("\x1b[?25l");
@@ -852,10 +882,14 @@ return {{}}"#,
             }
             (KeyCode::Up, Some(_)) => self.focus = None,
             (KeyCode::Char('c'), _) if ctrl => {
-                if self.editor.text.is_empty() {
+                if self.editor.text.is_empty() && self.images.is_empty() {
                     return true;
                 }
                 self.editor.take();
+                self.images.clear();
+            }
+            (KeyCode::Backspace, None) if self.editor.cursor == 0 && !self.images.is_empty() => {
+                self.images.pop();
             }
             (KeyCode::Enter, None)
                 if !key
@@ -893,6 +927,12 @@ return {{}}"#,
         }
         let fields = self.fields();
         let col = col as usize + 1;
+        if row == self.image_row
+            && let Some(i) = self.image_spans.iter().position(|x| *x == col)
+        {
+            self.images.remove(i);
+            return;
+        }
         if row == self.chip_row
             && let Some(i) = self
                 .chip_spans
@@ -918,6 +958,29 @@ return {{}}"#,
         }
     }
 
+    /// What a paste came to: pictures, or text to type.
+    fn pasted(&mut self, got: Got) {
+        self.menu = None;
+        self.focus = None;
+        match got {
+            Got::Offer(request) => out(&request),
+            Got::Text(text) => match paste::dropped(&text) {
+                Some(got) => self.pasted(got),
+                None => self
+                    .editor
+                    .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            },
+            Got::Images(images) => {
+                let tx = self.tx.clone();
+                self.images.add(images, move |ready| {
+                    let _ = tx.send(Loaded::Picture(ready));
+                });
+            }
+            Got::Nothing(Some(why)) => self.note = Some((why, true)),
+            Got::Nothing(None) => {}
+        }
+    }
+
     fn send(&mut self) {
         if self.launching {
             return;
@@ -926,6 +989,12 @@ return {{}}"#,
         if prompt.trim().is_empty() {
             return;
         }
+        if self.images.preparing() {
+            self.note = Some(("Getting the picture ready…".into(), false));
+            return;
+        }
+        // Copies: the window becomes the thread's once it launches, and keeps them if it doesn't.
+        let uploads: Vec<Value> = self.images.images().iter().map(Image::upload).collect();
         if self.project.is_empty() {
             self.folder.get_or_insert_with(|| Folder::new("~/"));
             return;
@@ -973,6 +1042,17 @@ return {{}}"#,
             let thread = ThreadRef::new(client.id(), request.thread_id());
             // Named first, so sync finds this window when T3 reports the thread.
             let _ = set_label(&crate::sync::tag(&thread)).await;
+            let request = match client
+                .persist_images(request.thread_id(), request.message_id(), &uploads)
+                .await
+            {
+                Ok(attachments) => request.with_attachments(attachments),
+                Err(e) => {
+                    let _ = set_label("New Thread").await;
+                    let _ = tx.send(Loaded::Launched(Err(format!("{e:#}"))));
+                    return;
+                }
+            };
             let result = match client.launch_thread(&request).await {
                 Ok(receipt) => Ok(ThreadRef::new(client.id(), receipt.thread_id).to_string()),
                 Err(e) => {
@@ -1178,6 +1258,10 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         chip_row: 0,
         chat_width: crate::width::current().0,
         tx: tx.clone(),
+        images: Tray::default(),
+        image_row: 0,
+        image_spans: Vec::new(),
+        clipboard: paste::Reader::default(),
     };
     ui.load(config, &shell);
     for m in machines {
@@ -1200,8 +1284,13 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     let mut paired_at = stamp(&hub);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     crossterm::terminal::enable_raw_mode()?;
-    // The alternate screen, bracketed paste, and clicks (SGR mouse reports).
+    // The alternate screen, bracketed paste, and clicks (SGR mouse reports). Paste events too,
+    // where the filter can take the clipboard's replies.
+    let mut clipboard = crate::scheme::clipboard();
     out("\x1b]2;New Thread\x07\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    if clipboard.is_some() {
+        out(paste::ON);
+    }
     let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     ui.draw();
@@ -1214,11 +1303,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         if ui.launching { continue; }
                         if ui.key(key) { return Ok(()); }
                     }
-                    Some(Ok(Event::Paste(text))) if !ui.launching => {
-                        ui.menu = None;
-                        ui.focus = None;
-                        ui.editor.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
-                    }
+                    Some(Ok(Event::Paste(text))) if !ui.launching => ui.pasted(Got::Text(text)),
                     Some(Ok(Event::Mouse(m))) if !ui.launching => {
                         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                             ui.click(m.column, m.row);
@@ -1232,6 +1317,15 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     }
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
+                    _ => continue,
+                },
+                Some(packet) = async {
+                    match clipboard.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ui.clipboard.feed(&packet) {
+                    Some(got) if !ui.launching => ui.pasted(got),
                     _ => continue,
                 },
                 _ = tick.tick() => {
@@ -1288,6 +1382,9 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         ui.load(config, &shell);
                     }
                     Loaded::Switched(Err(e)) => ui.note = Some((e, true)),
+                    Loaded::Picture(ready) => if let Some(why) = ui.images.ready(ready) {
+                        ui.note = Some((why, true));
+                    },
                 },
             }
             ui.draw();
@@ -1295,6 +1392,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     }
     .await;
     drop(keys);
+    out(paste::OFF);
     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result?;

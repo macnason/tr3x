@@ -4,3 +4,12 @@ members = ["t3client", "t3rex"]
 
 [profile.release]
 strip = true
+
+# Pictures are decoded, scaled and encoded in Reply; unoptimized, a screenshot takes seconds.
+[profile.dev.package]
+image = { opt-level = 3 }
+png = { opt-level = 3 }
+fdeflate = { opt-level = 3 }
+miniz_oxide = { opt-level = 3 }
+image-webp = { opt-level = 3 }
+zune-jpeg = { opt-level = 3 }

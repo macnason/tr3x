@@ -72,6 +72,17 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - Reply answers an approval with the same `respond` call T3's buttons make (`accept`,
   `acceptForSession`, `decline`), and a question's option with its value, as typing its number
   does.
+- Enter to a running thread steers or queues as T3 Code's `followUpBehavior` client setting
+  says (default steer); ⌘Enter does the other, as T3's composer does.
+- Reply turns on kitty paste events (mode 5522). A paste then arrives as the clipboard's MIME
+  types (OSC 5522) with a one-time password; Reply reads a picture when there is one, else the
+  text, so the clipboard is the pasting device's, a phone's too. The input filter takes the
+  replies out before crossterm. A pasted path to an image, as a drop pastes it, attaches the
+  file. Each picture is made ready off the input's thread (`picture.rs`): at most 2000 pixels on
+  the long edge, as T3's web composer sends, then lossless PNG or WebP while that's under 1 MB,
+  else the smallest of those and JPEG (opaque pictures only). HEIC goes through `sips` first.
+  Pictures go up with `assets.persistChatAttachments`
+  first, and the message carries what that returns, as T3's composer does.
 - Markdown renders to ANSI with only the terminal's 16 colours, so it follows any light or dark
   theme. Code is syntax-highlighted; links are OSC 8.
 - Pictures draw with kitty graphics. HTML embeds (`html_render`) are snapshotted with a headless

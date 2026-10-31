@@ -389,6 +389,22 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
                 };
                 lines.push(format!("{bar}{line}"));
             }
+            // Its pictures, where this Mac keeps them; elsewhere, their names.
+            if block.body.trim().is_empty() && !block.images.is_empty() {
+                lines.push(format!("{BLUE}{BOLD}›{RESET}"));
+            }
+            for image in &block.images {
+                let path = ctx
+                    .media
+                    .and_then(|m| Some((m, m.attachments.as_ref()?.join(&image.file))));
+                match path.and_then(|(m, path)| picture_lines(m, &path, width.min(40))) {
+                    Some(picture) => lines.extend(picture.into_iter().map(|l| format!("  {l}"))),
+                    None => lines.push(format!(
+                        "  {DIM}▣ {}{RESET}",
+                        fit(&image.name, width.saturating_sub(4))
+                    )),
+                }
+            }
             if let Some(at) = clock(&block.updated_at, offset) {
                 lines.push(format!("  {DIM}{at}{RESET}"));
             }
@@ -1148,6 +1164,7 @@ mod tests {
             tool_name: String::new(),
             request_id: String::new(),
             change: None,
+            images: Vec::new(),
         }
     }
 
