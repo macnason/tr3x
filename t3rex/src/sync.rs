@@ -103,8 +103,9 @@ pub fn wanted(
 }
 
 /// A subagent gets a window while it works or needs you. A task delegated through T3 keeps
-/// its window until it settles, as a thread of its own would. A provider's own subagent at
-/// rest is history, which T3 shows inside the parent thread.
+/// its window until it settles, as a thread of its own would, unless it was stopped: a
+/// cancelled task never settles, and T3 drops it from the parent. A provider's own subagent
+/// at rest is history, which T3 shows inside the parent thread.
 fn shown_subagent(thread: &Value, now: i64) -> bool {
     if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null() {
         return false;
@@ -118,7 +119,11 @@ fn shown_subagent(thread: &Value, now: i64) -> bool {
             .as_str()
             .is_some_and(|id| id.starts_with("thread:delegated-task:"));
     let settled = thread["settledOverride"] == "settled" || !thread["settledAt"].is_null();
-    active || (delegated && !settled)
+    let stopped = matches!(
+        thread["status"].as_str(),
+        Some("interrupted" | "cancelled" | "rolled_back")
+    );
+    active || (delegated && !settled && !stopped)
 }
 
 /// The thread a subagent works for at the top of its chain: the first ancestor that isn't a
@@ -878,6 +883,12 @@ mod tests {
                     "b",
                     json!({"creationSource": "mcp", "settledAt": "2026-10-30T00:00:00.000Z"}),
                 ),
+                // A cancelled delegated task: never settles, not shown.
+                child(
+                    "cancelled",
+                    "b",
+                    json!({"creationSource": "mcp", "status": "interrupted", "latestRunId": "r"}),
+                ),
             ],
             ..ShellState::default()
         };
@@ -886,7 +897,7 @@ mod tests {
         let ids: Vec<&str> = wants.iter().map(|w| w.thread_id.as_str()).collect();
         let a = ids.iter().position(|i| *i == "a").unwrap();
         assert_eq!(&ids[a + 1..a + 3], &["task", "deep"]);
-        assert!(!ids.contains(&"old") && !ids.contains(&"done"));
+        assert!(!ids.contains(&"old") && !ids.contains(&"done") && !ids.contains(&"cancelled"));
         assert_eq!(wants[a + 1].label, "↳ task");
     }
 
