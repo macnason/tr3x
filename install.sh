@@ -1,20 +1,28 @@
 #!/bin/sh
-# t3rex: Rex as the interface to T3 Code. One command:
+# t3rex: your T3 Code threads, as tabs in Rex. One command:
 #
-#   sh install.sh                        # from a checkout
-#   T3REX_URL=https://…/t3rex-macos-arm64.tar.gz sh install.sh
+#   curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
+#   sh install.sh                        # from a clone, building with cargo
 #
-# Gets the t3rex binary (a prebuilt one from $T3REX_URL, or `cargo build` when Rust is
-# installed), checks that Rex and T3 Code are installed and running, and runs `t3rex install`.
-# Nothing needs sudo. `t3rex uninstall` undoes it.
+# Checks that Rex and T3 Code are installed and running, gets the t3rex binary (a build when
+# run from a clone with Rust installed, else the latest release, checked against its SHA-256),
+# and runs `t3rex install`. T3REX_URL (and T3REX_SHA256) pick another tarball. Nothing needs
+# sudo. `t3rex uninstall` undoes it.
 set -eu
 
+REPO=macnason/t3rex
+ASSET=t3rex-macos-universal.tar.gz
+
+if [ -t 1 ]; then
+  ok() { printf '\033[32m✓\033[0m %s\n' "$*"; }
+  no() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+else
+  ok() { printf '✓ %s\n' "$*"; }
+  no() { printf '✗ %s\n' "$*" >&2; }
+fi
 say() { printf '%s\n' "$*"; }
-ok() { printf '\033[32m✓\033[0m %s\n' "$*"; }
-no() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 
 [ "$(uname -s)" = Darwin ] || { no "t3rex needs macOS"; exit 1; }
-ARCH=$(uname -m)
 
 REX_APP=${T3REX_REX_APP:-"/Applications/Rex Beta.app"}
 REX="$REX_APP/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
@@ -57,33 +65,40 @@ fi
 t3_up || { no "T3 Code is installed but its server isn't answering"; say "  Open T3 Code and sign in, then run this again."; exit 1; }
 ok "T3 Code"
 
-# The binary: prebuilt, else built here.
-HERE=$(cd "$(dirname "$0")" && pwd)
+# The binary: a build from this clone, else a release. Piped into sh, $0 is the shell, so a
+# clone is only one when its files are there.
+HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd || pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 BIN=""
-if [ -n "${T3REX_URL:-}" ]; then
+if [ -z "${T3REX_URL:-}" ] && [ -f "$HERE/t3rex/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+  say "Building t3rex (a minute or two the first time)…"
+  cargo build --release --locked -p t3rex --manifest-path "$HERE/Cargo.toml"
+  BIN="$HERE/target/release/t3rex"
+else
+  URL=${T3REX_URL:-https://github.com/$REPO/releases/latest/download/$ASSET}
+  SUM=${T3REX_SHA256:-}
+  if [ -z "${T3REX_URL:-}" ] && [ -z "$SUM" ]; then
+    /usr/bin/curl -fsSL -o "$WORK/sum" "$URL.sha256" || {
+      no "Couldn't download t3rex from github.com/$REPO"
+      say "  Check your connection, or run this from a clone with Rust installed (https://rustup.rs)."
+      exit 1
+    }
+    SUM=$(cut -d' ' -f1 < "$WORK/sum")
+  fi
   say "Downloading t3rex…"
-  /usr/bin/curl -fL --progress-bar -o "$WORK/t3rex.tar.gz" "$T3REX_URL"
-  if [ -n "${T3REX_SHA256:-}" ]; then
-    echo "$T3REX_SHA256  $WORK/t3rex.tar.gz" | /usr/bin/shasum -a 256 -c - >/dev/null || { no "The download doesn't match T3REX_SHA256"; exit 1; }
+  /usr/bin/curl -fL --progress-bar -o "$WORK/t3rex.tar.gz" "$URL" || { no "Couldn't download $URL"; exit 1; }
+  if [ -n "$SUM" ]; then
+    GOT=$(/usr/bin/shasum -a 256 "$WORK/t3rex.tar.gz" | cut -d' ' -f1)
+    [ "$GOT" = "$SUM" ] || { no "The download's SHA-256 doesn't match"; say "  Expected $SUM, got $GOT."; exit 1; }
   fi
   mkdir "$WORK/x" && tar -xzf "$WORK/t3rex.tar.gz" -C "$WORK/x"
   BIN=$(find "$WORK/x" -type f -name t3rex -perm -u+x | head -1)
-  # A download is quarantined; this one was asked for.
+  # A download can be quarantined; this one was asked for.
   [ -n "$BIN" ] && xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
-elif [ -x "$HERE/dist/t3rex-macos-$ARCH/t3rex" ]; then
-  BIN="$HERE/dist/t3rex-macos-$ARCH/t3rex"
-elif command -v cargo >/dev/null 2>&1 && [ -f "$HERE/Cargo.toml" ]; then
-  say "Building t3rex (a minute or two the first time)…"
-  cargo build --release -p t3rex --manifest-path "$HERE/Cargo.toml"
-  BIN="$HERE/target/release/t3rex"
-else
-  no "No t3rex binary"
-  say "  Set T3REX_URL to a release tarball, or install Rust (https://rustup.rs) and run this from a checkout."
-  exit 1
 fi
 [ -n "$BIN" ] && [ -x "$BIN" ] || { no "Couldn't find t3rex in the download"; exit 1; }
 ok "t3rex $("$BIN" --version | cut -d' ' -f2)"
 
+# Copies itself to ~/.local/bin when it runs from a build or a download.
 T3REX_REX="$REX" "$BIN" install

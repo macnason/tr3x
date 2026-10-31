@@ -26,29 +26,30 @@ Nothing runs an agent of its own. Every message, approval and setting goes to T3
 
 ## Install
 
-Needs macOS, [Rex Beta](https://www.superlogical.com/rex) and T3 Code on the same Mac.
+Needs macOS, [Rex Beta](https://www.superlogical.com/rex), and T3 Code running with at least one
+project.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
+```
+
+That opens Rex and T3 if they aren't running, downloads the latest release and checks its
+SHA-256, installs `~/.local/bin/t3rex`, adds its actions and keys to Rex's config, and switches
+Rex to **T3 Code**. Rex starts t3rex's sync as its config loads, so it runs whenever Rex does.
+
+From a clone, `install.sh` builds with cargo instead:
 
 ```sh
 git clone https://github.com/macnason/t3rex && cd t3rex
 sh install.sh
 ```
 
-From a checkout, `install.sh` builds with cargo, so you'll need a Rust toolchain. With a
-release build there's no Rust needed:
-
-```sh
-T3REX_URL=https://…/t3rex-macos-arm64.tar.gz sh install.sh
-```
-
-`install.sh` opens Rex and T3 if they aren't running, installs `~/.local/bin/t3rex`, adds its
-actions to Rex's config, starts a launchd agent that keeps the session in sync, and switches Rex
-to **T3 Code**. [Every step](docs/how-it-works.md#install-in-detail) is undone by:
+`t3rex doctor` checks each part and says how to fix what isn't right.
+[Every step](docs/how-it-works.md#install-in-detail) is undone by:
 
 ```sh
 t3rex uninstall
 ```
-
-`t3rex doctor` checks each part if something looks off.
 
 ## First run
 
@@ -116,3 +117,7 @@ More in [how it works](docs/how-it-works.md).
 - T3 Code, which does the actual work.
 - [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), vendored for its T3 client,
   auth and sidebar logic.
+
+## License
+
+MIT, by Mac ([macnason](https://github.com/macnason)).

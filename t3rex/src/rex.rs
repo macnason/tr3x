@@ -14,6 +14,10 @@ use tokio::process::Command;
 const BUNDLED: &str =
     "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
 
+/// Never start a Rex server of our own: one that has stopped is Rex quitting, and sync waits
+/// for the app's to come back.
+pub const NO_AUTOSTART: [&str; 1] = ["--autostart=false"];
+
 #[derive(Clone, Debug)]
 pub struct Rex {
     pub bin: PathBuf,
@@ -40,6 +44,7 @@ impl Rex {
     async fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String> {
         let mut command = Command::new(&self.bin);
         command
+            .args(NO_AUTOSTART)
             .args(args)
             .stdin(if stdin.is_some() {
                 Stdio::piped()

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Development: rebuild, close t3rex's session, and start sync again from a clean state, so every
 # pane runs the new binary. Uses the state dir in $T3REX_STATE_DIR (required, so it never
-# touches an installed setup's state by accident).
+# touches an installed setup's state by accident). The sync Rex runs for an install has its own
+# state and lock, and carries on.
 set -e
 : "${T3REX_STATE_DIR:?set T3REX_STATE_DIR to a scratch directory}"
 case "$T3REX_STATE_DIR" in
@@ -17,6 +18,6 @@ if [ -f "$T3REX_STATE_DIR/state.json" ]; then
 fi
 rm -rf "$T3REX_STATE_DIR"
 mkdir -p "$T3REX_STATE_DIR"
-nohup "$HERE/target/release/t3rex" sync > "$T3REX_STATE_DIR/sync.log" 2>&1 &
+nohup "$HERE/target/release/t3rex" sync --log > /dev/null 2>&1 &
 sleep "${WAIT:-6}"
 cat "$T3REX_STATE_DIR/sync.log"

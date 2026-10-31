@@ -5,6 +5,13 @@ what T3 says into one Rex session.
 
 ## The session
 
+- Rex runs sync. `~/.config/rex/t3rex.lua` starts `t3rex sync` as Rex loads its config, as a
+  detached command that outlives the load, a config reload and a restart of Rex's server. Each
+  load starts another; the sync already running holds `sync.lock`, so the new one leaves at
+  once. The actions that need sync (⌃⌘I, ⌃⌘N) start it again if it isn't running. Sync never
+  starts a Rex server itself: while Rex is quit it waits, and picks up when Rex is back. A lost
+  connection to T3 starts over after a pause, from 2 seconds up to a minute. It logs to
+  `~/.local/state/t3rex/sync.log`.
 - `t3rex sync` follows T3's shell subscription (`orchestration.subscribeShell`) and reconciles
   the Rex session after each change: it creates, closes, relabels and reorders windows with one
   Lua script per change through `rex do`. Blocks are created and disowned in that same
@@ -64,28 +71,50 @@ never prompts. Set `T3REX_SAVED_LOGIN=1` to use t3term's saved login instead.
 `t3rex install`:
 
 1. checks Rex and T3 answer,
-2. copies the binary to `~/.local/bin/t3rex`,
-3. writes `~/.config/rex/t3rex.lua` (actions and keys) and adds one line, `require("t3rex")`,
-   to `~/.config/rex/init.lua`, keeping a copy of the old file as `init.lua.before-t3rex`,
-4. sets one Rex app preference, `Workspace.inactivePaneFadeMode none` (Settings → Interface →
-   Pane Behavior → Fade inactive panes: Off), so the conversation keeps full contrast while you
-   type in Reply. The old value is kept in `~/.local/state/t3rex/rex-defaults.json` and put back
-   by `uninstall`,
-5. loads a launchd agent, `com.t3rex.sync`, that keeps `t3rex sync` running across logins,
-6. waits for the first sync and switches Rex to the **T3 Code** session.
+2. installs the binary: a build or a download is copied to `~/.local/bin/t3rex`; one that
+   already lives somewhere else, such as a package manager's, stays where it is,
+3. moves an earlier install over: removes the background agent it ran sync as
+   (`com.t3rex.sync`), stops a running sync, and puts back the pane fading earlier versions
+   turned off,
+4. writes `~/.config/rex/t3rex.lua` (actions, keys and sync) and adds one line,
+   `require("t3rex")`, to `~/.config/rex/init.lua`, keeping a copy of the old file as
+   `init.lua.before-t3rex`,
+5. reloads Rex's config, which starts sync,
+6. waits for the first sync and switches Rex to the **T3 Code** session. If sync doesn't
+   arrive in 20 seconds, it prints the end of `sync.log` and exits with an error.
 
-`t3rex uninstall` undoes all of it: it stops the agent, closes only the session t3rex made,
-removes the `require` line and the actions, restores the Rex preference, and deletes the
-binary and its state.
+`t3rex uninstall` undoes all of it: it removes the `require` line and the actions, stops sync,
+closes only the session t3rex made, and deletes the binary, its state and its caches.
+
+`t3rex doctor` checks Rex, the config line, that Rex loaded the config without errors, T3 and
+the capabilities t3rex needs (`threadSettlement`, `threadSnooze`, orchestration protocol 2),
+that sync is running and what it last logged, and the session. Each ✗ comes with its fix, and
+any ✗ exits non-zero. A missing headless Chromium is only a warning.
+
+## Pane fading
+
+Rex fades inactive panes, which dims the conversation while you type in Reply. It's one
+setting for the whole app (Settings → Interface → Pane Behavior → Fade inactive panes), and
+t3rex leaves it alone by default. With `"paneFade": "auto"` in `~/.config/t3rex/settings.json`,
+sync turns fading off while the Rex app on this Mac shows **T3 Code** and puts your own setting
+back everywhere else. A change you make in Rex's settings outside T3 Code becomes your
+setting. Taking the key out puts your setting back.
+
+Rex's server can't say which session an app shows, since every app is attached to every
+session. The app's own `Workspace.lastFocusedSession` preference follows it within a second, so
+sync reads that. Whether the running app applies a changed fade setting without a restart is
+the open question; the app only links the in-process change notification for its preferences.
 
 ## Repo layout
 
 | Path | |
 |---|---|
-| `t3rex/` | The crate: `sync.rs`, `chat.rs`, `compose.rs`, `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `install.rs`, `rex.rs`, `t3.rs`, `state.rs`. |
+| `t3rex/` | The crate: `sync.rs`, `chat.rs`, `compose.rs`, `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
 | `t3term/` | [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT), vendored. t3rex uses its T3 client, auth and sidebar logic. The only changes are a small public API at the end of `src/tui/sidebar.rs`, re-exported from `src/tui/mod.rs`, and an `access:read` scope in `src/auth.rs`. |
-| `rex/t3rex.lua` | The Rex actions and key bindings `install` writes out. |
-| `scripts/` | `release` builds `dist/t3rex-macos-<arch>.tar.gz` and its SHA-256. `shot` screenshots the Rex window. `frame.py` and `render-frame` draw a window from Rex's own screen data when the Mac is locked (Rex draws nothing then). `morning-shots` waits for an unlock and takes real screenshots. `dev-restart` and `size-panes` are for development. |
+| `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
+| `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
+| `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
+| `scripts/dev-restart` | A sync of your own build, with its own state, for development. |
 | `docs/` | This file, screenshots (`screens/`) and frames drawn from Rex's screen data (`frames/`). |
 
 ## Development
@@ -96,13 +125,15 @@ cargo clippy --release -p t3rex --all-targets
 T3REX_STATE_DIR=/tmp/t3rex-dev scripts/dev-restart   # a sync with its own state, not the installed one
 ```
 
+To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest release.
+
 ## Other limits
 
 - Rex has no per-pane setting for its pane-header buttons (split, float, zoom, close), so the
   Reply pane still shows them. The app has a global `Workspace.hiddenPaneButtons` preference,
   but `defaults write` with the button names didn't take effect in Rex 0.1.0 (1642) while it
   ran, and hiding them everywhere would also hide them in your other sessions. Fading is
-  likewise only global.
+  likewise only global; see [pane fading](#pane-fading).
 - Launching on a linked device: T3's linked environments (`peerLinks.list`) show in the device
   chip, but a client can only launch on a server it is paired with. Picking one opens T3 Code
   with the message on the clipboard. Cloning a project to another machine

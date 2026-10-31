@@ -1,0 +1,43 @@
+name: release
+
+# A tag like v0.2.0 builds a universal macOS binary and attaches it to that tag's release,
+# where install.sh downloads the latest from.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      NAME: t3rex-macos-universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: cargo build --release --locked -p t3rex --target aarch64-apple-darwin
+      - run: cargo build --release --locked -p t3rex --target x86_64-apple-darwin
+      - name: Package
+        run: |
+          mkdir -p "dist/$NAME"
+          lipo -create -output "dist/$NAME/t3rex" \
+            target/aarch64-apple-darwin/release/t3rex \
+            target/x86_64-apple-darwin/release/t3rex
+          codesign --force --sign - "dist/$NAME/t3rex"
+          lipo -info "dist/$NAME/t3rex"
+          "dist/$NAME/t3rex" --version
+          cp README.md LICENSE "dist/$NAME/"
+          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          cat "dist/$NAME.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber
