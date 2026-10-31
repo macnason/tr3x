@@ -11,6 +11,7 @@ mod pick;
 mod picker;
 mod render;
 mod rex;
+mod slash;
 mod state;
 mod sync;
 mod t3;

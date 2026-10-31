@@ -69,7 +69,7 @@ another.
 | Answer | A pending question takes the input as its answer. A number picks that option. |
 | Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. ⌃⌘S or `/settle` settle it whatever it's doing. |
 | Snooze | ⌃⌘Z for an hour, or `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
-| Commands | `/steer …` `/settle` `/snooze` `/wake` `/pin` `/unpin` `/archive` `/stop` `/model` `/effort` `/mode` `/open` `/width` |
+| Commands | `/steer …` `/settle` `/snooze` `/wake` `/pin` `/unpin` `/archive` `/stop` `/model` `/effort` `/mode` `/open` `/width`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. |
 | Keys | ⌃⌘N new thread · ⌃⌘M model · ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code |
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
 
