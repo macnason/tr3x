@@ -14,9 +14,9 @@ use base64::Engine;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use serde_json::Value;
-use t3term::client::WatchEvent;
-use t3term::projection::{ShellState, ThreadState};
-use t3term::transcript::{self, Block, BlockKind};
+use t3client::env::WatchEvent;
+use t3client::projection::{ShellState, ThreadState};
+use t3client::transcript::{self, Block, BlockKind};
 
 use std::collections::HashMap;
 
@@ -96,7 +96,7 @@ pub fn local_offset_minutes() -> i64 {
 
 /// `12:37 PM` for a T3 timestamp, in local time.
 fn clock(iso: &str, offset_minutes: i64) -> Option<String> {
-    let ms = t3term::tui::parse_iso(iso)?;
+    let ms = t3client::inbox::parse_iso(iso)?;
     let minutes = (ms / 60_000 + offset_minutes).rem_euclid(24 * 60);
     let (h, m) = (minutes / 60, minutes % 60);
     let (h12, half) = match h {
@@ -724,7 +724,7 @@ impl Pane {
             let since = state
                 .active_run()
                 .and_then(|r| r["startedAt"].as_str().or(r["requestedAt"].as_str()))
-                .and_then(t3term::tui::parse_iso)
+                .and_then(t3client::inbox::parse_iso)
                 .map(|at| duration(t3::now_ms() - at))
                 .unwrap_or_default();
             live.push(format!(
@@ -760,7 +760,7 @@ impl Pane {
         let run = state.latest_run()?;
         let done = run["completedAt"].as_str()?;
         let started = run["startedAt"].as_str().or(run["requestedAt"].as_str())?;
-        let took = t3term::tui::parse_iso(done)? - t3term::tui::parse_iso(started)?;
+        let took = t3client::inbox::parse_iso(done)? - t3client::inbox::parse_iso(started)?;
         let at = clock(done, self.offset_minutes)?;
         let mark = match run["status"].as_str() {
             Some("failed") => format!("{RED}✗{RESET} {DIM}Failed"),
@@ -801,7 +801,7 @@ impl Pane {
 
     fn set_status(&mut self, thread: Option<&Value>, state: Option<&ThreadState>) {
         let Some(thread) = thread else { return };
-        let word = t3term::tui::status_label(thread, t3::now_ms());
+        let word = t3client::inbox::status_label(thread, t3::now_ms());
         let title = one_line(thread["title"].as_str().unwrap_or(""));
         let ask = state.and_then(crate::ask::line);
         let seq = status_sequence(word, ask.as_deref(), &title);
@@ -885,7 +885,7 @@ fn spawn_handoff() -> mpsc::UnboundedSender<String> {
 }
 
 pub async fn run(thread_id: String) -> Result<()> {
-    let client = t3::connect(true).await?;
+    let client = t3::connect().await?;
     let mut thread_events = client.watch_thread(&thread_id, None);
     let mut shell_events = client.watch_shell(None);
     let scheme = crate::scheme::listen();
@@ -912,7 +912,7 @@ pub async fn run(thread_id: String) -> Result<()> {
 }
 
 async fn event_loop(
-    client: &std::sync::Arc<t3term::client::Client>,
+    client: &std::sync::Arc<t3client::env::Env>,
     thread_id: &str,
     thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -922,13 +922,9 @@ async fn event_loop(
     // The provider's driver for each instance, so the pane can take its provider's name, and
     // the address T3 serves its web app at, for the thread's link.
     let config = client.server_config().await.ok();
-    let link = crate::link::thread(config.as_ref(), &client.runtime.environment_id, thread_id);
+    let link = crate::link::thread(config.as_ref(), client.id(), thread_id);
     let handoff = spawn_handoff();
-    let mut pane = Pane::new(
-        Media::new(client.runtime.state_dir.as_deref()),
-        link,
-        snap_tx,
-    );
+    let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
     let mut state: Option<ThreadState> = None;
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
@@ -954,7 +950,7 @@ async fn event_loop(
             },
             event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
-                let thread = t3term::tui::find_thread_in(&shell, thread_id);
+                let thread = t3client::inbox::find_thread(&shell, thread_id);
                 pane.set_status(thread, state.as_ref());
             },
             event = input.next() => match event {
@@ -1022,7 +1018,7 @@ async fn event_loop(
             }
         }
         if dirty && let Some(s) = state.as_ref() {
-            let thread = t3term::tui::find_thread_in(&shell, thread_id);
+            let thread = t3client::inbox::find_thread(&shell, thread_id);
             let project = thread
                 .and_then(|t| t["projectId"].as_str())
                 .and_then(|p| shell.projects.iter().find(|x| x["id"] == p))
@@ -1033,8 +1029,8 @@ async fn event_loop(
             dirty = false;
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
-        if focused && let Some(thread) = t3term::tui::find_thread_in(&shell, thread_id) {
-            let word = t3term::tui::status_label(thread, t3::now_ms());
+        if focused && let Some(thread) = t3client::inbox::find_thread(&shell, thread_id) {
+            let word = t3client::inbox::status_label(thread, t3::now_ms());
             let key = thread["updatedAt"].as_str().unwrap_or_default().to_string();
             if matches!(word, Some("Done" | "Woke")) && visited_for != key {
                 visited_for = key;
@@ -1047,7 +1043,7 @@ async fn event_loop(
 
 /// Prints a thread's blocks, for working on this pane.
 pub async fn dump(thread_id: String) -> Result<()> {
-    let client = t3::connect(false).await?;
+    let client = t3::connect().await?;
     let state = client.thread(&thread_id, true).await?;
     for b in transcript::blocks(&state) {
         println!(

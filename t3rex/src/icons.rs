@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde_json::{Value, json};
-use t3term::client::Client;
+use t3client::env::Env;
 
 use crate::chat::{BOLD, RESET};
 
@@ -169,7 +169,7 @@ async fn as_png(src: &Path, dest: &Path) -> Option<PathBuf> {
 }
 
 /// The project's icon as T3 would draw it. Fetches and caches its favicon when it has one.
-pub async fn project(client: &Client, project: &Value) -> Icon {
+pub async fn project(client: &Env, project: &Value) -> Icon {
     if let Some(icon) = chosen(project) {
         return icon;
     }
@@ -181,6 +181,9 @@ pub async fn project(client: &Client, project: &Value) -> Icon {
         resource["path"] = json!(path);
     }
     let Ok(rpc) = client.rpc().await else {
+        return fallback(project);
+    };
+    let Ok(origin) = client.api().await.map(|api| api.origin) else {
         return fallback(project);
     };
     let Ok(asset) = rpc
@@ -211,10 +214,7 @@ pub async fn project(client: &Client, project: &Value) -> Icon {
     let fetched = tokio::process::Command::new("/usr/bin/curl")
         .args(["-fsS", "--max-time", "10", "-o"])
         .arg(&raw)
-        .arg(format!(
-            "{}{url}",
-            client.runtime.origin.trim_end_matches('/')
-        ))
+        .arg(format!("{}{url}", origin.trim_end_matches('/')))
         .status()
         .await
         .is_ok_and(|s| s.success());
@@ -228,7 +228,7 @@ pub async fn project(client: &Client, project: &Value) -> Icon {
 }
 
 /// Every project's icon, by project id.
-pub async fn projects(client: &Client, projects: &[Value]) -> HashMap<String, Icon> {
+pub async fn projects(client: &Env, projects: &[Value]) -> HashMap<String, Icon> {
     let mut out = HashMap::new();
     for p in projects {
         if let Some(id) = p["id"].as_str() {
@@ -310,7 +310,7 @@ pub fn program_name(driver: &str) -> Option<&'static str> {
 pub fn driver_of<'a>(config: Option<&'a Value>, instance: &'a str) -> &'a str {
     config
         .and_then(|c| {
-            t3term::models::providers(c)
+            t3client::models::providers(c)
                 .iter()
                 .find(|p| p["instanceId"].as_str() == Some(instance))
         })
@@ -363,7 +363,6 @@ pub fn become_program(driver: &str) {
     let program = as_program(&exe, driver);
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     crate::scheme::stop();
-    t3term::auth::revoke_all_sessions();
     use std::os::unix::process::CommandExt;
     let _ = std::process::Command::new(&program)
         .arg0(&program)

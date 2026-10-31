@@ -183,14 +183,8 @@ impl Target {
 }
 
 fn main() {
-    // A temporary login per process, revoked on exit, keeps the Keychain out of it: sync and
-    // the panes Rex runs can't answer a Keychain prompt.
-    if std::env::var_os("T3REX_SAVED_LOGIN").is_none() {
-        // SAFETY: no other thread exists yet.
-        unsafe { std::env::set_var("T3TERM_NO_SAVED_LOGIN", "1") };
-    }
-    // A pane Rex starts without a login shell gets Rex's PATH alone; t3term runs `ps` and
-    // the T3 server's own command, so the system folders go on the end.
+    // A pane Rex starts without a login shell gets Rex's PATH alone; pairing runs `ps`,
+    // `ssh` and T3's own command, so the system folders go on the end.
     let path = std::env::var("PATH").unwrap_or_default();
     let missing: Vec<&str> = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         .into_iter()
@@ -226,7 +220,6 @@ fn main() {
     });
     runtime.shutdown_timeout(Duration::from_millis(200));
     scheme::stop();
-    t3term::auth::revoke_all_sessions();
     std::process::exit(code);
 }
 
@@ -246,7 +239,7 @@ async fn terminated() -> i32 {
 
 async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
     let thread = target.resolve().await?;
-    let client = t3::connect(true).await?;
+    let client = t3::connect().await?;
     let first = client.dispatch(t3::command(&thread, &action)).await;
     // T3 won't settle or archive a thread mid-run. Settling says the thread is finished, so
     // stop the run, wait for T3 to see it stop, and try again.
@@ -257,8 +250,8 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
     if !(running && matches!(action, Lifecycle::Settle | Lifecycle::Archive)) {
         return first.map(drop);
     }
-    let run_id = |shell: &t3term::projection::ShellState| {
-        t3term::tui::find_thread_in(shell, &thread)
+    let run_id = |shell: &t3client::projection::ShellState| {
+        t3client::inbox::find_thread(shell, &thread)
             .and_then(|t| t["activeRunId"].as_str())
             .map(str::to_string)
     };
@@ -326,7 +319,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Inbox => install::inbox().await,
         Command::Rpc { method, payload } => {
-            let client = t3::connect_access().await?;
+            let client = t3::connect().await?;
             let answer = client
                 .rpc()
                 .await?
@@ -340,18 +333,18 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Wants => {
-            let client = t3::connect(false).await?;
+            let client = t3::connect().await?;
             // The same feed sync follows, up to its first synchronized state.
             let mut events = client.watch_shell(None);
-            let mut shell = t3term::projection::ShellState::default();
-            while let Some(t3term::client::WatchEvent::Item(item)) = events.recv().await {
+            let mut shell = t3client::projection::ShellState::default();
+            while let Some(t3client::env::WatchEvent::Item(item)) = events.recv().await {
                 shell.apply(&item);
                 if item["kind"] == "synchronized" {
                     break;
                 }
             }
             let caps = t3::capabilities(&client);
-            let mut inbox = t3term::tui::Inbox::default();
+            let mut inbox = t3client::inbox::Inbox::default();
             for want in sync::wanted(&shell, &mut inbox, caps, t3::now_ms()) {
                 println!("{:?}\t{}\t{}", want.place, want.thread_id, want.label);
             }

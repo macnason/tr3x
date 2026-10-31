@@ -101,7 +101,7 @@ fn ours() -> PathBuf {
 
 /// T3 Code's client settings, where its Chat width lives.
 fn t3s() -> PathBuf {
-    t3term::discovery::t3_home().join("userdata/client-settings.json")
+    t3client::descriptor::t3_home().join("userdata/client-settings.json")
 }
 
 /// t3rex's own settings, `~/.config/t3rex/settings.json`.

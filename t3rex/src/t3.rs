@@ -1,37 +1,31 @@
-//! The T3 side: connecting through t3term's client, and the thread commands T3's sidebar sends.
-//! The command shapes are `OrchestrationV2Command` in T3's
+//! The T3 side: the machines t3rex is paired with, through t3client, and the thread commands
+//! T3's sidebar sends. The command shapes are `OrchestrationV2Command` in T3's
 //! `packages/contracts/src/orchestrationV2.ts`.
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use t3term::auth::Scope;
-use t3term::client::Client;
-use t3term::tui::Capabilities;
+use t3client::env::Env;
+use t3client::hub::Hub;
+use t3client::inbox::Capabilities;
 
-pub async fn connect(operate: bool) -> Result<Arc<Client>> {
-    let scopes: &[Scope] = if operate {
-        &[Scope::Read, Scope::Operate]
-    } else {
-        &[Scope::Read]
-    };
-    let target = t3term::environments::target(None).await?;
-    // Panes live as long as their windows, so the login outlasts any session; each process
-    // revokes its own on exit.
-    Ok(Arc::new(Client::connect(&target, scopes, "30d").await?))
+/// Every machine t3rex knows, from its state directory. Reads files only.
+pub fn hub() -> Hub {
+    Hub::load(crate::state::dir())
 }
 
-/// A connection that can also read the server's linked environments.
-pub async fn connect_access() -> Result<Arc<Client>> {
-    let target = t3term::environments::target(None).await?;
-    Ok(Arc::new(
-        Client::connect(&target, &[Scope::Read, Scope::AccessRead], "1d").await?,
-    ))
+/// This Mac's T3, connected. The first connection pairs t3rex with it through T3's own CLI.
+pub async fn connect() -> Result<Arc<Env>> {
+    let env = hub()
+        .home()
+        .context("T3 Code isn't set up on this Mac yet. Open T3 Code once.")?;
+    env.rpc().await?;
+    Ok(env)
 }
 
-pub fn capabilities(client: &Client) -> Capabilities {
-    Capabilities::of(&client.runtime.capabilities)
+pub fn capabilities(env: &Env) -> Capabilities {
+    Capabilities::of(&env.capabilities())
 }
 
 pub fn now_ms() -> i64 {
@@ -99,7 +93,7 @@ pub fn command(thread_id: &str, action: &Lifecycle) -> Value {
 }
 
 /// Records that the user looked at the thread, which clears Done and Woke in T3.
-pub async fn visit(client: &Client, thread_id: &str) -> Result<()> {
+pub async fn visit(client: &Env, thread_id: &str) -> Result<()> {
     client
         .dispatch(json!({
             "type": "thread.visit",

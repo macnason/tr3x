@@ -18,9 +18,9 @@ use crossterm::event::{
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use t3term::client::Client;
-use t3term::launch::{LaunchRequest, Workspace};
-use t3term::models;
+use t3client::env::Env;
+use t3client::launch::{LaunchRequest, Workspace};
+use t3client::models;
 use tokio::sync::mpsc;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
@@ -57,7 +57,7 @@ enum Loaded {
 }
 
 struct NewThread {
-    client: Arc<Client>,
+    client: Arc<Env>,
     config: Value,
     projects: Vec<Value>,
     /// The most recent thread of each project, for its model.
@@ -876,17 +876,17 @@ return {{}}"#,
 fn unavailable(error: &anyhow::Error) -> bool {
     error
         .chain()
-        .filter_map(|e| e.downcast_ref::<t3term::error::T3Error>())
-        .any(|e| e.exit_code == t3term::error::exit::UNAVAILABLE)
+        .filter_map(|e| e.downcast_ref::<t3client::error::T3Error>())
+        .any(|e| e.exit_code == t3client::error::exit::UNAVAILABLE)
 }
 
 /// T3, once it answers. Until then the pane says what's wrong, in place of the composer, and
 /// tries again every few seconds, so it opens as soon as T3 Code does.
-async fn connect() -> Result<(Arc<Client>, Value, t3term::projection::ShellState)> {
+async fn connect() -> Result<(Arc<Env>, Value, t3client::projection::ShellState)> {
     let mut shown = false;
     loop {
         let attempt = async {
-            let client = t3::connect(true).await?;
+            let client = t3::connect().await?;
             let (config, shell) = tokio::try_join!(client.server_config(), client.shell())?;
             anyhow::Ok((client, config, shell))
         }
@@ -1087,12 +1087,10 @@ pub async fn run(welcome: bool) -> Result<()> {
     if let Some(dir) = &cwd {
         let _ = std::env::set_current_dir(dir);
     }
-    // This pane becomes the conversation. The login goes first; exec skips the exit that
-    // would revoke it.
+    // This pane becomes the conversation.
     drop(ui);
     drop(client);
     crate::scheme::stop();
-    t3term::auth::revoke_all_sessions();
     use std::os::unix::process::CommandExt;
     let error = std::process::Command::new(&program)
         .arg0(&program)

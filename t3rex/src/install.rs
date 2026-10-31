@@ -157,7 +157,10 @@ fn remove_require(dir: &Path) -> Result<()> {
 fn lua(bin: &Path, rex: &Path) -> String {
     LUA.replace("@T3REX@", &bin.to_string_lossy())
         .replace("@REX@", &rex.to_string_lossy())
-        .replace("@T3HOME@", &t3term::discovery::t3_home().to_string_lossy())
+        .replace(
+            "@T3HOME@",
+            &t3client::descriptor::t3_home().to_string_lossy(),
+        )
         .replace("@STATE@", &state::dir().to_string_lossy())
 }
 
@@ -242,16 +245,14 @@ pub async fn install() -> Result<()> {
         bail!("open Rex first, then run t3rex install again");
     }
     step(true, "Rex", &rex.bin.display().to_string());
-    let client = crate::t3::connect(false)
+    let client = crate::t3::connect()
         .await
         .context("couldn't reach T3 Code; is it running?")?;
+    let found = client.descriptor().expect("a connected machine");
     step(
         true,
         "T3 Code",
-        &format!(
-            "{} at {}",
-            client.runtime.server_version, client.runtime.origin
-        ),
+        &format!("{} at {}", found.server_version, found.origin),
     );
 
     let exe = std::env::current_exe()?;
@@ -470,9 +471,9 @@ pub async fn doctor() -> Result<()> {
         );
     }
 
-    match crate::t3::connect(false).await {
+    match crate::t3::connect().await {
         Ok(client) => {
-            let runtime = &client.runtime;
+            let runtime = client.descriptor().expect("a connected machine");
             step(
                 true,
                 "T3 server",
@@ -484,7 +485,7 @@ pub async fn doctor() -> Result<()> {
                     &format!(
                         "{:?}, t3rex speaks {}",
                         runtime.protocol_version,
-                        t3term::discovery::PROTOCOL_VERSION
+                        t3client::descriptor::PROTOCOL_VERSION
                     ),
                     "Update T3 Code, or t3rex if T3 is newer.",
                 );
@@ -573,9 +574,8 @@ pub async fn doctor() -> Result<()> {
 
 /// Opens the thread in the T3 Code desktop app.
 pub async fn open_in_t3(thread: &str) -> Result<()> {
-    let client = crate::t3::connect(false).await?;
-    let runtime = &client.runtime;
-    let url = format!("t3code://threads/{}/{}", runtime.environment_id, thread);
+    let client = crate::t3::connect().await?;
+    let url = format!("t3code://threads/{}/{}", client.id(), thread);
     let opened = tokio::process::Command::new("/usr/bin/open")
         .arg(&url)
         .output()

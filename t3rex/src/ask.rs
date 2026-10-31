@@ -2,12 +2,12 @@
 //! pane shows it over its chips, and the conversation pane reports it to Rex.
 
 use serde_json::Value;
-use t3term::projection::ThreadState;
+use t3client::projection::ThreadState;
 
 /// Agent-written text as one plain line: no escape sequences or other controls, which could
 /// redraw the pane and show something other than what is being asked.
 pub fn clean(text: &str) -> String {
-    t3term::transcript::plain(&crate::render::strip_ansi(text))
+    t3client::transcript::plain(&crate::render::strip_ansi(text))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

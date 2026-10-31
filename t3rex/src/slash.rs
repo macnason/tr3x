@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::Value;
-use t3term::client::Client;
-use t3term::models;
+use t3client::env::Env;
+use t3client::models;
 
 use crate::compose::Editor;
 use crate::icons::{Icon, Painter};
@@ -107,7 +107,7 @@ fn cwd<'a>(thread: &'a Value, roots: &'a HashMap<String, String>) -> Option<&'a 
 
 /// Provider-written text as one plain line, without controls that could redraw the pane.
 fn clean(text: &str) -> String {
-    t3term::transcript::plain(text)
+    t3client::transcript::plain(text)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -387,7 +387,7 @@ pub struct Slash {
 }
 
 impl Slash {
-    pub fn new(client: Arc<Client>) -> Slash {
+    pub fn new(client: Arc<Env>) -> Slash {
         let slash = Slash::default();
         let roots = slash.roots.clone();
         tokio::spawn(async move {

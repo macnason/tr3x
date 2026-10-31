@@ -16,8 +16,8 @@ what T3 says into one Rex session.
   the Rex session after each change: it creates, closes, relabels and reorders windows with one
   Lua script per change through `rex do`. Blocks are created and disowned in that same
   connection, so they size to whichever Rex app is looking at them.
-- The order is T3's own sidebar logic, from t3term's port of `Sidebar.logic.ts` and
-  `threadInbox.ts`. A pinned thread stays put while it works, as in T3.
+- The order is T3's own sidebar logic, a port of `Sidebar.logic.ts` and `threadInbox.ts`
+  in `t3client`. A pinned thread stays put while it works, as in T3.
 - A window the user closes is noticed on sync's next pass (at most 5 seconds). Sync settles the
   thread with a plain `thread.settle`, never stopping a run. A thread that's running or waiting
   on you is only hidden until it changes. Every window going at once is the session closing,
@@ -89,10 +89,16 @@ reports the thread. Ids longer than Rex's 128-character labels are tagged `t3#` 
 A project added from the project chip goes to T3 as `projects.mutate` with `project.create`,
 the call `t3 project add` makes, titled after its folder.
 
-## Logging in to T3
+## Pairing with T3
 
-Each process logs in to T3 with a temporary session and revokes it on exit, so the Keychain
-never prompts. Set `T3REX_SAVED_LOGIN=1` to use t3term's saved login instead.
+t3rex pairs with T3 the way T3's own apps do. A one-time pairing code, from
+`t3 auth pairing create`, is traded at `POST /oauth/token` for a token that lasts 30 days. It
+shows in T3 → Settings → Connections as **Rex on** and this Mac's name. The first t3rex process
+that needs T3 pairs through T3's own CLI on this Mac, and every later one reads the token from
+`credentials.json` in t3rex's state directory (mode 0600). A token is only sent to a server
+whose `/.well-known/t3/environment` names the machine it was issued for. One that's rejected
+or a day from running out is replaced the same way, under `pair.lock`, so panes that find it
+at once pair only once.
 
 ## Install, in detail
 
@@ -138,7 +144,7 @@ the open question; the app only links the in-process change notification for its
 | Path | |
 |---|---|
 | `t3rex/` | The crate: `sync.rs`, `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
-| `t3term/` | [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT), vendored. t3rex uses its T3 client, auth and sidebar logic. The only changes are a small public API at the end of `src/tui/sidebar.rs`, re-exported from `src/tui/mod.rs`, and an `access:read` scope in `src/auth.rs`. |
+| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
@@ -148,8 +154,8 @@ the open question; the app only links the in-process change notification for its
 ## Development
 
 ```sh
-cargo test --release -p t3rex
-cargo clippy --release -p t3rex --all-targets
+cargo test --release
+cargo clippy --release --all-targets
 T3REX_STATE_DIR=/tmp/t3rex-dev scripts/dev-restart   # a sync with its own state, not the installed one
 ```
 

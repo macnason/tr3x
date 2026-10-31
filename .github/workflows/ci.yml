@@ -14,7 +14,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # t3term is vendored as it is upstream, so only t3rex is held to rustfmt.
-      - run: cargo fmt -p t3rex --check
-      - run: cargo clippy --locked -p t3rex --all-targets -- -D warnings
-      - run: cargo test --locked -p t3rex
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked

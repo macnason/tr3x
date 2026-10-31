@@ -128,8 +128,8 @@ More in [how it works](docs/how-it-works.md).
 
 - [Rex](https://www.superlogical.com/rex) by Superlogical.
 - T3 Code, which does the actual work.
-- [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), vendored for its T3 client,
-  auth and sidebar logic.
+- [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), which t3rex's T3 client
+  started from.
 
 ## License
 

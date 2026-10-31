@@ -17,9 +17,9 @@ use crossterm::event::{
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use t3term::client::{Client, IfBusy, WatchEvent};
-use t3term::models::{self, Choice};
-use t3term::projection::ThreadState;
+use t3client::env::{Env, IfBusy, WatchEvent};
+use t3client::models::{self, Choice};
+use t3client::projection::ThreadState;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
@@ -121,7 +121,7 @@ enum Done {
 
 struct Composer {
     thread_id: String,
-    client: Arc<Client>,
+    client: Arc<Env>,
     state: Option<ThreadState>,
     config: Option<Value>,
     editor: Editor,
@@ -575,11 +575,8 @@ impl Composer {
             // Opening goes to the Mac this runs on. With a laptop or phone attached, which
             // may be where this was typed, the note is a link to click there instead.
             "open" => {
-                let link = crate::link::thread(
-                    self.config.as_ref(),
-                    &self.client.runtime.environment_id,
-                    &self.thread_id,
-                );
+                let link =
+                    crate::link::thread(self.config.as_ref(), self.client.id(), &self.thread_id);
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     let done = if !crate::link::only_here().await {
@@ -807,7 +804,7 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
 }
 
 pub async fn run(thread_id: String) -> Result<()> {
-    let client = t3::connect(true).await?;
+    let client = t3::connect().await?;
     // The scheme first, so the logos loaded next are for the screen they're seen on.
     let mut scheme = crate::scheme::listen();
     let mut events = client.watch_thread(&thread_id, None);

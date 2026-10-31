@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use t3term::client::WatchEvent;
-use t3term::projection::ShellState;
-use t3term::tui::{Inbox, Place};
+use t3client::env::WatchEvent;
+use t3client::inbox::{Inbox, Place};
+use t3client::projection::ShellState;
 
 use crate::rex::{Rex, lua_str};
 use crate::state::{State, Window};
@@ -41,7 +41,7 @@ pub struct Want {
 pub fn wanted(
     shell: &ShellState,
     inbox: &mut Inbox,
-    caps: t3term::tui::Capabilities,
+    caps: t3client::inbox::Capabilities,
     now: i64,
 ) -> Vec<Want> {
     let roots: HashMap<&str, &str> = shell
@@ -74,7 +74,7 @@ pub fn wanted(
                 .to_string(),
             settles: caps.settlement
                 && !matches!(
-                    t3term::tui::status_label(thread, now),
+                    t3client::inbox::status_label(thread, now),
                     Some("Approval" | "Input" | "Working" | "Goal" | "Waiting")
                 ),
         })
@@ -108,7 +108,7 @@ fn shown_subagent(thread: &Value, now: i64) -> bool {
     thread["lineage"]["relationshipToParent"] == "subagent"
         && thread["archivedAt"].is_null()
         && matches!(
-            t3term::tui::status_label(thread, now),
+            t3client::inbox::status_label(thread, now),
             Some("Approval" | "Input" | "Working" | "Goal" | "Failed" | "Limited")
         )
 }
@@ -699,7 +699,7 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
 /// which picks up snoozes that end and windows closed in Rex. Returns only when it fails.
 async fn follow(first: bool) -> Result<std::convert::Infallible> {
     // Operate, to settle a thread whose window is closed.
-    let client = t3::connect(true).await.context("couldn't reach T3")?;
+    let client = t3::connect().await.context("couldn't reach T3")?;
     let caps = t3::capabilities(&client);
     let mut syncer = Syncer {
         rex: Rex::find(),
@@ -980,7 +980,7 @@ mod tests {
             ],
             ..ShellState::default()
         };
-        let caps = t3term::tui::Capabilities::of(&json!({}));
+        let caps = t3client::inbox::Capabilities::of(&json!({}));
         let wants = wanted(&shell, &mut Inbox::default(), caps, 0);
         let ids: Vec<&str> = wants.iter().map(|w| w.thread_id.as_str()).collect();
         let a = ids.iter().position(|i| *i == "a").unwrap();

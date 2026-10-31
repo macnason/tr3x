@@ -10,7 +10,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
 use serde_json::json;
-use t3term::models;
+use t3client::models;
 
 use crate::chat::{RED, RESET, fit};
 use crate::icons::Painter;
@@ -54,7 +54,7 @@ return {{}}"#,
 }
 
 pub async fn run(thread_id: String, first: Field) -> Result<()> {
-    let client = t3::connect(true).await?;
+    let client = t3::connect().await?;
     let _scheme = crate::scheme::listen();
     let (config, state) =
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
