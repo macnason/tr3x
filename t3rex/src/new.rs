@@ -9,6 +9,8 @@
 //! and the ones on the tailnet that run T3 and aren't paired, which pair from there. Choosing
 //! one loads its projects, models and branches, and the thread launches there.
 //!
+//! Pictures pasted or dropped into the message go with it, shown over its text (`picture`).
+//!
 //! The pane labels itself `t3:<env8>/<thread>` before it launches, with the id the launch will use, so
 //! sync takes the window as the thread's as soon as T3 reports the thread.
 
@@ -31,9 +33,11 @@ use t3client::projection::ShellState;
 use tokio::sync::mpsc;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
-use crate::compose::{Editor, edit, wrap};
+use crate::compose::{Editor, Escape, edit, wrap};
 use crate::icons::{self, Icon, Painter};
+use crate::paste::{self, Got, Image};
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
+use crate::picture::{self, Tray};
 use crate::rex::{Rex, lua_str};
 use crate::slash::{self, Slash};
 use crate::t3;
@@ -69,6 +73,8 @@ enum Loaded {
     Reachable(String, bool),
     /// Another machine, loaded: its connection, config and shell, or why not.
     Switched(Result<(Arc<Env>, Value, ShellState), String>),
+    /// A picture made ready to send.
+    Picture(picture::Ready),
 }
 
 struct NewThread {
@@ -90,6 +96,7 @@ struct NewThread {
     icons: HashMap<String, Icon>,
     logos: HashMap<String, Icon>,
     editor: Editor,
+    escape: Escape,
     /// The `/` menu: the provider's commands and skills, as in Reply.
     slash: Slash,
     focus: Option<usize>,
@@ -106,6 +113,11 @@ struct NewThread {
     chip_row: u16,
     chat_width: crate::width::ChatWidth,
     tx: mpsc::UnboundedSender<Loaded>,
+    /// The pictures the message takes, and the row and columns of their ✕s.
+    images: Tray,
+    image_row: u16,
+    image_spans: Vec<usize>,
+    clipboard: paste::Reader,
 }
 
 /// The project menu's item that adds a folder instead.
@@ -701,11 +713,18 @@ return {{}}"#,
         let mut lines: Vec<String> = vec![String::new()];
         // The message, in a rounded box like T3's composer.
         let inner = width.saturating_sub(4);
+        self.editor.width = inner;
         let (rows, cursor) = wrap(&self.editor.text, self.editor.cursor, inner);
         let mut body: Vec<String> = rows;
         let empty = self.editor.text.is_empty();
         if empty {
             body = vec![format!("{DIM}Ask anything{RESET}")];
+        }
+        // The pictures take the box's first row, the text the rest.
+        let pictures =
+            (!self.images.is_empty()).then(|| self.images.row(&mut self.painter, left + 2, inner));
+        if pictures.is_some() {
+            body.insert(0, String::new());
         }
         while body.len() < 3 {
             body.push(String::new());
@@ -715,7 +734,19 @@ return {{}}"#,
             "─".repeat(width.saturating_sub(2))
         ));
         let first_body = lines.len();
-        for row in &body {
+        self.image_spans.clear();
+        for (i, row) in body.iter().enumerate() {
+            if i == 0
+                && let Some((row, spans, w)) = &pictures
+            {
+                self.image_row = lines.len() as u16;
+                self.image_spans = spans.clone();
+                lines.push(format!(
+                    "{pad}{DIM}│{RESET} {row}{} {DIM}│{RESET}",
+                    " ".repeat(inner.saturating_sub(*w))
+                ));
+                continue;
+            }
             let w = crate::render::visible_width(row);
             lines.push(format!(
                 "{pad}{DIM}│{RESET} {row}{} {DIM}│{RESET}",
@@ -799,14 +830,19 @@ return {{}}"#,
         if let Some((r, c)) = folder_cursor {
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else if self.menu.is_none() && self.focus.is_none() {
-            let (r, c) = (first_body + cursor.0 + 1, left + 3 + cursor.1);
+            let below = usize::from(pictures.is_some());
+            let (r, c) = (first_body + below + cursor.0 + 1, left + 3 + cursor.1);
             // Under the box, over the chips: above it there's only the border.
             let thread = json!({
                 "modelSelection": {"instanceId": self.settings.instance},
                 "projectId": self.project,
             });
-            self.slash
-                .sync(&self.editor, Some(&self.config), Some(&thread));
+            self.slash.sync(
+                &self.editor,
+                Some(&self.config),
+                Some(&thread),
+                &Value::Null,
+            );
             let bottom = first_body + body.len() + 1;
             text.push_str(&self.slash.draw(
                 &mut self.painter,
@@ -833,6 +869,7 @@ return {{}}"#,
     fn key(&mut self, key: KeyEvent) -> bool {
         self.note = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let again = self.escape.again(&key);
         if self.folder.is_some() {
             if ctrl && key.code == KeyCode::Char('c') {
                 return true;
@@ -851,12 +888,16 @@ return {{}}"#,
                 MenuKey::Close => self.menu = None,
                 MenuKey::Moved => {}
             }
+            self.escape = Escape::default();
             return false;
         }
         if self.focus.is_none() {
             match self.slash.key(&mut self.editor, key) {
                 slash::Key::Pass => {}
-                slash::Key::Done => return false,
+                slash::Key::Done => {
+                    self.escape = Escape::default();
+                    return false;
+                }
                 slash::Key::Send => {
                     self.send();
                     return false;
@@ -878,7 +919,19 @@ return {{}}"#,
                     Some(i) => Some(i - 1),
                 }
             }
-            (KeyCode::Esc, Some(_)) => self.focus = None,
+            (KeyCode::Esc, Some(_)) => {
+                self.focus = None;
+                self.escape = Escape::default();
+            }
+            // Twice clears the message and its pictures, as in Reply.
+            (KeyCode::Esc, None) if !self.editor.text.is_empty() || !self.images.is_empty() => {
+                if again {
+                    self.editor.clear();
+                    self.images.clear();
+                } else {
+                    self.note = Some((Escape::NOTE.into(), false));
+                }
+            }
             (KeyCode::Left, Some(i)) => self.focus = Some(i.saturating_sub(1)),
             (KeyCode::Right, Some(i)) => self.focus = Some((i + 1).min(fields.len() - 1)),
             (KeyCode::Enter | KeyCode::Down | KeyCode::Char(' '), Some(i)) => {
@@ -888,10 +941,14 @@ return {{}}"#,
             }
             (KeyCode::Up, Some(_)) => self.focus = None,
             (KeyCode::Char('c'), _) if ctrl => {
-                if self.editor.text.is_empty() {
+                if self.editor.text.is_empty() && self.images.is_empty() {
                     return true;
                 }
-                self.editor.take();
+                self.editor.clear();
+                self.images.clear();
+            }
+            (KeyCode::Backspace, None) if self.editor.cursor == 0 && !self.images.is_empty() => {
+                self.images.pop();
             }
             (KeyCode::Enter, None)
                 if !key
@@ -929,6 +986,12 @@ return {{}}"#,
         }
         let fields = self.fields();
         let col = col as usize + 1;
+        if row == self.image_row
+            && let Some(i) = self.image_spans.iter().position(|x| *x == col)
+        {
+            self.images.remove(i);
+            return;
+        }
         if row == self.chip_row
             && let Some(i) = self
                 .chip_spans
@@ -954,6 +1017,29 @@ return {{}}"#,
         }
     }
 
+    /// What a paste came to: pictures, or text to type.
+    fn pasted(&mut self, got: Got) {
+        self.menu = None;
+        self.focus = None;
+        match got {
+            Got::Offer(request) => out(&request),
+            Got::Text(text) => match paste::dropped(&text) {
+                Some(got) => self.pasted(got),
+                None => self
+                    .editor
+                    .paste(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            },
+            Got::Images(images) => {
+                let tx = self.tx.clone();
+                self.images.add(images, move |ready| {
+                    let _ = tx.send(Loaded::Picture(ready));
+                });
+            }
+            Got::Nothing(Some(why)) => self.note = Some((why, true)),
+            Got::Nothing(None) => {}
+        }
+    }
+
     fn send(&mut self) {
         if self.launching {
             return;
@@ -962,6 +1048,12 @@ return {{}}"#,
         if prompt.trim().is_empty() {
             return;
         }
+        if self.images.preparing() {
+            self.note = Some(("Getting the picture ready…".into(), false));
+            return;
+        }
+        // Copies: the window becomes the thread's once it launches, and keeps them if it doesn't.
+        let uploads: Vec<Value> = self.images.images().iter().map(Image::upload).collect();
         if self.project.is_empty() {
             self.folder.get_or_insert_with(|| Folder::new("~/"));
             return;
@@ -1009,6 +1101,17 @@ return {{}}"#,
             let thread = ThreadRef::new(client.id(), request.thread_id());
             // Named first, so sync finds this window when T3 reports the thread.
             let _ = set_label(&crate::sync::tag(&thread)).await;
+            let request = match client
+                .persist_images(request.thread_id(), request.message_id(), &uploads)
+                .await
+            {
+                Ok(attachments) => request.with_attachments(attachments),
+                Err(e) => {
+                    let _ = set_label("New Thread").await;
+                    let _ = tx.send(Loaded::Launched(Err(format!("{e:#}"))));
+                    return;
+                }
+            };
             let result = match client.launch_thread(&request).await {
                 Ok(receipt) => Ok(ThreadRef::new(client.id(), receipt.thread_id).to_string()),
                 Err(e) => {
@@ -1201,6 +1304,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         icons: HashMap::new(),
         logos: HashMap::new(),
         editor: Editor::default(),
+        escape: Escape::default(),
         slash: Slash::for_new(&[]),
         focus: None,
         menu: None,
@@ -1215,6 +1319,10 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         chip_row: 0,
         chat_width: crate::width::current().0,
         tx: tx.clone(),
+        images: Tray::default(),
+        image_row: 0,
+        image_spans: Vec::new(),
+        clipboard: paste::Reader::default(),
     };
     ui.load(config, &shell);
     for m in machines {
@@ -1237,8 +1345,13 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     let mut paired_at = stamp(&hub);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     crossterm::terminal::enable_raw_mode()?;
-    // The alternate screen, bracketed paste, and clicks (SGR mouse reports).
+    // The alternate screen, bracketed paste, and clicks (SGR mouse reports). Paste events too,
+    // where the filter can take the clipboard's replies.
+    let mut clipboard = crate::scheme::clipboard();
     out("\x1b]2;New Thread\x07\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    if clipboard.is_some() {
+        out(paste::ON);
+    }
     let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     ui.draw();
@@ -1251,11 +1364,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         if ui.launching { continue; }
                         if ui.key(key) { return Ok(()); }
                     }
-                    Some(Ok(Event::Paste(text))) if !ui.launching => {
-                        ui.menu = None;
-                        ui.focus = None;
-                        ui.editor.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
-                    }
+                    Some(Ok(Event::Paste(text))) if !ui.launching => ui.pasted(Got::Text(text)),
                     Some(Ok(Event::Mouse(m))) if !ui.launching && ui.slash.hits(&m) => {
                         ui.slash.click(&mut ui.editor, &m);
                     }
@@ -1274,7 +1383,20 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     None => return Ok(()),
                     _ => continue,
                 },
+                Some(packet) = async {
+                    match clipboard.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ui.clipboard.feed(&packet) {
+                    Some(got) if !ui.launching => ui.pasted(got),
+                    _ => continue,
+                },
                 _ = tick.tick() => {
+                    if ui.note.as_ref().is_some_and(|(n, _)| n == Escape::NOTE) && !ui.escape.armed() {
+                        ui.note = None;
+                        ui.draw();
+                    }
                     // A machine paired from the menu joins it.
                     let now = stamp(&t3::hub());
                     if now == paired_at {
@@ -1329,6 +1451,9 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         ui.load(config, &shell);
                     }
                     Loaded::Switched(Err(e)) => ui.note = Some((e, true)),
+                    Loaded::Picture(ready) => if let Some(why) = ui.images.ready(ready) {
+                        ui.note = Some((why, true));
+                    },
                 },
             }
             ui.draw();
@@ -1336,6 +1461,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     }
     .await;
     drop(keys);
+    out(paste::OFF);
     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result?;

@@ -190,6 +190,8 @@ pub struct LaunchRequest {
     runtime_mode: String,
     interaction_mode: String,
     workspace: Workspace,
+    /// The first message's attachments, as `Env::persist_images` returns them.
+    attachments: Value,
 }
 
 impl LaunchRequest {
@@ -231,7 +233,15 @@ impl LaunchRequest {
             runtime_mode: plan.runtime_mode.clone().ok_or_else(incomplete)?,
             interaction_mode: plan.interaction_mode.clone().ok_or_else(incomplete)?,
             workspace,
+            attachments: json!([]),
         })
+    }
+
+    /// The launch with these attachments on its first message. Store them under this
+    /// request's thread and message ids first, with `Env::persist_images`.
+    pub fn with_attachments(mut self, attachments: Value) -> LaunchRequest {
+        self.attachments = attachments;
+        self
     }
 
     pub fn environment_id(&self) -> &str {
@@ -301,7 +311,7 @@ impl LaunchRequest {
                 "messageId": self.message_id,
                 "text": self.text,
                 // T3's schema requires the list, even an empty one.
-                "attachments": [],
+                "attachments": self.attachments,
             },
         })
     }
@@ -397,6 +407,10 @@ impl fmt::Debug for LaunchRequest {
             .field("runtime_mode", &self.runtime_mode)
             .field("interaction_mode", &self.interaction_mode)
             .field("workspace", &self.workspace)
+            .field(
+                "attachments",
+                &self.attachments.as_array().map_or(0, Vec::len),
+            )
             .finish()
     }
 }

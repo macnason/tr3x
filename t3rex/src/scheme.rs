@@ -8,12 +8,15 @@
 //! pseudo-terminal first: a thread reads the real terminal, keeps the reports, and hands
 //! everything else on. crossterm reads the other end, which is a terminal too, while sizes
 //! still come from the controlling terminal.
+//!
+//! The filter also keeps the terminal's clipboard replies (OSC 5522), for `paste`: crossterm
+//! would read their bytes as keys.
 
 use std::os::fd::RawFd;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 const UNKNOWN: u8 = 0;
 const DARK: u8 = 1;
@@ -21,6 +24,8 @@ const LIGHT: u8 = 2;
 
 static REPORTED: AtomicU8 = AtomicU8::new(UNKNOWN);
 static CHANGES: Mutex<Option<watch::Sender<Option<bool>>>> = Mutex::new(None);
+/// Where the clipboard replies go, each without its `OSC 5522 ;` and terminator.
+static CLIPBOARD: Mutex<Option<mpsc::UnboundedSender<String>>> = Mutex::new(None);
 /// The real terminal and its settings from before, while input passes through the filter.
 static FILTER: Mutex<Option<(RawFd, libc::termios)>> = Mutex::new(None);
 /// Whether this process has the kitty keyboard protocol on.
@@ -36,6 +41,15 @@ pub fn listen() -> watch::Receiver<Option<bool>> {
         out("\x1b[?2031h\x1b[?996n");
     }
     rx
+}
+
+/// The terminal's clipboard replies, once input passes through the filter. `None` without it,
+/// where they would reach crossterm as keys, so nothing should ask for them.
+pub fn clipboard() -> Option<mpsc::UnboundedReceiver<String>> {
+    FILTER.lock().unwrap().as_ref()?;
+    let (tx, rx) = mpsc::unbounded_channel();
+    *CLIPBOARD.lock().unwrap() = Some(tx);
+    Some(rx)
 }
 
 /// Whether the screen is dark: the terminal's report, else the Mac's appearance.
@@ -96,7 +110,7 @@ pub fn stop() {
     let Some((real, saved)) = FILTER.lock().unwrap().take() else {
         return;
     };
-    out("\x1b[?2031l");
+    out("\x1b[?5522l\x1b[?2031l");
     // SAFETY: `real` is the terminal this process was started on, kept open since `start`.
     unsafe {
         libc::dup2(real, 0);
@@ -161,7 +175,12 @@ fn pass(real: RawFd, master: RawFd) {
             events: libc::POLLIN,
             revents: 0,
         };
-        let wait = if strip.held.is_empty() { -1 } else { 30 };
+        // A clipboard reply can take a while to cross a network, so it gets longer.
+        let wait = match (strip.held.is_empty(), strip.osc) {
+            (true, _) => -1,
+            (false, true) => 5000,
+            (false, false) => 30,
+        };
         // SAFETY: one pollfd that lives across the call.
         let ready = unsafe { libc::poll(&mut poll, 1, wait) };
         if ready == 0 {
@@ -176,7 +195,12 @@ fn pass(real: RawFd, master: RawFd) {
             }
             return;
         }
-        let (keep, scheme) = strip.feed(&buf[..n as usize]);
+        let (keep, scheme, packets) = strip.feed(&buf[..n as usize]);
+        if let Some(tx) = CLIPBOARD.lock().unwrap().as_ref() {
+            for packet in packets {
+                let _ = tx.send(packet);
+            }
+        }
         if let Some(scheme) = scheme {
             REPORTED.store(scheme, Ordering::Relaxed);
             if let Some(tx) = CHANGES.lock().unwrap().as_ref() {
@@ -204,22 +228,42 @@ fn write_all(fd: RawFd, mut bytes: &[u8]) {
 }
 
 const REPORT: &[u8] = b"\x1b[?997;";
+const OSC: &[u8] = b"\x1b]5522;";
 
-/// Takes `CSI ? 997 ; Ps n` out of a stream of input, across reads.
+/// Takes `CSI ? 997 ; Ps n` and `OSC 5522 ; … ST` out of a stream of input, across reads.
 #[derive(Default)]
 struct Strip {
     /// The start of what may be a report, held until it is one or isn't.
     held: Vec<u8>,
+    /// Inside a clipboard reply: everything is held until its terminator.
+    osc: bool,
 }
 
 impl Strip {
-    /// The bytes to pass on, and the last scheme reported among them.
-    fn feed(&mut self, input: &[u8]) -> (Vec<u8>, Option<u8>) {
+    /// The bytes to pass on, the last scheme reported among them, and the clipboard replies.
+    fn feed(&mut self, input: &[u8]) -> (Vec<u8>, Option<u8>, Vec<String>) {
         let mut out = Vec::with_capacity(input.len());
         let mut scheme = None;
+        let mut packets = Vec::new();
         for &b in input {
+            if self.osc {
+                // BEL or ESC \ ends it.
+                if b == 0x07 || b == b'\\' && self.held.last() == Some(&0x1b) {
+                    let end = self.held.len() - usize::from(b != 0x07);
+                    packets.push(String::from_utf8_lossy(&self.held[OSC.len()..end]).into_owned());
+                    self.held.clear();
+                    self.osc = false;
+                } else {
+                    self.held.push(b);
+                }
+                continue;
+            }
             self.held.push(b);
             let n = self.held.len();
+            if n <= OSC.len() && self.held[..] == OSC[..n] {
+                self.osc = n == OSC.len();
+                continue;
+            }
             let fits = if n <= REPORT.len() {
                 self.held[..] == REPORT[..n]
             } else {
@@ -243,11 +287,14 @@ impl Strip {
                 self.held.clear();
             }
         }
-        (out, scheme)
+        (out, scheme, packets)
     }
 
-    /// What's held, when nothing more has come to finish it.
+    /// What's held, when nothing more has come to finish it. A clipboard reply cut short goes.
     fn flush(&mut self) -> Vec<u8> {
+        if std::mem::take(&mut self.osc) {
+            self.held.clear();
+        }
         std::mem::take(&mut self.held)
     }
 }
@@ -259,10 +306,14 @@ mod tests {
     #[test]
     fn reports_come_out_and_keys_stay() {
         let mut s = Strip::default();
-        assert_eq!(s.feed(b"ab\x1b[?997;2ncd"), (b"abcd".to_vec(), Some(LIGHT)));
+        let none = Vec::<String>::new();
+        assert_eq!(
+            s.feed(b"ab\x1b[?997;2ncd"),
+            (b"abcd".to_vec(), Some(LIGHT), none.clone())
+        );
         // Split across reads.
-        assert_eq!(s.feed(b"x\x1b[?99"), (b"x".to_vec(), None));
-        assert_eq!(s.feed(b"7;1ny"), (b"y".to_vec(), Some(DARK)));
+        assert_eq!(s.feed(b"x\x1b[?99"), (b"x".to_vec(), None, none.clone()));
+        assert_eq!(s.feed(b"7;1ny"), (b"y".to_vec(), Some(DARK), none.clone()));
         // Other sequences pass whole: an arrow, an SGR click, a paste, a lone Esc.
         for keys in [
             &b"\x1b[A"[..],
@@ -270,16 +321,41 @@ mod tests {
             b"\x1b[200~hi\x1b[201~",
             b"\x1b\x1b[B",
         ] {
-            let (mut out, scheme) = s.feed(keys);
+            let (mut out, scheme, _) = s.feed(keys);
             out.extend(s.flush());
             assert_eq!((out, scheme), (keys.to_vec(), None));
         }
-        let (out, _) = s.feed(b"\x1b");
+        let (out, _, _) = s.feed(b"\x1b");
         assert!(out.is_empty());
         assert_eq!(s.flush(), b"\x1b");
         // Close to a report but not one.
-        let (mut out, scheme) = s.feed(b"\x1b[?997;12345n");
+        let (mut out, scheme, _) = s.feed(b"\x1b[?997;12345n");
         out.extend(s.flush());
         assert_eq!((out, scheme), (b"\x1b[?997;12345n".to_vec(), None));
+    }
+
+    #[test]
+    fn clipboard_replies_come_out() {
+        let mut s = Strip::default();
+        let (out, _, packets) = s.feed(b"a\x1b]5522;type=read:status=OK\x1b\\b\x1b]5522;type=re");
+        assert_eq!(
+            (out, packets),
+            (b"ab".to_vec(), vec!["type=read:status=OK".to_string()])
+        );
+        // Split across reads, ended with BEL.
+        let (out, _, packets) = s.feed(b"ad:status=DONE\x07c");
+        assert_eq!(
+            (out, packets),
+            (b"c".to_vec(), vec!["type=read:status=DONE".to_string()])
+        );
+        // Alt+] is a key, not a reply.
+        let (mut out, _, packets) = s.feed(b"\x1b]x");
+        out.extend(s.flush());
+        assert_eq!((out, packets.len()), (b"\x1b]x".to_vec(), 0));
+        // A reply cut short goes, rather than reaching crossterm.
+        let (out, _, _) = s.feed(b"\x1b]5522;type=read:status=DA");
+        assert!(out.is_empty());
+        assert!(s.flush().is_empty());
+        assert!(!s.osc);
     }
 }

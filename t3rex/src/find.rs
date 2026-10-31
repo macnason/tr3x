@@ -260,7 +260,7 @@ async fn bring_back(env: &Env, thread: &Value, client: Option<&str>) -> Result<(
 }
 
 /// Waits for sync to give `key` a window, then selects it on `client`, else on every app.
-async fn go_to(key: &str, client: Option<&str>) -> Result<()> {
+pub async fn go_to(key: &str, client: Option<&str>) -> Result<()> {
     for _ in 0..60 {
         let state = State::load();
         let found = state

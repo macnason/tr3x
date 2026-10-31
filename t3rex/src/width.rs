@@ -104,6 +104,14 @@ fn t3s() -> PathBuf {
     t3client::descriptor::t3_home().join("userdata/client-settings.json")
 }
 
+/// Whether a message to a running thread steers it, as T3 Code's Follow-up behavior says.
+/// T3's default is to steer.
+pub fn follow_up_steers() -> bool {
+    read(&t3s())
+        .and_then(|s| s.get("followUpBehavior")?.as_str().map(|b| b != "queue"))
+        .unwrap_or(true)
+}
+
 /// t3rex's own settings, `~/.config/t3rex/settings.json`.
 pub fn settings() -> Option<Map<String, Value>> {
     read(&ours())

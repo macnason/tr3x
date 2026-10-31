@@ -23,6 +23,8 @@ use crate::rpc::{RpcClient, RpcError};
 use crate::store::{Machine, Store, Via};
 
 pub(crate) const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Pictures go up whole, up to 10 MB each, sometimes over a slow link.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
 pub struct Env {
@@ -406,8 +408,9 @@ impl Env {
         state: &ThreadState,
         text: &str,
         if_busy: IfBusy,
+        images: &[Value],
     ) -> Result<SendReceipt> {
-        self.send_message_with(state, text, if_busy, &Plan::default())
+        self.send_message_with(state, text, if_busy, &Plan::default(), images)
             .await
     }
 
@@ -419,14 +422,16 @@ impl Env {
         text: &str,
         if_busy: IfBusy,
         plan: &Plan,
+        images: &[Value],
     ) -> Result<SendReceipt> {
         let message_id = uuid::Uuid::new_v4().to_string();
-        self.send_message_as(&message_id, state, text, if_busy, plan)
+        self.send_message_as(&message_id, state, text, if_busy, plan, images)
             .await
     }
 
     /// `send_message_with` under a message id the caller chose. A send that times out can still
-    /// reach T3, and the id is how the caller finds out.
+    /// reach T3, and the id is how the caller finds out. `images` are uploads as
+    /// `assets.persistChatAttachments` takes them; T3 stores them before the message goes.
     pub async fn send_message_as(
         &self,
         message_id: &str,
@@ -434,8 +439,9 @@ impl Env {
         text: &str,
         if_busy: IfBusy,
         plan: &Plan,
+        images: &[Value],
     ) -> Result<SendReceipt> {
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && images.is_empty() {
             return Err(err_exit(
                 "PROMPT_REQUIRED",
                 exit::USAGE,
@@ -471,13 +477,16 @@ impl Env {
             }
         };
         self.check_plan(state, plan)?;
+        let attachments = self
+            .persist_images(state.thread_id(), message_id, images)
+            .await?;
         self.dispatch_modes(state.thread_id(), plan).await?;
         let mut command = json!({
             "type": "message.dispatch",
             "threadId": state.thread_id(),
             "messageId": message_id,
             "text": plan.message_text(text),
-            "attachments": [],
+            "attachments": attachments,
             // T3 has no creation source for terminal clients; its own CLI reports "web" too.
             "createdBy": "user",
             "creationSource": "web",
@@ -492,6 +501,40 @@ impl Env {
             sequence,
             dispatch_mode: mode_name,
         })
+    }
+
+    /// Stores pictures for message `message_id`, returning the attachments it goes out with.
+    pub async fn persist_images(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        images: &[Value],
+    ) -> Result<Value> {
+        if images.is_empty() {
+            return Ok(json!([]));
+        }
+        let input =
+            json!({ "threadId": thread_id, "messageId": message_id, "attachments": images });
+        let result = self
+            .rpc()
+            .await?
+            .call("assets.persistChatAttachments", input, UPLOAD_TIMEOUT)
+            .await
+            .map_err(|e| match e {
+                RpcError::Failed { message, .. } => err_exit(
+                    "ATTACHMENT_REJECTED",
+                    exit::REJECTED,
+                    format!("T3 didn't take the picture: {message}"),
+                ),
+                other => other.into(),
+            })?;
+        match result.get("attachments") {
+            Some(list @ Value::Array(_)) => Ok(list.clone()),
+            _ => Err(err(
+                "T3_INVALID_ATTACHMENTS",
+                "T3 stored the pictures but returned no attachments.".to_string(),
+            )),
+        }
     }
 
     /// Changes the thread's model and modes now, without sending a message. Returns the sequence

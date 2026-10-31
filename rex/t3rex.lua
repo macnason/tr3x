@@ -35,24 +35,51 @@ local function t3rex(ctx, args)
   return r.stdout
 end
 
-local function thread_action(name, title, args, keywords)
+-- An action on the focused thread. `opts.client` passes the client that ran it, for an action
+-- that goes to a tab it makes.
+local function thread_action(name, title, args, keywords, opts)
   rex.action{
     name = name,
     title = title,
     category = "T3 Code",
     keywords = keywords,
-    run = function(ctx) t3rex(ctx, args) end,
+    run = function(ctx)
+      local argv = {}
+      for _, a in ipairs(args) do table.insert(argv, a) end
+      if opts and opts.client then
+        table.insert(argv, "--client")
+        table.insert(argv, ctx.client_id)
+      end
+      t3rex(ctx, argv)
+    end,
   }
 end
 
-thread_action("t3_settle", "Settle Thread", { "settle" }, "t3 done close archive inbox")
-thread_action("t3_snooze_hour", "Snooze Thread for 1 Hour", { "snooze", "1h" }, "t3 later")
-thread_action("t3_snooze_3h", "Snooze Thread for 3 Hours", { "snooze", "3h" }, "t3 later")
-thread_action("t3_snooze_tomorrow", "Snooze Thread Until Tomorrow", { "snooze", "tomorrow" }, "t3 later")
-thread_action("t3_pin", "Pin Thread", { "pin" }, "t3 keep")
-thread_action("t3_unpin", "Unpin Thread", { "pin", "--off" }, "t3")
-thread_action("t3_archive", "Archive Thread", { "archive" }, "t3 delete")
+-- An action that asks something first, in a floating layer over the thread.
+local function layer_action(name, title, args, keywords)
+  rex.action{
+    name = name,
+    title = title,
+    category = "T3 Code",
+    keywords = keywords,
+    run = function(ctx)
+      local argv = {}
+      for _, a in ipairs(args) do table.insert(argv, a) end
+      if ctx.block_id then
+        table.insert(argv, "--block")
+        table.insert(argv, ctx.block_id)
+      end
+      local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.2, 0.3, 0.6, 0.3 }, focus = true,
+        layout = { block = { flavor = "com.superlogical.terminal.shell", label = title,
+          options = { shell = "none", login = false, command = pane(argv) } } } }
+      rex.session.disown_block{ session_id = ctx.session_id }
+      if err then error(err, 0) end
+    end,
+  }
+end
 
+-- The thread actions, from t3rex's list of them (actions.rs), each also a `/` command in Reply.
+@ACTIONS@
 rex.action{
   name = "t3_inbox",
   title = "Go to Thread That Needs You",
@@ -90,8 +117,6 @@ rex.action{
     rex.client.queue("session.select", { session_id = sid, window_id = w.window_id })
   end,
 }
-
-thread_action("t3_model", "Change Model…", { "model" }, "t3 effort access provider reasoning")
 
 -- Every thread on every machine, settled, snoozed and archived too, in a floating list: Enter
 -- brings one back to its tab, Option+Enter opens it in T3 (Rex keeps Cmd+Enter).

@@ -75,26 +75,17 @@ impl Entry {
     }
 }
 
-/// t3rex's commands, as compose runs them.
-const REX: &[(&str, &str, Option<&str>)] = &[
-    ("steer", "Send into the running turn", Some("message")),
-    ("settle", "Settle this thread", None),
-    ("snooze", "Snooze this thread", Some("2h, tomorrow")),
-    ("wake", "End the snooze", None),
-    ("pin", "Pin this thread", None),
-    ("unpin", "Unpin this thread", None),
-    ("archive", "Archive this thread", None),
-    ("stop", "Stop the running turn", None),
-    ("model", "Choose the model", None),
-    ("effort", "Choose the effort", None),
-    ("mode", "Choose the access", None),
-    ("open", "Open in T3 Code", None),
-    (
-        "width",
-        "Set the chat width",
-        Some("comfortable, wide, full, t3"),
-    ),
-];
+/// t3rex's commands, as compose runs them: actions.rs's, less those the thread's machine is too
+/// old for. Without its capabilities yet, all of them.
+fn ours(caps: &Value) -> Vec<Entry> {
+    crate::actions::slashes()
+        .filter(|(_, needs)| match needs {
+            Some(cap) if caps.is_object() => caps[*cap] == true,
+            _ => true,
+        })
+        .map(|(s, _)| Entry::new(Kind::Rex, s.name, s.description, s.hint))
+        .collect()
+}
 
 /// The folder T3 lists a thread's commands and skills for: its worktree, else its project's
 /// root (T3's composer passes the same as `gitCwd`).
@@ -121,11 +112,13 @@ fn key(name: &str) -> String {
 /// commands, its skills. The workspace snapshot for the thread's folder wins over the
 /// provider's own lists. Skills are the enabled, user-invocable ones, once each; a provider
 /// command with a skill's name gives way to the skill, as in T3.
-pub fn entries(config: &Value, thread: &Value, roots: &HashMap<String, String>) -> Vec<Entry> {
-    let mut out: Vec<Entry> = REX
-        .iter()
-        .map(|(n, d, h)| Entry::new(Kind::Rex, n, d, *h))
-        .collect();
+pub fn entries(
+    config: &Value,
+    thread: &Value,
+    roots: &HashMap<String, String>,
+    caps: &Value,
+) -> Vec<Entry> {
+    let mut out = ours(caps);
     let instance = thread["modelSelection"]["instanceId"]
         .as_str()
         .or(thread["providerInstanceId"].as_str())
@@ -437,7 +430,13 @@ impl Slash {
     }
 
     /// Follows the input: opens on `/`, re-ranks as the word changes, closes past it.
-    pub fn sync(&mut self, editor: &Editor, config: Option<&Value>, thread: Option<&Value>) {
+    pub fn sync(
+        &mut self,
+        editor: &Editor,
+        config: Option<&Value>,
+        thread: Option<&Value>,
+        caps: &Value,
+    ) {
         let text = editor.string();
         if self.closed_on.as_ref().is_some_and(|c| *c != text) {
             self.closed_on = None;
@@ -461,8 +460,8 @@ impl Slash {
         if self.open.is_none() {
             let roots = self.roots.lock().map(|r| r.clone()).unwrap_or_default();
             self.entries = match (config, thread) {
-                (Some(c), Some(t)) => entries(c, t, &roots),
-                _ => entries(&Value::Null, &Value::Null, &roots),
+                (Some(c), Some(t)) => entries(c, t, &roots, caps),
+                _ => entries(&Value::Null, &Value::Null, &roots, caps),
             };
             if self.no_rex {
                 self.entries.retain(|e| e.kind != Kind::Rex);
@@ -505,7 +504,7 @@ impl Slash {
         let at = insert.len() + usize::from(editor.text.get(end) == Some(&' '));
         editor.text.splice(0..end, insert);
         editor.cursor = at;
-        self.theirs = (entry.kind == Kind::Command && REX.iter().any(|(n, ..)| *n == entry.name))
+        self.theirs = (entry.kind == Kind::Command && crate::actions::is_slash(&entry.name))
             .then(|| entry.name.clone());
         self.hint = entry.hint.map(|h| (editor.string(), h));
         self.open = None;
@@ -676,8 +675,8 @@ mod tests {
 
     #[test]
     fn lists_rex_then_commands_then_skills_once_each() {
-        let e = entries(&config(), &thread(None), &HashMap::new());
-        let kinds: Vec<(Kind, &str)> = e[REX.len()..]
+        let e = entries(&config(), &thread(None), &HashMap::new(), &Value::Null);
+        let kinds: Vec<(Kind, &str)> = e[ours(&Value::Null).len()..]
             .iter()
             .map(|e| (e.kind, e.name.as_str()))
             .collect();
@@ -690,7 +689,10 @@ mod tests {
                 (Kind::Skill, "pdf"),
             ]
         );
-        assert_eq!(e[REX.len()].hint.as_deref(), Some("<instructions>"));
+        assert_eq!(
+            e[ours(&Value::Null).len()].hint.as_deref(),
+            Some("<instructions>")
+        );
     }
 
     #[test]
@@ -700,25 +702,34 @@ mod tests {
             (thread(Some("/repo")), HashMap::new()),
             (thread(None), roots),
         ] {
-            let e = entries(&config(), &t, &roots);
-            let theirs: Vec<&str> = e[REX.len()..].iter().map(|e| e.name.as_str()).collect();
+            let e = entries(&config(), &t, &roots, &Value::Null);
+            let theirs: Vec<&str> = e[ours(&Value::Null).len()..]
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
             assert_eq!(theirs, vec!["deploy", "repo-skill"]);
         }
         // Another folder falls back to the provider's lists.
-        let e = entries(&config(), &thread(Some("/elsewhere")), &HashMap::new());
+        let e = entries(
+            &config(),
+            &thread(Some("/elsewhere")),
+            &HashMap::new(),
+            &Value::Null,
+        );
         assert!(e.iter().any(|e| e.name == "compact"));
         // An unknown provider leaves t3rex's own.
         let e = entries(
             &config(),
             &json!({"modelSelection": {"instanceId": "x"}}),
             &HashMap::new(),
+            &Value::Null,
         );
-        assert_eq!(e.len(), REX.len());
+        assert_eq!(e.len(), ours(&Value::Null).len());
     }
 
     #[test]
     fn ranks_exact_then_prefix_then_the_rest() {
-        let e = entries(&config(), &thread(None), &HashMap::new());
+        let e = entries(&config(), &thread(None), &HashMap::new(), &Value::Null);
         // Both models: t3rex's first.
         let m = rank(&e, "model");
         assert_eq!((e[m[0]].kind, e[m[1]].kind), (Kind::Rex, Kind::Command));
@@ -736,7 +747,7 @@ mod tests {
 
     #[test]
     fn three_hundred_rank_fast() {
-        let mut e = entries(&config(), &thread(None), &HashMap::new());
+        let mut e = entries(&config(), &thread(None), &HashMap::new(), &Value::Null);
         for i in 0..300 {
             let mut skill = Entry::new(
                 Kind::Skill,
@@ -769,7 +780,7 @@ mod tests {
         let config = config();
         let thread = json!({"projectId": "p", "modelSelection": {"instanceId": "claude"}});
         let mut s = Slash::for_new(&[json!({"id": "p", "workspaceRoot": "/repo"})]);
-        s.sync(&typed("/"), Some(&config), Some(&thread));
+        s.sync(&typed("/"), Some(&config), Some(&thread), &Value::Null);
         let listed: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(listed, vec!["deploy", "repo-skill"]);
     }
@@ -779,40 +790,40 @@ mod tests {
         let (config, thread) = (config(), thread(None));
         let mut s = Slash::default();
         let mut ed = typed("/comp");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(s.is_open());
         assert!(matches!(s.key(&mut ed, press(KeyCode::Tab)), Key::Done));
         assert_eq!(ed.string(), "/compact ");
         assert_eq!(ed.cursor, 9);
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_open());
         assert_eq!(s.hint(), Some("<instructions>"));
         ed.insert("x");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert_eq!(s.hint(), None);
         // A skill goes in as T3 puts it.
         let mut ed = typed("/pdf");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         s.key(&mut ed, press(KeyCode::Down));
         s.key(&mut ed, press(KeyCode::Enter));
         assert_eq!(ed.string(), "$pdf ");
         // Esc leaves the text, and typing opens it again. Past the `/`, it's closed.
         let mut ed = typed("/se");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         s.key(&mut ed, press(KeyCode::Esc));
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_open());
         assert_eq!(ed.string(), "/se");
         ed.insert("t");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(s.is_open());
         ed.text.clear();
         ed.cursor = 0;
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_open());
         // Not at the start, or a path with a space after it: no menu.
         let ed = typed("see /settle");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_open());
     }
 
@@ -821,22 +832,22 @@ mod tests {
         let (config, thread) = (config(), thread(None));
         let mut s = Slash::default();
         let mut ed = typed("/settle");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(matches!(s.key(&mut ed, press(KeyCode::Enter)), Key::Send));
         assert!(!s.is_theirs(ed.string().trim()));
         // The provider's /model, picked, is theirs; t3rex's is the default.
         let mut ed = typed("/model");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(matches!(s.key(&mut ed, press(KeyCode::Enter)), Key::Send));
         assert!(!s.is_theirs("/model"));
         let mut ed = typed("/model");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         s.key(&mut ed, press(KeyCode::Down));
         assert!(matches!(s.key(&mut ed, press(KeyCode::Enter)), Key::Send));
         assert!(s.is_theirs("/model"));
         // Typed over, it's t3rex's again.
         let ed = typed("/effort");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_theirs("/model"));
     }
 
@@ -845,7 +856,7 @@ mod tests {
         let (config, thread) = (config(), thread(None));
         let mut s = Slash::default();
         let ed = typed("/");
-        s.sync(&ed, Some(&config), Some(&thread));
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         let mut p = Painter;
         // Input on row 1 of 6: below, five rows.
         let out = s.draw(&mut p, (1, 1), 6, 0, 40);

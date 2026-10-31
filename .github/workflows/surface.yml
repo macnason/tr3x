@@ -1,0 +1,93 @@
+name: t3 surface
+
+# Each day, what the newest T3 nightly offers against t3rex/t3-surface.json. A change pushes
+# the new surface to the t3-surface branch and keeps one issue up to date with what T3 added
+# and removed, and whether t3rex's tests pass against it.
+
+on:
+  schedule:
+    - cron: "23 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: surface
+  cancel-in-progress: true
+
+jobs:
+  surface:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TITLE: T3 nightly changed what t3rex can call
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download the newest nightly
+        run: |
+          version=$(npm view t3@nightly version)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          base="https://github.com/pingdotgg/t3code/releases/download/v$version"
+          archive="t3-$version-linux-x64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/t3"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$archive"
+          curl -fsSL "$base/SHA256SUMS" | grep " $archive\$" | sha256sum -c -
+          tar xzf "$archive" -C t3 --strip-components=1
+
+      - name: Compare
+        run: |
+          cargo build --release --locked
+          ./target/release/t3rex surface --from "$RUNNER_TEMP/t3/t3" --label "$VERSION" \
+            --check t3rex/t3-surface.json --write t3rex/t3-surface.json > "$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md"
+          # A new version alone changes only the label.
+          if git diff --quiet -I '"t3":' t3rex/t3-surface.json; then
+            echo "CHANGED=" >> "$GITHUB_ENV"
+          else
+            echo "CHANGED=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Test against it
+        if: env.CHANGED
+        run: |
+          if cargo test --release --locked > "$RUNNER_TEMP/test.log" 2>&1; then
+            echo "TESTS=pass" >> "$GITHUB_ENV"
+          else
+            echo "TESTS=fail" >> "$GITHUB_ENV"
+          fi
+          tail -n 40 "$RUNNER_TEMP/test.log"
+
+      - name: Push the branch and update the issue
+        if: env.CHANGED
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C t3-surface
+          git commit -qam "chore: T3 surface from $VERSION"
+          git push -qf origin t3-surface
+          {
+            echo "T3 \`$VERSION\` against \`t3rex/t3-surface.json\` on master."
+            echo
+            if [ "$TESTS" = pass ]; then
+              echo "t3rex's tests pass against it."
+            else
+              echo "**t3rex's tests fail against it**: something t3rex calls is gone. See the run's log."
+            fi
+            echo
+            echo "Added names are what t3rex could offer next (an entry in \`t3rex/src/actions.rs\`)."
+            echo
+            cat "$RUNNER_TEMP/report.md"
+            echo "[Open a pull request](${{ github.server_url }}/${{ github.repository }}/compare/master...t3-surface?expand=1) · [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          fi
