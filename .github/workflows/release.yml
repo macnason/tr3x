@@ -15,7 +15,7 @@ jobs:
     env:
       NAME: t3rex-macos-universal
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
