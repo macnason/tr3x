@@ -93,13 +93,10 @@ rex.action{
 
 thread_action("t3_model", "Change Model…", { "model" }, "t3 effort access provider reasoning")
 
-rex.bind("ctrl+cmd+s", "t3_settle")
-rex.bind("ctrl+cmd+z", "t3_snooze_hour")
-rex.bind("ctrl+cmd+p", "t3_pin")
-rex.bind("ctrl+cmd+o", "t3_open")
+-- Two keys, for what you reach for from anywhere. Everything else is in the palette under T3 Code
+-- and in Reply's `/` commands; bind any of it yourself in init.lua.
 rex.bind("ctrl+cmd+i", "t3_inbox")
 rex.bind("ctrl+cmd+n", "t3_new")
-rex.bind("ctrl+cmd+m", "t3_model")
 
 -- The client that ran an action, from the server's list: its principal says where it is.
 local function caller(ctx)

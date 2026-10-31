@@ -771,8 +771,7 @@ return {{}}"#,
             let keys = [
                 ("⌘T", "New thread"),
                 ("⌃⌘I", "Next that needs you"),
-                ("⌃⌘M", "Model"),
-                ("⌃⌘S", "Settle"),
+                ("⌘⇧P", "Everything else"),
             ];
             let text: Vec<String> = keys
                 .iter()

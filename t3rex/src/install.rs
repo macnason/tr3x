@@ -326,10 +326,8 @@ pub async fn install() -> Result<()> {
             .await;
     }
     other_machines().await;
-    println!(
-        "\nKeys: ⌘T new thread (in T3 Code) · ⌃⌘N new thread · ⌃⌘I next that needs you · ⌃⌘M model · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3"
-    );
-    println!("Every action is also in Rex's command palette under T3 Code.");
+    println!("\nKeys: ⌘T new thread (in T3 Code) · ⌃⌘N new thread · ⌃⌘I next that needs you");
+    println!("Everything else is in Rex's command palette (⌘⇧P) under T3 Code.");
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 //! The model picker: a floating layer over a thread's window, opened from the Reply pane with
-//! /model, /effort or /mode alone, or ⌃⌘M. It lists every enabled provider's models under the
+//! /model, /effort or /mode alone, or Change Model… in the palette. It lists every enabled provider's models under the
 //! provider's logo, then the model's efforts, and the access modes. A choice applies to the
 //! thread's next message at once, as T3's composer chips do, and the Reply header follows.
 

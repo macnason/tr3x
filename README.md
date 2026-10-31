@@ -67,7 +67,7 @@ t3rex uninstall
 ![The new-thread window a session with no threads opens on](docs/frames/onboarding-welcome-light.png)
 
 Rex opens on **T3 Code** with a tab per open thread. No open threads: you get a **New Thread**
-tab instead, with the four keys that matter. New Tab (⌘T or +) in the session always opens
+tab instead, with the keys that matter. New Tab (⌘T or +) in the session always opens
 another. No projects in T3 yet: it opens on a folder to add as one. If T3 Code isn't running,
 the tab says so and carries on once it is.
 
@@ -77,19 +77,19 @@ the tab says so and carries on once it is.
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project, model, effort, access, and Local or New worktree and its base branch. **Add folder…** in the project chip adds a project: type a path, Tab completes it. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The tab becomes the thread's. |
 | Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
-| Model | Click the chip under Reply, press Tab there, type `/model`, or ⌃⌘M. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
+| Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | Click **Approve**, **Always** or **Decline** over the input, or Tab to them and Enter. `a`, `s` or `d` then Enter does the same. Anything else you type is a reply. |
 | Answer | Click an option, or Tab to it. A pending question also takes the input as its answer, and a number picks that option. |
 | Another machine | `t3rex pair` finds the machines on your tailnet that run T3 and pairs each: over SSH where `ssh <host>` works, else with a link from T3 → Settings → Connections there (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
-| Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. ⌃⌘O and `/open` open T3 Code on the Mac running it. |
+| Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
-| Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. ⌃⌘S or `/settle` settle it whatever it's doing. |
-| Snooze | ⌃⌘Z for an hour, or `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
+| Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. `/settle` settles it whatever it's doing. |
+| Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
 | Commands | `/steer …` `/settle` `/snooze` `/wake` `/pin` `/unpin` `/archive` `/stop` `/model` `/effort` `/mode` `/open` `/width`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. |
-| Keys | ⌃⌘N new thread · ⌃⌘M model · ⌃⌘I go to the thread that needs you · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3 Code (on this Mac) |
-| Palette | Every action is in Rex's command palette under **T3 Code**. |
+| Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you |
+| Palette | Everything else is in Rex's command palette (⌘⇧P) under **T3 Code**. To give an action a key, add a line like `rex.bind("ctrl+cmd+s", "t3_settle")` to `~/.config/rex/init.lua`. |
 
 Subagents show under the thread they work for, as `↳ title`, while they work or need you. A
 finished subagent's result is in its parent thread.
