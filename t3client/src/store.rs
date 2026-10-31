@@ -318,20 +318,20 @@ mod tests {
     fn machines_answer_to_their_names() {
         let mut registry = Registry::default();
         registry.upsert(machine("ddf826b2-3408", "mac"));
-        registry.upsert(machine("1ec9e653-d01c", "MacBook Air (2)"));
+        registry.upsert(machine("1ec9e653-d01c", "Laptop (2)"));
         assert_eq!(registry.find("MAC").unwrap().id, "ddf826b2-3408");
-        assert_eq!(registry.find("1ec9").unwrap().label, "MacBook Air (2)");
+        assert_eq!(registry.find("1ec9").unwrap().label, "Laptop (2)");
         assert!(registry.find("air").is_none());
         let mut renamed = machine("ddf826b2-3408", "mac");
-        renamed.alias = Some("omarchy".into());
+        renamed.alias = Some("studio".into());
         registry.upsert(renamed);
-        assert_eq!(registry.find("omarchy").unwrap().name(), "omarchy");
+        assert_eq!(registry.find("studio").unwrap().name(), "studio");
         // Pairing again keeps the alias and adds the new address after the old.
         let mut again = machine("ddf826b2-3408", "mac");
         again.origins = vec!["http://100.97.217.14:3773".into()];
         registry.upsert(again);
         let m = registry.get("ddf826b2-3408").unwrap();
-        assert_eq!(m.alias.as_deref(), Some("omarchy"));
+        assert_eq!(m.alias.as_deref(), Some("studio"));
         assert_eq!(m.origins.len(), 2);
     }
 

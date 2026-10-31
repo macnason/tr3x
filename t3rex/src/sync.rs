@@ -1447,16 +1447,13 @@ mod tests {
     #[test]
     fn badges_and_offline_marks_keep_the_label_in_bounds() {
         assert_eq!(decorate("Fix it", None, false), "Fix it");
+        assert_eq!(decorate("Fix it", Some("studio"), false), "Fix it · studio");
         assert_eq!(
-            decorate("Fix it", Some("omarchy"), false),
-            "Fix it · omarchy"
+            decorate("Fix it", Some("studio"), true),
+            "Fix it · studio (offline)"
         );
-        assert_eq!(
-            decorate("Fix it", Some("omarchy"), true),
-            "Fix it · omarchy (offline)"
-        );
-        let long = decorate(&"x".repeat(300), Some("omarchy"), true);
-        assert!(long.chars().count() <= 120 && long.ends_with("· omarchy (offline)"));
+        let long = decorate(&"x".repeat(300), Some("studio"), true);
+        assert!(long.chars().count() <= 120 && long.ends_with("· studio (offline)"));
         assert_eq!(marked("A (offline)", false), "A");
         assert_eq!(marked("A (offline)", true), "A (offline)");
     }
@@ -1638,7 +1635,7 @@ mod tests {
         let wants = wanted(
             &[
                 machine("h", &here, None),
-                machine("o", &there, Some("omarchy")),
+                machine("o", &there, Some("studio")),
             ],
             &mut Inbox::default(),
             0,
@@ -1648,7 +1645,7 @@ mod tests {
         assert!(keys.contains(&"h/a".to_string()) && keys.contains(&"o/a".to_string()));
         let label = |key: &str| wants.iter().find(|w| w.key() == key).unwrap().label.clone();
         assert_eq!(label("h/a"), "a");
-        assert_eq!(label("o/a"), "a · omarchy");
+        assert_eq!(label("o/a"), "a · studio");
     }
 
     #[test]

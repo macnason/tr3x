@@ -27,7 +27,7 @@ goes for every machine you run T3 on, without the T3 app.
   and pictures follow that screen's light or dark.
 - **Every machine.** Threads from every machine Rex is paired with share the session, in one
   order. Once there's more than one, a tab says which machine its thread runs on:
-  `Fix the build · omarchy`. New threads start on whichever machine you pick.
+  `Fix the build · studio`. New threads start on whichever machine you pick.
 - **Close to settle.** Closing a tab settles the thread. A thread that's still working only
   hides until it changes, so nothing gets stopped by accident.
 
@@ -80,7 +80,7 @@ the tab says so and carries on once it is.
 | Model | Click the chip under Reply, press Tab there, type `/model`, or ⌃⌘M. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | Click **Approve**, **Always** or **Decline** over the input, or Tab to them and Enter. `a`, `s` or `d` then Enter does the same. Anything else you type is a reply. |
 | Answer | Click an option, or Tab to it. A pending question also takes the input as its answer, and a number picks that option. |
-| Another machine | `t3rex pair` finds the machines on your tailnet that run T3 and pairs each: over SSH where `ssh <host>` works, else with a link from T3 → Settings → Connections there (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename mac omarchy` names one, `t3rex env forget omarchy` unpairs it. |
+| Another machine | `t3rex pair` finds the machines on your tailnet that run T3 and pairs each: over SSH where `ssh <host>` works, else with a link from T3 → Settings → Connections there (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. ⌃⌘O and `/open` open T3 Code on the Mac running it. |

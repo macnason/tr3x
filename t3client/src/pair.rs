@@ -183,7 +183,7 @@ pub async fn forget(store: &Store, machine: &Machine) -> Result<Forgot> {
     Ok(forgot)
 }
 
-/// A name a person would type, like `omarchy`, rather than an address.
+/// A name a person would type, like `studio`, rather than an address.
 fn short_name(host: &str) -> bool {
     !host.contains('.') && !host.contains(':') && !host.contains('@')
 }
@@ -402,8 +402,8 @@ mod tests {
 
     #[test]
     fn only_plain_names_become_aliases() {
-        assert!(short_name("omarchy"));
-        assert!(!short_name("mac.example-tailnet.ts.net"));
+        assert!(short_name("studio"));
+        assert!(!short_name("box.example-tailnet.ts.net"));
         assert!(!short_name("mac@host"));
         assert!(!short_name("100.97.217.14"));
     }
@@ -416,7 +416,7 @@ mod tests {
             "/.well-known/t3/environment" => crate::http::fake::response(
                 "200 OK",
                 &[],
-                r#"{"environmentId":"env-air","label":"MacBook Air (2)","serverVersion":"1","orchestrationProtocolVersion":2,"capabilities":{}}"#,
+                r#"{"environmentId":"env-air","label":"Laptop (2)","serverVersion":"1","orchestrationProtocolVersion":2,"capabilities":{}}"#,
             ),
             "/oauth/token" => crate::http::fake::response(
                 "200 OK",
@@ -433,10 +433,7 @@ mod tests {
         assert_eq!(machine.via, Via::Link);
         assert_eq!(machine.origins, vec![server.origin.clone()]);
         assert_eq!(store.credential("env-air").unwrap().token, "tok");
-        assert_eq!(
-            store.registry().get("env-air").unwrap().label,
-            "MacBook Air (2)"
-        );
+        assert_eq!(store.registry().get("env-air").unwrap().label, "Laptop (2)");
         // A link for one machine doesn't pair another.
         let error = pair(&store, How::Link(link), Some("env-other"))
             .await

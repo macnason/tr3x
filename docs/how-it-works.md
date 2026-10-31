@@ -35,7 +35,7 @@ machine it's paired with, and draws what T3 says into one Rex session.
 
 - **One session.** Every machine's threads share **T3 Code** in T3's order, so ⌃⌘I goes to
   whatever needs you wherever it runs. Once two or more machines are paired, each thread on
-  another machine carries its name after the title, `Fix the build · omarchy`. Rex has no badge
+  another machine carries its name after the title, `Fix the build · studio`. Rex has no badge
   for a window, so the name lives in the label. The name is T3's for the machine, or the one
   `t3rex env rename` gives it; pairing over SSH names it after the SSH host.
 - **A session each.** With `"sessions": "per-machine"` in `~/.config/t3rex/settings.json`
@@ -45,9 +45,9 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - **Out of reach.** Sync creates, closes or settles a machine's windows only once that
   machine's shell has caught up on its current connection. Until then its windows stay where
   they are, and after 30 seconds out of reach they read `(offline)`. A window closed while its
-  machine is away isn't settled. The conversation shows `omarchy is offline · retrying` and
+  machine is away isn't settled. The conversation shows `studio is offline · retrying` and
   Reply keeps what's typed. A machine that no longer accepts Rex's token says
-  `Run t3rex pair omarchy`.
+  `Run t3rex pair studio`.
 - **Folders.** A thread on another machine works in a folder there, so its panes start in the
   home folder. HTML snapshots read T3's attachments from disk, so they're this Mac's only.
 
@@ -220,7 +220,7 @@ T3REX_STATE_DIR=/tmp/t3rex-dev scripts/dev-restart   # a sync with its own state
 
 `dev-restart` names its session **t3x-dev** (`T3REX_SESSION_LABEL`) and starts its panes with
 `--passive` (`T3REX_PASSIVE`), so they never mark a thread visited beside an installed sync.
-Pair machines into its state with `T3REX_STATE_DIR=… t3rex pair`. `t3rex rpc --env omarchy
+Pair machines into its state with `T3REX_STATE_DIR=… t3rex pair`. `t3rex rpc --env studio
 <method> '<json>'` calls one machine.
 
 To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest release.

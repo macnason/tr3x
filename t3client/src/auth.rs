@@ -642,8 +642,8 @@ mod tests {
             want("https://mini.example.ts.net", "ABC123")
         );
         assert_eq!(
-            parse_link("http://macbook-air-2:3773/pair?token=ABC").unwrap(),
-            want("http://macbook-air-2:3773", "ABC")
+            parse_link("http://laptop:3773/pair?token=ABC").unwrap(),
+            want("http://laptop:3773", "ABC")
         );
         assert_eq!(
             parse_link("https://app.t3.codes/pair?host=http%3A%2F%2Fair%3A3773&token=T&label=Air")
