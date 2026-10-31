@@ -222,7 +222,7 @@ fn raised_hand(thread: &Value) -> bool {
 
 /// `effectiveSnoozed`: off the active list until the wake time, unless the thread raised its
 /// hand first. A wake time that has passed or doesn't parse leaves the thread where it was.
-fn effective_snoozed(thread: &Value, now: i64) -> bool {
+pub fn effective_snoozed(thread: &Value, now: i64) -> bool {
     instant(&thread["snoozedUntil"]).is_some_and(|wake| wake > now) && !raised_hand(thread)
 }
 
@@ -393,7 +393,7 @@ fn sort_settled(threads: &mut [&Value]) {
 
 /// `resolveSettledThreadTimestamp`: when the thread settled, else its latest message or run
 /// time, else `updatedAt`. A thread with none of them sorts as 0.
-fn settled_ms(thread: &Value) -> i64 {
+pub fn settled_ms(thread: &Value) -> i64 {
     if let Some(at) = instant(&thread["settledAt"]) {
         return at;
     }

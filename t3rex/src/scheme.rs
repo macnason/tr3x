@@ -11,7 +11,7 @@
 
 use std::os::fd::RawFd;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio::sync::watch;
 
@@ -23,6 +23,8 @@ static REPORTED: AtomicU8 = AtomicU8::new(UNKNOWN);
 static CHANGES: Mutex<Option<watch::Sender<Option<bool>>>> = Mutex::new(None);
 /// The real terminal and its settings from before, while input passes through the filter.
 static FILTER: Mutex<Option<(RawFd, libc::termios)>> = Mutex::new(None);
+/// Whether this process has the kitty keyboard protocol on.
+static KEYS: AtomicBool = AtomicBool::new(false);
 
 /// Starts listening for the terminal's scheme. Call before crossterm reads any input. Returns
 /// what changes: `Some(true)` for dark, once a report comes.
@@ -56,8 +58,41 @@ pub async fn dark_soon() -> bool {
     dark()
 }
 
+/// Turns on the kitty keyboard protocol's first level (`CSI > 1 u`) until the guard goes.
+/// Without it Rex sends Shift+Enter as `CSI 27 ; 2 ; 13 ~`, which crossterm drops, and Cmd+Delete
+/// as a plain Delete; with it they're `CSI 13 ; 2 u` and `CSI 127 ; 9 u`, and Esc is a key of
+/// its own. Every byte of it passes the filter untouched. Each screen keeps its own flags, so
+/// turn it on after entering the alternate screen and drop the guard before leaving it. The
+/// guard also turns it off when the pane's work is dropped for a signal or unwinds from a panic.
+pub fn keys() -> Keys {
+    keys_on();
+    Keys
+}
+
+pub struct Keys;
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        keys_off();
+    }
+}
+
+/// `keys` without a guard, for turning it back on after `keys_off`.
+pub fn keys_on() {
+    if !KEYS.swap(true, Ordering::Relaxed) {
+        out("\x1b[>1u");
+    }
+}
+
+pub fn keys_off() {
+    if KEYS.swap(false, Ordering::Relaxed) {
+        out("\x1b[<u");
+    }
+}
+
 /// Puts input back as it was, before the process exits or runs another program in its place.
 pub fn stop() {
+    keys_off();
     let Some((real, saved)) = FILTER.lock().unwrap().take() else {
         return;
     };

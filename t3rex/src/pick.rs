@@ -98,6 +98,7 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((60, 20));
     crossterm::terminal::enable_raw_mode()?;
     out("\x1b]2;Model\x07\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h");
+    let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     let result: Result<()> = async {
         loop {
@@ -209,6 +210,7 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
         }
     }
     .await;
+    drop(keys);
     out("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result

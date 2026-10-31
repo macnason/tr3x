@@ -63,12 +63,38 @@ impl Editor {
         }
     }
     pub(crate) fn delete_word(&mut self) {
-        while self.cursor > 0 && self.text[self.cursor - 1].is_whitespace() {
+        let start = self.word_left();
+        while self.cursor > start {
             self.backspace();
         }
-        while self.cursor > 0 && !self.text[self.cursor - 1].is_whitespace() {
+    }
+    pub(crate) fn delete_to_line_start(&mut self) {
+        let start = self.line_start();
+        while self.cursor > start {
             self.backspace();
         }
+    }
+    /// Where the word before the cursor starts, past any spaces.
+    pub(crate) fn word_left(&self) -> usize {
+        let mut at = self.cursor;
+        while at > 0 && self.text[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        while at > 0 && !self.text[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        at
+    }
+    /// Where the word after the cursor ends, past any spaces.
+    pub(crate) fn word_right(&self) -> usize {
+        let mut at = self.cursor;
+        while at < self.text.len() && self.text[at].is_whitespace() {
+            at += 1;
+        }
+        while at < self.text.len() && !self.text[at].is_whitespace() {
+            at += 1;
+        }
+        at
     }
     pub(crate) fn line_start(&self) -> usize {
         self.text[..self.cursor]
@@ -117,6 +143,111 @@ enum Done {
     Logos(HashMap<String, Icon>),
     /// A link to open the thread with, on the device it's clicked on.
     Link(String),
+    /// A resize finished, or gave up.
+    Resized,
+}
+
+/// The share of the window the conversation has over Reply, as sync and `new` split it.
+const SPLIT: f64 = 0.86;
+/// Reply grows by at most this many input lines, and to at most this share of the window.
+const GROW_LINES: usize = 7;
+const GROW_SHARE: f64 = 0.35;
+/// How long the line count has to hold before Reply resizes. Each resize reprints the
+/// conversation, so typing through a wrap doesn't resize twice.
+const GROW_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The pane before `block` in the vertical split it's the after side of, and that split's
+/// ratio, in a layout as `session inspect` prints it.
+fn split_above(layout: &Value, block: &str) -> Option<(String, f64)> {
+    let split = &layout["split"];
+    if split.is_null() {
+        return None;
+    }
+    if split["direction"] == "vertical"
+        && split["after"]["block_id"] == block
+        && let Some(before) = split["before"]["block_id"].as_str()
+    {
+        return Some((before.to_string(), split["ratio"].as_f64()?));
+    }
+    split_above(&split["before"], block).or_else(|| split_above(&split["after"], block))
+}
+
+/// Reply growing with its text: one row per input line past the first, by moving the split
+/// between the conversation and Reply (`session.resize_pane`). The split is the session's, so
+/// every device looking at it sees the same.
+struct Grow {
+    session: String,
+    block: String,
+    /// The extra lines the split was last asked for, and the ones the text wants now.
+    asked: usize,
+    wants: usize,
+    /// When `wants` changed; Reply resizes once it has held for `GROW_WAIT`.
+    since: Option<tokio::time::Instant>,
+    /// Reply's rows at the starting split, the least it has.
+    base: usize,
+    busy: bool,
+}
+
+/// Moves the split so Reply has `base` rows and `extra` more, within `GROW_SHARE` of the
+/// window, or back to the starting split for none. None when it couldn't.
+async fn resize(session: String, block: String, base: usize, extra: usize) -> Option<()> {
+    let rex = crate::rex::Rex::find();
+    // The conversation: the pane before Reply in its window's split, and the split as it is.
+    let view = rex.inspect(&session).await.ok()?;
+    let (chat, ratio) = view["windows"]
+        .as_array()?
+        .iter()
+        .flat_map(|w| w["layers"].as_array().into_iter().flatten())
+        .find_map(|l| split_above(&l["layout"], &block))?;
+    let size = |b: String| {
+        let (rex, session) = (rex.clone(), session.clone());
+        async move {
+            let out = tokio::process::Command::new(&rex.bin)
+                .args(crate::rex::NO_AUTOSTART)
+                .args([
+                    "do",
+                    "-s",
+                    &session,
+                    "-b",
+                    &b,
+                    "com.superlogical.terminal.size",
+                ])
+                .output()
+                .await
+                .ok()?;
+            serde_json::from_slice::<Value>(&out.stdout).ok()
+        }
+    };
+    let (chat_size, reply_size) = (size(chat.clone()).await?, size(block.clone()).await?);
+    // Rows mean something only once a device sizes both panes; a pane no one owns reads 24.
+    if chat_size["owner"].is_null() || chat_size["owner"] != reply_size["owner"] {
+        return None;
+    }
+    let (chat_rows, reply_rows) = (chat_size["rows"].as_f64()?, reply_size["rows"].as_f64()?);
+    let next = if extra == 0 {
+        SPLIT
+    } else {
+        // Each pane loses a few rows to its header. Work that out from the split as it is:
+        // reply = (1 - ratio) * all - header, with all = chat + reply + 2 * header.
+        let share = 1.0 - ratio;
+        let header =
+            ((share * (chat_rows + reply_rows) - reply_rows) / (1.0 - 2.0 * share)).max(0.0);
+        let all = chat_rows + reply_rows + 2.0 * header;
+        let most = ((chat_rows + reply_rows) * GROW_SHARE).floor();
+        let want = (base as f64 + extra as f64).min(most).max(base as f64);
+        (1.0 - (want + header + 0.5) / all).clamp(1.0 - GROW_SHARE - 0.1, SPLIT)
+    };
+    if (next - ratio).abs() < 0.001 {
+        return Some(());
+    }
+    let args = json!({
+        "session_id": session, "direction": "vertical", "before_block_id": chat,
+        "after_block_id": block, "ratio": next,
+    });
+    rex.call("session.resize_pane", &args.to_string())
+        .await
+        .ok()
+        .map(drop)
 }
 
 struct Composer {
@@ -149,6 +280,8 @@ struct Composer {
     /// The chat width setting: the input sits in the conversation's column.
     chat_width: Follow,
     slash: Slash,
+    /// None outside a Rex window, where there is no split to move.
+    grow: Option<Grow>,
 }
 
 impl Composer {
@@ -310,6 +443,13 @@ impl Composer {
         // The input, wrapped, with the cursor where it is.
         let prompt = format!("{BLUE}{BOLD}›{RESET} ");
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
+        if let Some(grow) = self.grow.as_mut() {
+            let wants = (lines.len() - 1).min(GROW_LINES);
+            if wants != grow.wants {
+                grow.wants = wants;
+                grow.since = Some(tokio::time::Instant::now());
+            }
+        }
         let first_input = rows.len();
         for (i, line) in lines.iter().enumerate() {
             let lead = if i == 0 { prompt.clone() } else { "  ".into() };
@@ -709,26 +849,33 @@ impl Composer {
 }
 
 /// The editing keys every input shares: Alt+Enter, Shift+Enter or Ctrl+J for a new line,
-/// Ctrl+U, Ctrl+W, Ctrl+A and Ctrl+E as in a shell, and the arrows. Returns whether the key
-/// was one of them.
+/// Ctrl+U, Ctrl+W, Ctrl+A and Ctrl+E as in a shell, the Mac's Cmd and Option with the arrows
+/// and Delete, and the arrows. Cmd arrives as SUPER, with the kitty keyboard protocol on
+/// (`scheme::keys`). Returns whether the key was one of them.
 pub(crate) fn edit(editor: &mut Editor, key: KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
     match key.code {
         KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => editor.insert("\n"),
         KeyCode::Char('j') if ctrl => editor.insert("\n"),
-        KeyCode::Char('u') if ctrl => {
-            let start = editor.line_start();
-            while editor.cursor > start {
-                editor.backspace();
-            }
-        }
+        KeyCode::Char('u') if ctrl => editor.delete_to_line_start(),
+        KeyCode::Backspace if cmd => editor.delete_to_line_start(),
         KeyCode::Char('w') if ctrl => editor.delete_word(),
         KeyCode::Backspace if alt => editor.delete_word(),
         KeyCode::Char('a') if ctrl => editor.cursor = editor.line_start(),
         KeyCode::Char('e') if ctrl => editor.cursor = editor.line_end(),
         KeyCode::Home => editor.cursor = editor.line_start(),
         KeyCode::End => editor.cursor = editor.line_end(),
+        KeyCode::Left if cmd => editor.cursor = editor.line_start(),
+        KeyCode::Right if cmd => editor.cursor = editor.line_end(),
+        KeyCode::Up if cmd => editor.cursor = 0,
+        KeyCode::Down if cmd => editor.cursor = editor.text.len(),
+        // Option and the arrows, and the `Esc b` and `Esc f` some keyboards send for them.
+        KeyCode::Left if alt => editor.cursor = editor.word_left(),
+        KeyCode::Right if alt => editor.cursor = editor.word_right(),
+        KeyCode::Char('b') if alt => editor.cursor = editor.word_left(),
+        KeyCode::Char('f') if alt => editor.cursor = editor.word_right(),
         KeyCode::Left => editor.cursor = editor.cursor.saturating_sub(1),
         KeyCode::Right => editor.cursor = (editor.cursor + 1).min(editor.text.len()),
         KeyCode::Up => {
@@ -755,7 +902,7 @@ pub(crate) fn edit(editor: &mut Editor, key: KeyEvent) -> bool {
         }
         KeyCode::Backspace => editor.backspace(),
         KeyCode::Delete => editor.delete(),
-        KeyCode::Char(c) if !ctrl && !alt => editor.insert(&c.to_string()),
+        KeyCode::Char(c) if !ctrl && !alt && !cmd => editor.insert(&c.to_string()),
         _ => return false,
     }
     true
@@ -852,10 +999,23 @@ pub async fn run(thread: String) -> Result<()> {
         renamed: false,
         chat_width: Follow::new(),
         slash,
+        grow: match (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK")) {
+            (Ok(session), Ok(block)) => Some(Grow {
+                session,
+                block,
+                asked: 0,
+                wants: 0,
+                since: None,
+                base: rows as usize,
+                busy: false,
+            }),
+            _ => None,
+        },
     };
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks on the chips.
     out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     composer.draw();
@@ -890,6 +1050,14 @@ pub async fn run(thread: String) -> Result<()> {
                     Some(Done::Config(config)) => composer.config = Some(config),
                     Some(Done::Link(url)) => composer.link = Some(url),
                     Some(Done::Logos(logos)) => composer.logos = logos,
+                    Some(Done::Resized) => if let Some(grow) = composer.grow.as_mut() {
+                        grow.busy = false;
+                        // The text may have changed while it resized.
+                        if grow.wants != grow.asked {
+                            grow.since = Some(tokio::time::Instant::now());
+                        }
+                        continue;
+                    },
                     None => {}
                 },
                 Ok(()) = scheme.changed() => if let Some(config) = composer.config.as_ref() {
@@ -904,6 +1072,21 @@ pub async fn run(thread: String) -> Result<()> {
                 _ = tick.tick() => if !composer.chat_width.changed() {
                     continue;
                 },
+                _ = tokio::time::sleep_until(composer.grow.as_ref().and_then(|g| g.since).unwrap_or_else(tokio::time::Instant::now) + GROW_WAIT),
+                    if composer.grow.as_ref().is_some_and(|g| g.since.is_some() && !g.busy) => {
+                    let grow = composer.grow.as_mut().expect("checked above");
+                    grow.since = None;
+                    if grow.wants != grow.asked {
+                        grow.asked = grow.wants;
+                        grow.busy = true;
+                        let (session, block, base, extra, tx) = (grow.session.clone(), grow.block.clone(), grow.base, grow.wants, composer.tx.clone());
+                        tokio::spawn(async move {
+                            resize(session, block, base, extra).await;
+                            let _ = tx.send(Done::Resized);
+                        });
+                    }
+                    continue;
+                }
                 _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
                     composer.note = None;
                     composer.note_until = None;
@@ -930,6 +1113,14 @@ pub async fn run(thread: String) -> Result<()> {
                     Some(Ok(Event::Resize(c, r))) => {
                         composer.cols = c as usize;
                         composer.rows = r as usize;
+                        // At the starting split, Reply's rows are its least: a window that changes
+                        // size, or another device's, changes that.
+                        if let Some(grow) = composer.grow.as_mut()
+                            && grow.asked == 0
+                            && !grow.busy
+                        {
+                            grow.base = r as usize;
+                        }
                     }
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
@@ -947,10 +1138,12 @@ pub async fn run(thread: String) -> Result<()> {
                 let want = crate::icons::program_name(&driver).unwrap_or("t3rex");
                 if !instance.is_empty() && crate::icons::started_as() != want && !composer.renamed {
                     composer.renamed = true;
+                    crate::scheme::keys_off();
                     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
                     let _ = crossterm::terminal::disable_raw_mode();
                     crate::icons::become_program(&driver);
                     out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+                    crate::scheme::keys_on();
                     let _ = crossterm::terminal::enable_raw_mode();
                 }
             }
@@ -958,6 +1151,7 @@ pub async fn run(thread: String) -> Result<()> {
         }
     }
     .await;
+    drop(keys);
     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result
@@ -965,7 +1159,34 @@ pub async fn run(thread: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{Editor, edit, wrap};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn mac_editing_keys() {
+        let mut ed = Editor::default();
+        ed.insert("one two\nthree  four");
+        let press = |ed: &mut Editor, code, mods| edit(ed, KeyEvent::new(code, mods));
+        press(&mut ed, KeyCode::Left, KeyModifiers::SUPER);
+        assert_eq!(ed.cursor, 8);
+        press(&mut ed, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(ed.cursor, 19);
+        press(&mut ed, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(ed.cursor, 15);
+        press(&mut ed, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(ed.cursor, 8);
+        press(&mut ed, KeyCode::Right, KeyModifiers::ALT);
+        assert_eq!(ed.cursor, 13);
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(ed.string(), "one two\n  four");
+        ed.cursor = 14;
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::SUPER);
+        assert_eq!(ed.string(), "one two\n");
+        // Shift+Enter is a new line, and a Cmd shortcut types nothing.
+        press(&mut ed, KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(!press(&mut ed, KeyCode::Char('k'), KeyModifiers::SUPER));
+        assert_eq!(ed.string(), "one two\n\n");
+    }
 
     #[test]
     fn wraps_at_spaces_and_tracks_the_cursor() {

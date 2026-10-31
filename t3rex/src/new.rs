@@ -1202,6 +1202,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks (SGR mouse reports).
     out("\x1b]2;New Thread\x07\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+    let keys = crate::scheme::keys();
     let mut input = EventStream::new();
     ui.draw();
     let mut launched: Option<String> = None;
@@ -1293,6 +1294,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         }
     }
     .await;
+    drop(keys);
     out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result?;

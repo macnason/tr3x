@@ -5,6 +5,7 @@ mod ask;
 mod chat;
 mod compose;
 mod fade;
+mod find;
 mod icons;
 mod install;
 mod link;
@@ -84,6 +85,20 @@ enum Command {
     /// Choose the model, effort and access for the thread's next message, in a floating layer.
     #[command(hide = true)]
     Model(Target),
+    /// Find Thread: every thread on every machine, to bring one back. The palette's Find
+    /// Thread… runs it in a floating layer.
+    #[command(hide = true)]
+    Find {
+        /// The Rex client that asked, which goes to the thread's tab.
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Bring back the thread settled last, and go to its tab.
+    #[command(hide = true)]
+    Reopen {
+        #[arg(long)]
+        client: Option<String>,
+    },
     /// The reply pane of a thread's window.
     #[command(hide = true)]
     Compose { thread: String },
@@ -342,6 +357,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sync { no_first, log } => sync::run(!no_first, log).await,
         Command::Chat { thread, passive } => chat::run(thread, passive).await,
         Command::Compose { thread } => compose::run(thread).await,
+        Command::Find { client } => find::run(client).await,
+        Command::Reopen { client } => find::reopen_last(client).await,
         Command::New { welcome, env } => new::run(welcome, env).await,
         Command::Pick { thread, field } => pick::run(thread, field).await,
         Command::Model(t) => {

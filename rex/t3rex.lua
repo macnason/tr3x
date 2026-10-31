@@ -93,6 +93,31 @@ rex.action{
 
 thread_action("t3_model", "Change Model…", { "model" }, "t3 effort access provider reasoning")
 
+-- Every thread on every machine, settled, snoozed and archived too, in a floating list: Enter
+-- brings one back to its tab, Option+Enter opens it in T3 (Rex keeps Cmd+Enter).
+rex.action{
+  name = "t3_find",
+  title = "Find Thread…",
+  category = "T3 Code",
+  keywords = "t3 search settled snoozed archived closed reopen restore history",
+  run = function(ctx)
+    local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.2, 0.2, 0.6, 0.6 }, focus = true,
+      layout = { block = { flavor = "com.superlogical.terminal.shell", label = "Find Thread",
+        options = { shell = "none", login = false, command = pane({ "find", "--client", ctx.client_id }) } } } }
+    rex.session.disown_block{ session_id = ctx.session_id }
+    if err then error(err, 0) end
+  end,
+}
+
+-- Undo for a tab closed by accident: the thread settled last comes back.
+rex.action{
+  name = "t3_reopen_settled",
+  title = "Reopen Last Settled",
+  category = "T3 Code",
+  keywords = "t3 undo closed tab restore unsettle",
+  run = function(ctx) t3rex({}, { "reopen", "--client", ctx.client_id }) end,
+}
+
 -- Two keys, for what you reach for from anywhere. Everything else is in the palette under T3 Code
 -- and in Reply's `/` commands; bind any of it yourself in init.lua.
 rex.bind("ctrl+cmd+i", "t3_inbox")

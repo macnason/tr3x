@@ -58,6 +58,17 @@ machine it's paired with, and draws what T3 says into one Rex session.
   Rex's markers are T3's. `title` is the thread's title. While it waits on you, `msg` is what
   it waits on: `Run` and the command an approval gates, `Edit` and the file, or the question,
   cut to the protocol's 2048 bytes.
+- A window's label starts with a mark for T3's status word: `●` Approval, `?` Input, `✕`
+  Failed or Limited, `✓` Done or Woke. Working, Goal and Waiting have none, since Rex's spinner
+  shows them. Labels are plain text, so the mark has no colour. Sync relabels only when the
+  mark or title changes.
+- Every input turns on the kitty keyboard protocol's first level (`CSI > 1 u`), and turns it off
+  on every way out, a signal or a panic too. Without it Rex sends Shift+Enter as
+  `CSI 27 ; 2 ; 13 ~`, which crossterm drops; with it Shift+Enter is `CSI 13 ; 2 u`.
+- Reply grows one row per input line past the first, up to 7 more or 35% of the window, by
+  moving the split with `session.resize_pane`, a quarter-second after the line count settles,
+  and goes back to the starting split once the input empties. Each resize reprints the
+  conversation, and the split is the session's, so every device sees it.
 - Reply answers an approval with the same `respond` call T3's buttons make (`accept`,
   `acceptForSession`, `decline`), and a question's option with its value, as typing its number
   does.
@@ -90,6 +101,18 @@ over the tailnet only draws.
   another, and `none` keeps T3 Code's `t3code://threads/…` link. `t3_open` runs `open` only when
   the client that ran it connects over the local socket. `/open` in Reply opens T3 Code when no
   app is attached from elsewhere, and otherwise shows the link to click.
+
+## Find Thread
+
+**Find Thread…** opens `t3rex find` in a floating layer. It reads each machine's shell, its
+archived threads (`orchestration.getArchivedShellSnapshot`) and its older settled threads
+(`orchestration.getOlderSettledThreads`, 50 a page, up to a thousand), and lists them as they
+come. Enter unarchives (`thread.unarchive`), wakes or unsettles the thread as it needs, then
+writes it to `restore` in the state directory and wakes sync with SIGUSR1, which forgets a
+window closed while the thread worked. Once sync has made the tab, the finder selects it on the
+device that ran it. **Reopen Last Settled** (`t3rex reopen`) does the same for the thread with
+the latest `settledAt`. Nothing comes back on its own: a settled thread stays settled until one
+of these brings it back.
 
 ## Provider glyphs
 
@@ -202,7 +225,7 @@ the open question; the app only links the in-process change notification for its
 
 | Path | |
 |---|---|
-| `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
+| `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `find.rs` (Find Thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
 | `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |

@@ -109,11 +109,11 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             .filter(|dir| m.local && std::path::Path::new(dir).is_dir())
             .map(str::to_string);
         let title = thread["title"].as_str().unwrap_or("Untitled");
-        let title = if child {
-            format!("↳ {title}")
-        } else {
-            title.to_string()
+        let title = match glyph(t3client::inbox::status_label(thread, now)) {
+            Some(glyph) => format!("{glyph} {title}"),
+            None => title.to_string(),
         };
+        let title = if child { format!("↳ {title}") } else { title };
         Some(Want {
             thread: ThreadRef::new(env.clone(), id),
             label: decorate(&title, m.badge, m.offline),
@@ -153,6 +153,18 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
         }
     }
     out
+}
+
+/// The mark before a window's title for T3's status word. Labels are plain text, so it's a
+/// shape, not a colour. Work has none: Rex's spinner shows it.
+fn glyph(word: Option<&str>) -> Option<char> {
+    match word? {
+        "Approval" => Some('●'),
+        "Input" => Some('?'),
+        "Failed" | "Limited" => Some('✕'),
+        "Done" | "Woke" => Some('✓'),
+        _ => None,
+    }
 }
 
 /// A subagent gets a window only while it works or needs you. Once it finishes, its result
@@ -888,6 +900,39 @@ pub fn running() -> Option<u32> {
         .ok()
 }
 
+/// Where Find Thread asks sync to show threads it hid when their window closed, one
+/// `env/thread` a line.
+fn restore_path() -> PathBuf {
+    crate::state::dir().join("restore")
+}
+
+/// Asks the running sync to show `key` again, even if its window was closed while it worked,
+/// and wakes it to do so now.
+pub fn restore(key: &str) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(restore_path())?;
+    writeln!(file, "{key}")?;
+    if let Some(pid) = running() {
+        // SAFETY: kill(2) with a pid the lock holder wrote; sync handles SIGUSR1.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
+    }
+    Ok(())
+}
+
+/// The threads Find Thread asked for since the last pass.
+fn take_restores() -> Vec<String> {
+    let taken = restore_path().with_extension("taken");
+    if std::fs::rename(restore_path(), &taken).is_err() {
+        return Vec::new();
+    }
+    let text = std::fs::read_to_string(&taken).unwrap_or_default();
+    let _ = std::fs::remove_file(taken);
+    text.lines().map(str::to_string).collect()
+}
+
 /// Stops the running sync, waiting a few seconds for it to let go of its lock.
 pub async fn stop() -> bool {
     let Some(pid) = running() else {
@@ -941,6 +986,8 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
         }
         return Ok(());
     }
+    // Find Thread wakes sync with SIGUSR1 once the pid is written, so it's handled first.
+    let mut wake = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
     lock.set_len(0)?;
     write!(lock, "{}", std::process::id())?;
     if log {
@@ -950,7 +997,7 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
     let mut pause = 2;
     loop {
         let started = Instant::now();
-        let Err(error) = follow(first).await;
+        let Err(error) = follow(first, &mut wake).await;
         if started.elapsed() > Duration::from_secs(120) {
             pause = 2;
         }
@@ -970,7 +1017,10 @@ fn machines_stamp(hub: &Hub) -> Option<std::time::SystemTime> {
 /// Every machine's shell, reconciling the session after each burst of changes and every few
 /// seconds, which picks up snoozes that end, windows closed in Rex and machines that go quiet.
 /// Each machine connects and reconnects on its own. Returns only when it fails.
-async fn follow(first: bool) -> Result<std::convert::Infallible> {
+async fn follow(
+    first: bool,
+    wake: &mut tokio::signal::unix::Signal,
+) -> Result<std::convert::Infallible> {
     let mut hub = t3::hub();
     // A Mac without T3 of its own can still follow the machines it's paired with.
     let home = hub.home_id().unwrap_or_default().to_string();
@@ -1062,6 +1112,7 @@ async fn follow(first: bool) -> Result<std::convert::Infallible> {
                 syncer.configs.insert(env, config);
             }
             _ = tick.tick() => dirty = true,
+            _ = wake.recv() => dirty = true,
         }
         // Drain a burst before acting, so a snapshot's items reconcile once.
         while let Ok((env, event)) = events.try_recv() {
@@ -1072,6 +1123,12 @@ async fn follow(first: bool) -> Result<std::convert::Infallible> {
         }
         dirty = false;
         let now = Instant::now();
+        // Find Thread brought these back: a window closed while they worked no longer hides them.
+        for key in take_restores() {
+            for group in syncer.state.groups.values_mut() {
+                group.dismissed.remove(&key);
+            }
+        }
 
         // A machine paired, renamed or forgotten while sync runs.
         if machines_stamp(&hub) != stamp {
@@ -1659,6 +1716,31 @@ mod tests {
         let label = |key: &str| wants.iter().find(|w| w.key() == key).unwrap().label.clone();
         assert_eq!(label("h/a"), "a");
         assert_eq!(label("o/a"), "a · studio");
+        assert_eq!(
+            label("o/x"),
+            "● x · studio",
+            "an approval's mark leads the label"
+        );
+    }
+
+    #[test]
+    fn status_marks() {
+        let marks: Vec<Option<char>> = [
+            "Approval", "Input", "Failed", "Limited", "Done", "Woke", "Working", "Goal", "Waiting",
+        ]
+        .into_iter()
+        .map(|w| glyph(Some(w)))
+        .collect();
+        let want = [
+            Some('●'),
+            Some('?'),
+            Some('✕'),
+            Some('✕'),
+            Some('✓'),
+            Some('✓'),
+        ];
+        assert_eq!(&marks[..6], &want);
+        assert!(marks[6..].iter().all(Option::is_none) && glyph(None).is_none());
     }
 
     #[test]

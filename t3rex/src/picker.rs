@@ -48,6 +48,12 @@ pub struct Menu {
     pub selected: usize,
     /// The id of the current value, marked in the list.
     pub current: Option<String>,
+    /// Each word of the filter matches its letters in order, not only as one piece.
+    pub fuzzy: bool,
+    /// Details sit at the right edge, in a column of their own.
+    pub details_right: bool,
+    /// The filter is drawn elsewhere, such as in an input above the menu.
+    pub hide_filter: bool,
     /// Screen rows of the items drawn last, for clicks: (row, index into items).
     rows: Vec<(u16, usize)>,
 }
@@ -87,7 +93,9 @@ impl Menu {
                     item.section.as_deref().unwrap_or("")
                 )
                 .to_lowercase();
-                words.iter().all(|w| hay.contains(w))
+                words
+                    .iter()
+                    .all(|w| hay.contains(w) || self.fuzzy && in_order(w, &hay))
             })
             .collect()
     }
@@ -119,7 +127,7 @@ impl Menu {
                 }
                 self.selected = 0;
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::SUPER) => {
                 self.filter.push(c);
                 self.selected = 0;
             }
@@ -149,7 +157,7 @@ impl Menu {
         self.selected = self.selected.min(shown.len().saturating_sub(1));
         // Each item with its heading when the section changes.
         let mut rows: Vec<(Option<usize>, String)> = Vec::new();
-        if !self.filter.is_empty() {
+        if !self.filter.is_empty() && !self.hide_filter {
             rows.push((None, format!("{DIM}/{RESET}{}", self.filter)));
         }
         let mut section: Option<&str> = None;
@@ -204,6 +212,11 @@ impl Menu {
                 room.saturating_sub(unicode_width::UnicodeWidthStr::width(label.as_str()) + 2);
             let detail = if item.detail.is_empty() || detail_room < 4 {
                 String::new()
+            } else if self.details_right {
+                let detail = fit(&item.detail, detail_room);
+                let gap = detail_room + 1
+                    - unicode_width::UnicodeWidthStr::width(detail.as_str()).min(detail_room);
+                format!("{}{DIM}{detail}{RESET}", " ".repeat(gap))
             } else {
                 format!("  {DIM}{}{RESET}", fit(&item.detail, detail_room))
             };
@@ -219,6 +232,31 @@ impl Menu {
         }
         out
     }
+}
+
+/// Whether `needle`'s characters appear in `hay` in order, close together: within a stretch
+/// at most twice as long as `needle`, so `drb` finds "dribble" but `pill` doesn't find "pi…l…l"
+/// across a whole title.
+fn in_order(needle: &str, hay: &str) -> bool {
+    let needle: Vec<char> = needle.chars().collect();
+    let hay: Vec<char> = hay.chars().collect();
+    let Some(&first) = needle.first() else {
+        return true;
+    };
+    let most = needle.len() * 2;
+    (0..hay.len()).filter(|&i| hay[i] == first).any(|start| {
+        let mut at = start;
+        needle[1..]
+            .iter()
+            .all(|c| match hay[at + 1..].iter().position(|h| h == c) {
+                Some(n) => {
+                    at += 1 + n;
+                    true
+                }
+                None => false,
+            })
+            && at - start < most
+    })
 }
 
 /// A chip: an optional icon and a label, drawn as `icon label ▾`.
@@ -518,6 +556,17 @@ pub fn effort_now(config: &Value, settings: &Settings) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letters_in_order_stay_close() {
+        assert!(in_order("drb", "nba 2k27 dribble animation"));
+        assert!(in_order("stl", "settle"));
+        assert!(!in_order(
+            "pill",
+            "macos ui inspiration library explorations"
+        ));
+        assert!(!in_order("zz", "abc"));
+    }
     use crossterm::event::KeyEventState;
     use serde_json::json;
 

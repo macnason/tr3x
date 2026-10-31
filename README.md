@@ -21,7 +21,8 @@ goes for every machine you run T3 on, without the T3 app.
   tap on a phone.
 - **Rex's markers are T3's.** Each tab reports its thread's status to Rex, so the dot on a tab
   means what it means in T3, and a waiting tab says what it's waiting on: the command, the file
-  or the question. The tab's glyph is the thread's provider.
+  or the question. The tab's glyph is the thread's provider, and its label starts with what T3
+  is waiting on you for: `●` an approval, `?` a question, `✕` failed, `✓` done and unread.
 - **Any screen.** Rex's Mac and iPhone apps can watch the same session from another device.
   **Fit to This Device** sizes it to the one you're on, the thread's title opens it in T3 there,
   and pictures follow that screen's light or dark.
@@ -29,7 +30,8 @@ goes for every machine you run T3 on, without the T3 app.
   order. Once there's more than one, a tab says which machine its thread runs on:
   `Fix the build · studio`. New threads start on whichever machine you pick.
 - **Close to settle.** Closing a tab settles the thread. A thread that's still working only
-  hides until it changes, so nothing gets stopped by accident.
+  hides until it changes, so nothing gets stopped by accident. **Find Thread…** brings back
+  anything settled, snoozed or archived.
 
 Nothing runs an agent of its own. Every message, approval and setting goes to T3.
 
@@ -76,7 +78,7 @@ the tab says so and carries on once it is.
 | | |
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project, model, effort, access, and Local or New worktree and its base branch. **Add folder…** in the project chip adds a project: type a path, Tab completes it. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The tab becomes the thread's. |
-| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
+| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread queues; `/steer …` sends it into the running turn instead. Shift+Enter, Alt+Enter or Ctrl+J for a new line; Reply grows with the text, up to 8 lines or 35% of the window, and shrinks back once sent. The Mac's editing keys work: ⌘← ⌘→ line start and end, ⌥← ⌥→ by word, ⌘⌫ to line start, ⌥⌫ a word. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
 | Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | Click **Approve**, **Always** or **Decline** over the input, or Tab to them and Enter. `a`, `s` or `d` then Enter does the same. Anything else you type is a reply. |
 | Answer | Click an option, or Tab to it. A pending question also takes the input as its answer, and a number picks that option. |
@@ -85,7 +87,8 @@ the tab says so and carries on once it is.
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
-| Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. `/settle` settles it whatever it's doing. |
+| Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. `/settle` settles it whatever it's doing. **Reopen Last Settled** in the palette undoes a tab closed by accident. |
+| Find | **Find Thread…** in the palette lists every thread on every machine, grouped Open, Snoozed, Settled and Archived, newest first. Typing filters. Enter brings one back to its tab, unsettling, waking or unarchiving it as needed; ⌥Enter opens it in T3. |
 | Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
 | Commands | `/steer …` `/settle` `/snooze` `/wake` `/pin` `/unpin` `/archive` `/stop` `/model` `/effort` `/mode` `/open` `/width`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. |
 | Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you |
@@ -119,8 +122,10 @@ a column count). `/width t3` goes back to following T3.
 
 - **One click to settle, not two.** Rex has no API for context-menu items or buttons on a tab,
   so closing the tab is the click. Sync notices within 5 seconds.
-- **Resizing reprints.** The conversation reprints when its width changes, so scrollback
-  position resets on resize.
+- **Resizing reprints.** The conversation reprints when its size changes, so scrollback
+  position resets on resize, including when Reply grows for a longer message.
+- **Rex keeps some keys.** ⌘Enter never reaches a pane (Find Thread uses ⌥Enter). Rex turns
+  ⌘← ⌘→ and ⌘⌫ into Ctrl+A, Ctrl+E and Ctrl+U on the way, which do the same.
 - **Pictures** need kitty graphics (Rex has it). HTML snapshots need a headless Chromium;
   without one an embed is a titled link.
 - **One size at a time.** Rex sizes a pane to one device. The others show that size scaled,
