@@ -93,6 +93,7 @@ pub enum Lifecycle {
     Pin,
     Unpin,
     Archive,
+    Delete,
 }
 
 pub fn command(thread_id: &str, action: &Lifecycle) -> Value {
@@ -116,7 +117,99 @@ pub fn command(thread_id: &str, action: &Lifecycle) -> Value {
         Lifecycle::Archive => {
             json!({"type": "thread.archive", "commandId": id, "threadId": thread_id})
         }
+        Lifecycle::Delete => {
+            json!({"type": "thread.delete", "commandId": id, "threadId": thread_id})
+        }
     }
+}
+
+/// Fails unless the machine's T3 has `capability`, saying where to update.
+pub async fn require(env: &Env, capability: &str) -> Result<()> {
+    env.rpc().await?;
+    if !env.has_capability(capability) {
+        anyhow::bail!(
+            "T3 on {} is too old for this. Update T3 Code there.",
+            env.name()
+        );
+    }
+    Ok(())
+}
+
+/// Gives the thread a title, or with `None` has T3 write one from the conversation.
+pub async fn rename(env: &Env, thread_id: &str, title: Option<&str>) -> Result<()> {
+    let mut command = json!({
+        "type": "thread.metadata.update",
+        "commandId": format!("t3rex:{}", uuid::Uuid::new_v4()),
+        "threadId": thread_id,
+    });
+    match title.map(str::trim) {
+        Some("") => anyhow::bail!("a title can't be empty"),
+        Some(title) => command["title"] = json!(title),
+        None => {
+            require(env, "threadTitleRegeneration").await?;
+            command["regenerateTitle"] = json!(true);
+        }
+    }
+    env.dispatch(command).await.map(drop)
+}
+
+/// A new thread that carries on from this one's latest settled point, as T3's Fork does.
+/// Returns the new thread's id.
+pub async fn fork(env: &Env, thread_id: &str, title: Option<&str>) -> Result<String> {
+    let target = uuid::Uuid::new_v4().to_string();
+    let mut command = json!({
+        "type": "thread.fork",
+        "commandId": format!("t3rex:{}", uuid::Uuid::new_v4()),
+        "createdBy": "user",
+        "creationSource": "web",
+        "sourceThreadId": thread_id,
+        "targetThreadId": target,
+        "sourcePoint": {"type": "latest_stable"},
+    });
+    if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        command["title"] = json!(title);
+    }
+    env.dispatch(command).await?;
+    Ok(target)
+}
+
+/// Stops the thread, as T3's Stop does: its run and the tasks it delegated. A T3 without
+/// `thread.stop` gets the running turn interrupted instead. Returns whether anything ran.
+pub async fn stop(env: &Env, thread_id: &str, run_id: Option<&str>) -> Result<bool> {
+    env.rpc().await?;
+    if env.has_capability("threadStop") {
+        env.dispatch(json!({
+            "type": "thread.stop",
+            "commandId": format!("t3rex:{}", uuid::Uuid::new_v4()),
+            "threadId": thread_id,
+            "reason": "Stopped from Rex",
+        }))
+        .await?;
+        return Ok(true);
+    }
+    let Some(run) = run_id else {
+        return Ok(false);
+    };
+    env.interrupt(thread_id, run).await?;
+    Ok(true)
+}
+
+/// Kills the agent of a thread that ignores Stop, as T3's Force stop does. `run_id` is the
+/// run seen ignoring it; T3 refuses once a newer one has started.
+pub async fn force_stop(env: &Env, thread_id: &str, run_id: Option<&str>) -> Result<String> {
+    require(env, "threadForceStop").await?;
+    let mut input = json!({"threadId": thread_id});
+    if let Some(run) = run_id {
+        input["runId"] = json!(run);
+    }
+    let result = env.call("orchestration.forceStopThread", input).await?;
+    Ok(match result["outcome"].as_str() {
+        Some("killed") => "Killed the agent".into(),
+        Some("released" | "releasing") => "Ended the agent's session".into(),
+        // The agent also works for other threads, so T3 only ended this one's turn.
+        Some("shared") => "Ended this thread's turn".into(),
+        _ => "Force stopped".into(),
+    })
 }
 
 /// Records that the user looked at the thread, which clears Done and Woke in T3.

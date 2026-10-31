@@ -1,6 +1,7 @@
 //! t3rex: Rex as the interface to T3 Code. T3 keeps running the agents and owns every thread's
 //! state; Rex shows each open thread as a window in one session.
 
+mod actions;
 mod ask;
 mod chat;
 mod compose;
@@ -16,11 +17,13 @@ mod paste;
 mod pick;
 mod picker;
 mod picture;
+mod prompt;
 mod render;
 mod rex;
 mod scheme;
 mod slash;
 mod state;
+mod surface;
 mod sync;
 mod t3;
 mod width;
@@ -135,6 +138,42 @@ enum Command {
     /// Archive the thread.
     #[command(hide = true)]
     Archive(Target),
+    /// Give the thread a title. Without one, asks for it.
+    #[command(hide = true)]
+    Rename {
+        title: Option<String>,
+        /// Have T3 write a title from the conversation.
+        #[arg(long, conflicts_with = "title")]
+        regenerate: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Continue the thread in a new one, and go to its tab.
+    #[command(hide = true)]
+    Fork {
+        /// The new thread's title, else T3's.
+        title: Option<String>,
+        #[arg(long)]
+        client: Option<String>,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Delete the thread, in T3 too. Asks first, unless --yes.
+    #[command(hide = true)]
+    Delete {
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Stop the thread, or with --force kill an agent that ignores Stop.
+    #[command(hide = true)]
+    Stop {
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Open the thread in T3 Code.
     #[command(hide = true)]
     Open(Target),
@@ -147,6 +186,24 @@ enum Command {
         /// The machine to call, else this Mac.
         #[arg(long)]
         env: Option<String>,
+    },
+    /// What a T3 build offers: capabilities, commands, RPC methods and keybinding commands.
+    /// With --check, what changed since a saved surface; it exits 1 when something did.
+    #[command(hide = true)]
+    Surface {
+        /// A T3 build: its `t3` executable, the desktop app's `app.asar`, or the newest on
+        /// this Mac.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// The T3 version it is, to note in the surface.
+        #[arg(long)]
+        label: Option<String>,
+        /// A saved surface to compare with.
+        #[arg(long)]
+        check: Option<std::path::PathBuf>,
+        /// Save the surface here.
+        #[arg(long)]
+        write: Option<std::path::PathBuf>,
     },
     /// Print the windows sync wants, in order, for working on sync.
     #[command(hide = true)]
@@ -320,7 +377,11 @@ async fn terminated() -> i32 {
 }
 
 async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
-    let (client, thread) = t3::thread(&target.resolve().await?)?;
+    lifecycle_of(&target.resolve().await?, action).await
+}
+
+async fn lifecycle_of(key: &str, action: Lifecycle) -> Result<()> {
+    let (client, thread) = t3::thread(key)?;
     let thread = thread.thread;
     let first = client.dispatch(t3::command(&thread, &action)).await;
     // T3 won't settle or archive a thread mid-run. Settling says the thread is finished, so
@@ -329,7 +390,12 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
         let text = e.to_string();
         text.contains("still running") || text.contains("waiting on an approval or question")
     });
-    if !(running && matches!(action, Lifecycle::Settle | Lifecycle::Archive)) {
+    if !(running
+        && matches!(
+            action,
+            Lifecycle::Settle | Lifecycle::Archive | Lifecycle::Delete
+        ))
+    {
         return first.map(drop);
     }
     let run_id = |shell: &t3client::projection::ShellState| {
@@ -352,6 +418,26 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
         .dispatch(t3::command(&thread, &action))
         .await
         .map(drop)
+}
+
+/// The thread as T3's shell has it: its title and the run it's on.
+async fn shell_thread(env: &t3client::env::Env, id: &str) -> Option<serde_json::Value> {
+    let shell = env.shell().await.ok()?;
+    t3client::inbox::find_thread(&shell, id).cloned()
+}
+
+/// In a floating layer the window closes with the process, so a failure stays up a moment.
+async fn shown(result: Result<()>) -> Result<()> {
+    if let Err(e) = &result {
+        println!("\r\n  ✗ {e:#}");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    }
+    result
+}
+
+fn interactive() -> bool {
+    // SAFETY: isatty(3) on stdin.
+    unsafe { libc::isatty(0) == 1 }
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -393,6 +479,79 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Archive(t) => lifecycle(&t, Lifecycle::Archive).await,
+        Command::Rename {
+            title,
+            regenerate,
+            target,
+        } => {
+            let (env, r) = t3::thread(&target.resolve().await?)?;
+            if regenerate {
+                return t3::rename(&env, &r.thread, None).await;
+            }
+            if let Some(title) = title {
+                return t3::rename(&env, &r.thread, Some(&title)).await;
+            }
+            let current = shell_thread(&env, &r.thread).await;
+            let current = current.as_ref().and_then(|t| t["title"].as_str());
+            match prompt::ask("Rename Thread", current.unwrap_or_default(), false).await? {
+                prompt::Answer::Text(title) => {
+                    shown(t3::rename(&env, &r.thread, Some(&title)).await).await
+                }
+                _ => Ok(()),
+            }
+        }
+        Command::Fork {
+            title,
+            client,
+            target,
+        } => {
+            let (env, r) = t3::thread(&target.resolve().await?)?;
+            let new = t3::fork(&env, &r.thread, title.as_deref()).await?;
+            let key = t3client::hub::ThreadRef::new(env.id(), &new).to_string();
+            find::go_to(&key, client.as_deref()).await
+        }
+        Command::Delete { yes, target } => {
+            let key = target.resolve().await?;
+            if yes {
+                return lifecycle_of(&key, Lifecycle::Delete).await;
+            }
+            if !interactive() {
+                bail!("deleting can't be undone: add --yes");
+            }
+            let (env, r) = t3::thread(&key)?;
+            let current = shell_thread(&env, &r.thread).await;
+            let title = current
+                .as_ref()
+                .and_then(|t| t["title"].as_str())
+                .unwrap_or("This thread");
+            let subject = format!("{title} goes for good, in T3 too.");
+            match prompt::ask("Delete Thread", &subject, true).await? {
+                prompt::Answer::Yes => shown(lifecycle_of(&key, Lifecycle::Delete).await).await,
+                _ => Ok(()),
+            }
+        }
+        Command::Stop { force, target } => {
+            let (env, r) = t3::thread(&target.resolve().await?)?;
+            let current = shell_thread(&env, &r.thread).await;
+            let run = current
+                .as_ref()
+                .and_then(|t| t["activeRunId"].as_str())
+                .map(str::to_string);
+            if force {
+                println!("{}", t3::force_stop(&env, &r.thread, run.as_deref()).await?);
+                return Ok(());
+            }
+            if !t3::stop(&env, &r.thread, run.as_deref()).await? {
+                bail!("nothing is running");
+            }
+            Ok(())
+        }
+        Command::Surface {
+            from,
+            label,
+            check,
+            write,
+        } => surface::run(from, label, check, write),
         Command::Open(t) => {
             let thread = t.resolve().await?;
             install::open_in_t3(&thread).await

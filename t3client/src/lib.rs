@@ -18,4 +18,5 @@ pub mod pair;
 pub mod projection;
 pub mod rpc;
 pub mod store;
+pub mod surface;
 pub mod transcript;

@@ -835,8 +835,12 @@ return {{}}"#,
                 "modelSelection": {"instanceId": self.settings.instance},
                 "projectId": self.project,
             });
-            self.slash
-                .sync(&self.editor, Some(&self.config), Some(&thread));
+            self.slash.sync(
+                &self.editor,
+                Some(&self.config),
+                Some(&thread),
+                &Value::Null,
+            );
             let bottom = first_body + body.len() + 1;
             text.push_str(&self.slash.draw(
                 &mut self.painter,
