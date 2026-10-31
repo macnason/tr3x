@@ -335,6 +335,24 @@ impl Settings {
         models::runtime_mode_label(&self.mode).to_string()
     }
 
+    /// `Model · Effort · Access` in at most `width` columns, for the one chip under Reply. The
+    /// model's name gives way first.
+    pub fn summary(&self, config: &Value, width: usize) -> String {
+        let tail: String = self
+            .effort_label(config)
+            .into_iter()
+            .chain([self.mode_label()])
+            .map(|part| format!(" · {part}"))
+            .collect();
+        let tail_width = unicode_width::UnicodeWidthStr::width(tail.as_str());
+        let model = self.model_label(config);
+        let room = width.saturating_sub(tail_width);
+        if room == 0 {
+            return fit(&format!("{model}{tail}"), width);
+        }
+        format!("{}{tail}", fit(&model, room).replace(" …", "…"))
+    }
+
     /// Switches to `instance/slug`, keeping the effort when the new model offers it.
     pub fn set_model(&mut self, config: &Value, id: &str) {
         let Some((instance, slug)) = id.split_once('/') else {
@@ -484,6 +502,35 @@ mod tests {
         }
         assert_eq!(menu.shown(), vec![1]);
         assert!(matches!(menu.key(key(KeyCode::Enter)), MenuKey::Chose(id) if id == "b"));
+    }
+
+    #[test]
+    fn the_chip_shortens_the_model_first() {
+        let config = json!({"providers": [{"instanceId": "c", "enabled": true, "models": [
+            {"slug": "x", "name": "Claude Opus 5.5", "capabilities": {"optionDescriptors": [{"id": "effort", "type": "select",
+                "options": [{"id": "medium", "label": "Medium", "isDefault": true}]}]}}
+        ]}]});
+        let s = Settings {
+            instance: "c".into(),
+            model: "x".into(),
+            effort: None,
+            mode: "full-access".into(),
+        };
+        let wide = "Claude Opus 5.5 · Medium · Full access";
+        assert_eq!(s.summary(&config, 80), wide);
+        assert_eq!(s.summary(&config, 39), wide);
+        assert_eq!(
+            s.summary(&config, 36),
+            "Claude Opus… · Medium · Full access"
+        );
+        // Too narrow for the tail: one line, cut, never wider than asked.
+        for width in [1, 5, 20, 25] {
+            let label = s.summary(&config, width);
+            assert!(
+                unicode_width::UnicodeWidthStr::width(label.as_str()) <= width,
+                "{label}"
+            );
+        }
     }
 
     #[test]

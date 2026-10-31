@@ -63,8 +63,8 @@ another.
 | | |
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project, model, effort, access, Local or New worktree and its base branch, and the device. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The tab becomes the thread's. |
-| Reply | Type in Reply, Enter to send. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
-| Model | Click a chip under Reply, press Tab there, type `/model`, or ⌃⌘M. Every enabled provider's models, then the model's efforts; ← → for effort and access. The choice applies to the next message. |
+| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread queues; `/steer …` sends it into the running turn instead. Alt+Enter or Ctrl+J for a new line. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
+| Model | Click the chip under Reply, press Tab there, type `/model`, or ⌃⌘M. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | `a` then Enter accepts, `s` then Enter accepts for the session, `d` then Enter declines. Anything else you type is a reply. |
 | Answer | A pending question takes the input as its answer. A number picks that option. |
 | Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. ⌃⌘S or `/settle` settle it whatever it's doing. |

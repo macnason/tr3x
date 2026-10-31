@@ -157,37 +157,23 @@ impl Composer {
         })
     }
 
-    /// The model, effort and access chips under the input, as T3's composer shows them, with
-    /// the provider's logo.
-    fn chips(&self) -> Vec<(Chip, Field)> {
+    /// The one chip under the input, as T3's composer shows the model: the provider's logo,
+    /// then model, effort and access. It opens the picker.
+    fn chips(&self, width: usize) -> Vec<(Chip, Field)> {
         let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
             return Vec::new();
         };
         let settings = Settings::of_thread(config, state.thread());
-        let mut chips = vec![(
+        let icon = self.logos.get(&settings.instance).cloned();
+        // The logo and the ` ▾` take five columns.
+        let room = width.saturating_sub(if icon.is_some() { 5 } else { 2 });
+        vec![(
             Chip {
-                icon: self.logos.get(&settings.instance).cloned(),
-                label: settings.model_label(config),
+                icon,
+                label: settings.summary(config, room),
             },
             Field::Model,
-        )];
-        if let Some(effort) = settings.effort_label(config) {
-            chips.push((
-                Chip {
-                    icon: None,
-                    label: effort,
-                },
-                Field::Effort,
-            ));
-        }
-        chips.push((
-            Chip {
-                icon: None,
-                label: settings.mode_label(),
-            },
-            Field::Access,
-        ));
-        chips
+        )]
     }
 
     /// Opens the model picker over the window, on `field`.
@@ -218,7 +204,7 @@ impl Composer {
         let (left, column) = self.chat_width.width.column(self.cols);
         let width = column.saturating_sub(2).max(10);
         // The chips take the bottom row, and a blank row above them when there is room.
-        let chips: Vec<(Chip, Field)> = self.chips();
+        let chips: Vec<(Chip, Field)> = self.chips(column);
         let reserved = match (chips.is_empty(), self.rows) {
             (true, _) => 0,
             (false, r) if r >= 5 => 2,
