@@ -102,28 +102,15 @@ pub fn wanted(
     out
 }
 
-/// A subagent gets a window while it works or needs you. A task delegated through T3 keeps
-/// its window until it settles, as a thread of its own would, unless it was stopped: a
-/// cancelled task never settles, and T3 drops it from the parent. A provider's own subagent
-/// at rest is history, which T3 shows inside the parent thread.
+/// A subagent gets a window only while it works or needs you. Once it finishes, its result
+/// belongs to the parent thread, which is where T3 shows it.
 fn shown_subagent(thread: &Value, now: i64) -> bool {
-    if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null() {
-        return false;
-    }
-    let active = matches!(
-        t3term::tui::status_label(thread, now),
-        Some("Approval" | "Input" | "Working" | "Goal" | "Failed" | "Limited")
-    );
-    let delegated = thread["creationSource"] == "mcp"
-        || thread["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("thread:delegated-task:"));
-    let settled = thread["settledOverride"] == "settled" || !thread["settledAt"].is_null();
-    let stopped = matches!(
-        thread["status"].as_str(),
-        Some("interrupted" | "cancelled" | "rolled_back")
-    );
-    active || (delegated && !settled && !stopped)
+    thread["lineage"]["relationshipToParent"] == "subagent"
+        && thread["archivedAt"].is_null()
+        && matches!(
+            t3term::tui::status_label(thread, now),
+            Some("Approval" | "Input" | "Working" | "Goal" | "Failed" | "Limited")
+        )
 }
 
 /// The thread a subagent works for at the top of its chain: the first ancestor that isn't a
@@ -863,8 +850,12 @@ mod tests {
             threads: vec![
                 thread("a", json!({})),
                 thread("b", json!({})),
-                // A task delegated through T3, not settled: shown under a.
-                child("task", "a", json!({"creationSource": "mcp"})),
+                // A task delegated through T3, working: shown under a.
+                child(
+                    "task",
+                    "a",
+                    json!({"creationSource": "mcp", "activeRunId": "r1", "latestRunId": "r1", "activityRunStatus": "running"}),
+                ),
                 // Its own subagent, working: shown under a too.
                 child(
                     "deep",
@@ -876,6 +867,12 @@ mod tests {
                     "old",
                     "b",
                     json!({"creationSource": "provider", "activityRunStatus": "idle"}),
+                ),
+                // A delegated task that finished: its result is the parent's, not shown.
+                child(
+                    "finished",
+                    "b",
+                    json!({"creationSource": "mcp", "status": "idle", "latestRunId": "r", "lastVisitedAt": "2026-10-31T00:00:00.000Z"}),
                 ),
                 // A settled delegated task: not shown.
                 child(
@@ -897,7 +894,12 @@ mod tests {
         let ids: Vec<&str> = wants.iter().map(|w| w.thread_id.as_str()).collect();
         let a = ids.iter().position(|i| *i == "a").unwrap();
         assert_eq!(&ids[a + 1..a + 3], &["task", "deep"]);
-        assert!(!ids.contains(&"old") && !ids.contains(&"done") && !ids.contains(&"cancelled"));
+        assert!(
+            !ids.contains(&"old")
+                && !ids.contains(&"done")
+                && !ids.contains(&"cancelled")
+                && !ids.contains(&"finished")
+        );
         assert_eq!(wants[a + 1].label, "↳ task");
     }
 

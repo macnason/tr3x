@@ -15,9 +15,8 @@ what T3 says into one Rex session.
   thread with a plain `thread.settle`, never stopping a run. A thread that's running or waiting
   on you is only hidden until it changes. Every window going at once is the session closing,
   so nothing is settled then.
-- Subagents get a window under their parent while they work or need you. A task delegated
-  through T3 keeps its window until it settles or is stopped. A provider's own subagent at rest
-  is history, which T3 shows inside the parent thread.
+- Subagents get a window under their parent only while they work or need you. Once one
+  finishes, its result belongs to the parent thread, which is where T3 shows it.
 - State lives in `~/.local/state/t3rex/state.json`: the session id, the window of each thread,
   and threads hidden by a closed window. t3rex never touches a session or window it didn't
   make.

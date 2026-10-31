@@ -74,7 +74,7 @@ another.
 | Palette | Every action is in Rex's command palette under **T3 Code**. |
 
 Subagents show under the thread they work for, as `↳ title`, while they work or need you. A
-task delegated through T3 stays until it settles or is stopped.
+finished subagent's result is in its parent thread.
 
 ### Chat width
 
