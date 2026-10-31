@@ -104,6 +104,11 @@ fn t3s() -> PathBuf {
     t3term::discovery::t3_home().join("userdata/client-settings.json")
 }
 
+/// t3rex's own settings, `~/.config/t3rex/settings.json`.
+pub fn settings() -> Option<Map<String, Value>> {
+    read(&ours())
+}
+
 fn read(path: &PathBuf) -> Option<Map<String, Value>> {
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str(&text).ok()? {

@@ -2006,6 +2006,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "libc",
  "pulldown-cmark",
  "serde",
  "serde_json",

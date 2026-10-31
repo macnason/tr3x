@@ -1,6 +1,15 @@
--- t3rex: T3 Code actions for Rex. Installed by `t3rex install`, loaded from init.lua with
+-- t3rex: T3 Code in Rex. Installed by `t3rex install`, loaded from init.lua with
 -- require("t3rex"). Each action acts on the T3 thread whose window has focus.
 local T3REX = "@T3REX@"
+-- The Rex, T3 and state directory install found, for everything t3rex runs from here.
+local ENV = { T3REX_REX = "@REX@", T3CODE_HOME = "@T3HOME@", T3REX_STATE_DIR = "@STATE@" }
+
+-- Sync keeps the T3 Code session in step with T3, and starts as this file loads. A sync that's
+-- already running holds a lock, so the one each reload starts leaves at once.
+local function sync()
+  rex.exec.start({ T3REX, "sync", "--log" }, { env = ENV, detach = true, stdout = false, stderr = false })
+end
+sync()
 
 local function t3rex(ctx, args)
   local argv = { T3REX }
@@ -9,7 +18,7 @@ local function t3rex(ctx, args)
     table.insert(argv, "--block")
     table.insert(argv, ctx.block_id)
   end
-  local r, err = rex.exec(argv, { timeout = 20 })
+  local r, err = rex.exec(argv, { env = ENV, timeout = 20 })
   if not r then error(err, 0) end
   if not r.ok then error((r.stderr ~= "" and r.stderr or r.stdout):gsub("^t3rex: ", ""), 0) end
   return r.stdout
@@ -40,8 +49,8 @@ rex.action{
   category = "T3 Code",
   keywords = "t3 inbox next attention approval",
   run = function(ctx)
-    local r = rex.exec({ T3REX, "inbox" }, { timeout = 10 })
-    if not (r and r.ok) then error("t3rex isn't syncing", 0) end
+    local r = rex.exec({ T3REX, "inbox" }, { env = ENV, timeout = 10 })
+    if not (r and r.ok) then sync(); error("t3rex wasn't syncing; starting it", 0) end
     local target = rex.json.decode(r.stdout)
     if target and target.session_id then
       rex.client.queue("session.select", target)
@@ -56,8 +65,8 @@ rex.action{
   category = "T3 Code",
   keywords = "t3 create start compose prompt",
   run = function(ctx)
-    local r = rex.exec({ T3REX, "inbox" }, { timeout = 10 })
-    if not (r and r.ok) then error("t3rex isn't syncing", 0) end
+    local r = rex.exec({ T3REX, "inbox" }, { env = ENV, timeout = 10 })
+    if not (r and r.ok) then sync(); error("t3rex wasn't syncing; starting it", 0) end
     local sid = rex.json.decode(r.stdout).session_id
     local w, err = rex.session.new_window{
       session_id = sid,

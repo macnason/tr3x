@@ -3,6 +3,7 @@
 
 mod chat;
 mod compose;
+mod fade;
 mod icons;
 mod install;
 mod media;
@@ -32,17 +33,25 @@ struct Cli {
     command: Command,
 }
 
+// What a user runs is install, uninstall, doctor and width. The rest is what Rex's actions,
+// panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
 enum Command {
-    /// Keep the "T3 Code" Rex session in step with T3. Runs until stopped.
+    /// Keep the "T3 Code" Rex session in step with T3. Runs until stopped; Rex starts it.
+    #[command(hide = true)]
     Sync {
         /// Leave the session where Rex puts new sessions, instead of first.
         #[arg(long)]
         no_first: bool,
+        /// Write to sync.log in t3rex's state directory, as when Rex starts it.
+        #[arg(long)]
+        log: bool,
     },
     /// The conversation pane of a thread's window.
+    #[command(hide = true)]
     Chat { thread: String },
     /// A new thread: the window Rex's New Tab makes in the T3 Code session.
+    #[command(hide = true)]
     New {
         /// Show the keys that matter, for a session with no threads yet.
         #[arg(long)]
@@ -56,17 +65,22 @@ enum Command {
         field: pick::Field,
     },
     /// Choose the model, effort and access for the thread's next message, in a floating layer.
+    #[command(hide = true)]
     Model(Target),
     /// The reply pane of a thread's window.
+    #[command(hide = true)]
     Compose { thread: String },
     /// Print a thread's transcript blocks, for working on the chat pane.
     #[command(hide = true)]
     Blocks { thread: String },
     /// Settle the thread. Its window closes.
+    #[command(hide = true)]
     Settle(Target),
     /// Bring a settled thread back.
+    #[command(hide = true)]
     Unsettle(Target),
     /// Snooze the thread, for 2h, 30m, 1d and so on.
+    #[command(hide = true)]
     Snooze {
         #[arg(default_value = "1h")]
         duration: String,
@@ -74,8 +88,10 @@ enum Command {
         target: Target,
     },
     /// End the thread's snooze.
+    #[command(hide = true)]
     Wake(Target),
     /// Pin the thread, or unpin it with --off.
+    #[command(hide = true)]
     Pin {
         #[arg(long)]
         off: bool,
@@ -83,8 +99,10 @@ enum Command {
         target: Target,
     },
     /// Archive the thread.
+    #[command(hide = true)]
     Archive(Target),
     /// Open the thread in T3 Code.
+    #[command(hide = true)]
     Open(Target),
     /// Call a T3 RPC method and print its answer, for development.
     #[command(hide = true)]
@@ -97,17 +115,19 @@ enum Command {
     #[command(hide = true)]
     Wants,
     /// Print where the thread that most needs you is, as Rex's session.select takes it.
+    #[command(hide = true)]
     Inbox,
     /// Print the thread a Rex block belongs to.
+    #[command(hide = true)]
     Which(Target),
     /// Show or set how wide conversations read: comfortable, wide, full, a column count, or
     /// t3 to follow T3 Code's Chat width.
     Width { width: Option<String> },
-    /// Set up t3rex: the Rex config, the launchd agent, and a first sync.
+    /// Set up t3rex: the Rex config that runs it, and a first sync.
     Install,
-    /// Undo `install`: stop the agent, remove the config line, close t3rex's session.
+    /// Undo `install`: stop sync, remove the config, close t3rex's session.
     Uninstall,
-    /// Check that Rex and T3 are reachable.
+    /// Check each part of the setup, with a fix for what's wrong.
     Doctor,
 }
 
@@ -159,8 +179,8 @@ impl Target {
 }
 
 fn main() {
-    // A temporary login per process, revoked on exit, keeps the Keychain out of it: a launchd
-    // agent or a Rex pane can't answer a Keychain prompt.
+    // A temporary login per process, revoked on exit, keeps the Keychain out of it: sync and
+    // the panes Rex runs can't answer a Keychain prompt.
     if std::env::var_os("T3REX_SAVED_LOGIN").is_none() {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("T3TERM_NO_SAVED_LOGIN", "1") };
@@ -256,7 +276,7 @@ async fn lifecycle(target: &Target, action: Lifecycle) -> Result<()> {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Sync { no_first } => sync::run(!no_first).await,
+        Command::Sync { no_first, log } => sync::run(!no_first, log).await,
         Command::Chat { thread } => chat::run(thread).await,
         Command::Compose { thread } => compose::run(thread).await,
         Command::New { welcome } => new::run(welcome).await,

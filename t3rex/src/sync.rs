@@ -516,6 +516,7 @@ impl Syncer {
         }
         let exe = self.exe.to_string_lossy().into_owned();
         let child = tokio::process::Command::new(&self.rex.bin)
+            .args(crate::rex::NO_AUTOSTART)
             .args(["do", "-s", session, "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -598,15 +599,105 @@ impl Syncer {
     }
 }
 
-/// Follows T3 until interrupted, reconciling after each burst of changes and every few
-/// seconds, which picks up snoozes that end and windows closed in Rex.
-pub async fn run(first: bool) -> Result<()> {
-    // One sync at a time: two would each make windows for the same threads.
-    std::fs::create_dir_all(crate::state::dir())?;
-    let lock = std::fs::File::create(crate::state::dir().join("sync.lock"))?;
-    if lock.try_lock().is_err() {
-        anyhow::bail!("another t3rex sync is already running");
+/// Where a running sync writes its process id, and holds a lock while it runs.
+pub fn lock_path() -> PathBuf {
+    crate::state::dir().join("sync.lock")
+}
+
+/// The log a sync started by Rex writes to.
+pub fn log_path() -> PathBuf {
+    crate::state::dir().join("sync.log")
+}
+
+/// The process id of the sync that's running, if one is.
+pub fn running() -> Option<u32> {
+    let file = std::fs::File::open(lock_path()).ok()?;
+    if file.try_lock_shared().is_ok() {
+        return None;
     }
+    std::fs::read_to_string(lock_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Stops the running sync, waiting a few seconds for it to let go of its lock.
+pub async fn stop() -> bool {
+    let Some(pid) = running() else {
+        return false;
+    };
+    // SAFETY: kill(2) with a pid the lock holder wrote.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    for _ in 0..30 {
+        if running().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
+}
+
+/// Sends this process's output to `sync.log`, starting it afresh once it passes a megabyte.
+fn log_to_file() -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let path = log_path();
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    // SAFETY: dup2(2) onto stdout and stderr, before any other thread writes to them.
+    unsafe {
+        libc::dup2(file.as_raw_fd(), 1);
+        libc::dup2(file.as_raw_fd(), 2);
+    }
+    Ok(())
+}
+
+/// Follows T3 until stopped. Rex starts sync when its config loads, and every load starts
+/// another, so the one that holds the lock carries on and the rest leave at once. Nothing
+/// restarts it, so whatever goes wrong with T3 it starts over, with a fresh login, after a
+/// pause.
+pub async fn run(first: bool, log: bool) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    std::fs::create_dir_all(crate::state::dir())?;
+    // One sync at a time: two would each make windows for the same threads.
+    let mut lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path())?;
+    if lock.try_lock().is_err() {
+        if std::io::stderr().is_terminal() {
+            anyhow::bail!("another t3rex sync is already running");
+        }
+        return Ok(());
+    }
+    lock.set_len(0)?;
+    write!(lock, "{}", std::process::id())?;
+    if log {
+        log_to_file()?;
+    }
+    tokio::spawn(crate::fade::follow());
+    let mut pause = 2;
+    loop {
+        let started = std::time::Instant::now();
+        let Err(error) = follow(first).await;
+        if started.elapsed() > Duration::from_secs(120) {
+            pause = 2;
+        }
+        eprintln!("t3rex: {error:#}; trying again in {pause}s");
+        tokio::time::sleep(Duration::from_secs(pause)).await;
+        pause = (pause * 2).min(60);
+    }
+}
+
+/// One connection to T3, reconciling after each burst of changes and every few seconds,
+/// which picks up snoozes that end and windows closed in Rex. Returns only when it fails.
+async fn follow(first: bool) -> Result<std::convert::Infallible> {
     // Operate, to settle a thread whose window is closed.
     let client = t3::connect(true).await.context("couldn't reach T3")?;
     let caps = t3::capabilities(&client);
@@ -638,7 +729,7 @@ pub async fn run(first: bool) -> Result<()> {
                 }
                 Some(WatchEvent::Reconnecting { reason, .. }) => {
                     eprintln!("t3rex: T3 reconnecting: {reason}");
-                    // After a few minutes, start over with a fresh login; launchd restarts us.
+                    // After a few minutes, start over with a fresh login.
                     failures += 1;
                     if failures > 40 {
                         anyhow::bail!("T3 hasn't answered for a while: {reason}");
