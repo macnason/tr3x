@@ -144,12 +144,15 @@ enum Done {
     /// A link to open the thread with, on the device it's clicked on.
     Link(String),
     /// A resize finished, or gave up.
-    Resized,
+    Resized(bool),
 }
 
-/// The share of the window the conversation has over Reply, as sync and `new` split it.
+/// The share of the window the conversation has over Reply, as sync and `new` split it. Reply
+/// is never smaller than that.
 const SPLIT: f64 = 0.86;
-/// Reply grows by at most this many input lines, and to at most this share of the window.
+/// Reply's rows at rest: about seven lines of text over the chip.
+const REST_ROWS: usize = 9;
+/// Reply grows by at most this many rows past that, and to at most this share of the window.
 const GROW_LINES: usize = 7;
 const GROW_SHARE: f64 = 0.35;
 /// How long the line count has to hold before Reply resizes. Each resize reprints the
@@ -172,25 +175,24 @@ fn split_above(layout: &Value, block: &str) -> Option<(String, f64)> {
     split_above(&split["before"], block).or_else(|| split_above(&split["after"], block))
 }
 
-/// Reply growing with its text: one row per input line past the first, by moving the split
-/// between the conversation and Reply (`session.resize_pane`). The split is the session's, so
-/// every device looking at it sees the same.
+/// Reply at `REST_ROWS`, growing with its text, by moving the split between the conversation
+/// and Reply (`session.resize_pane`). The split is the session's, so every device looking at
+/// it sees the same.
 struct Grow {
     session: String,
     block: String,
-    /// The extra lines the split was last asked for, and the ones the text wants now.
+    /// The rows the split was last asked for, 0 when that didn't take, and the ones Reply
+    /// wants now.
     asked: usize,
     wants: usize,
     /// When `wants` changed; Reply resizes once it has held for `GROW_WAIT`.
     since: Option<tokio::time::Instant>,
-    /// Reply's rows at the starting split, the least it has.
-    base: usize,
     busy: bool,
 }
 
-/// Moves the split so Reply has `base` rows and `extra` more, within `GROW_SHARE` of the
-/// window, or back to the starting split for none. None when it couldn't.
-async fn resize(session: String, block: String, base: usize, extra: usize) -> Option<()> {
+/// Moves the split so Reply has `want` rows, within `GROW_SHARE` of the window and no less
+/// than the starting split. None when it couldn't.
+async fn resize(session: String, block: String, want: usize) -> Option<()> {
     let rex = crate::rex::Rex::find();
     // The conversation: the pane before Reply in its window's split, and the split as it is.
     let view = rex.inspect(&session).await.ok()?;
@@ -224,19 +226,14 @@ async fn resize(session: String, block: String, base: usize, extra: usize) -> Op
         return None;
     }
     let (chat_rows, reply_rows) = (chat_size["rows"].as_f64()?, reply_size["rows"].as_f64()?);
-    let next = if extra == 0 {
-        SPLIT
-    } else {
-        // Each pane loses a few rows to its header. Work that out from the split as it is:
-        // reply = (1 - ratio) * all - header, with all = chat + reply + 2 * header.
-        let share = 1.0 - ratio;
-        let header =
-            ((share * (chat_rows + reply_rows) - reply_rows) / (1.0 - 2.0 * share)).max(0.0);
-        let all = chat_rows + reply_rows + 2.0 * header;
-        let most = ((chat_rows + reply_rows) * GROW_SHARE).floor();
-        let want = (base as f64 + extra as f64).min(most).max(base as f64);
-        (1.0 - (want + header + 0.5) / all).clamp(1.0 - GROW_SHARE - 0.1, SPLIT)
-    };
+    // Each pane loses a few rows to its header. Work that out from the split as it is:
+    // reply = (1 - ratio) * all - header, with all = chat + reply + 2 * header.
+    let share = 1.0 - ratio;
+    let header = ((share * (chat_rows + reply_rows) - reply_rows) / (1.0 - 2.0 * share)).max(0.0);
+    let all = chat_rows + reply_rows + 2.0 * header;
+    let most = ((chat_rows + reply_rows) * GROW_SHARE).floor();
+    let want = (want as f64).min(most);
+    let next = (1.0 - (want + header + 0.5) / all).clamp(1.0 - GROW_SHARE - 0.1, SPLIT);
     if (next - ratio).abs() < 0.001 {
         return Some(());
     }
@@ -444,7 +441,9 @@ impl Composer {
         let prompt = format!("{BLUE}{BOLD}›{RESET} ");
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
         if let Some(grow) = self.grow.as_mut() {
-            let wants = (lines.len() - 1).min(GROW_LINES);
+            // The question, the input, a row for a note, and the chips.
+            let need = rows.len() + lines.len() + 1 + reserved;
+            let wants = need.clamp(REST_ROWS, REST_ROWS + GROW_LINES);
             if wants != grow.wants {
                 grow.wants = wants;
                 grow.since = Some(tokio::time::Instant::now());
@@ -1004,9 +1003,8 @@ pub async fn run(thread: String) -> Result<()> {
                 session,
                 block,
                 asked: 0,
-                wants: 0,
-                since: None,
-                base: rows as usize,
+                wants: REST_ROWS,
+                since: Some(tokio::time::Instant::now()),
                 busy: false,
             }),
             _ => None,
@@ -1050,8 +1048,11 @@ pub async fn run(thread: String) -> Result<()> {
                     Some(Done::Config(config)) => composer.config = Some(config),
                     Some(Done::Link(url)) => composer.link = Some(url),
                     Some(Done::Logos(logos)) => composer.logos = logos,
-                    Some(Done::Resized) => if let Some(grow) = composer.grow.as_mut() {
+                    Some(Done::Resized(ok)) => if let Some(grow) = composer.grow.as_mut() {
                         grow.busy = false;
+                        if !ok {
+                            grow.asked = 0;
+                        }
                         // The text may have changed while it resized.
                         if grow.wants != grow.asked {
                             grow.since = Some(tokio::time::Instant::now());
@@ -1079,10 +1080,10 @@ pub async fn run(thread: String) -> Result<()> {
                     if grow.wants != grow.asked {
                         grow.asked = grow.wants;
                         grow.busy = true;
-                        let (session, block, base, extra, tx) = (grow.session.clone(), grow.block.clone(), grow.base, grow.wants, composer.tx.clone());
+                        let (session, block, want, tx) = (grow.session.clone(), grow.block.clone(), grow.wants, composer.tx.clone());
                         tokio::spawn(async move {
-                            resize(session, block, base, extra).await;
-                            let _ = tx.send(Done::Resized);
+                            let ok = resize(session, block, want).await.is_some();
+                            let _ = tx.send(Done::Resized(ok));
                         });
                     }
                     continue;
@@ -1113,13 +1114,12 @@ pub async fn run(thread: String) -> Result<()> {
                     Some(Ok(Event::Resize(c, r))) => {
                         composer.cols = c as usize;
                         composer.rows = r as usize;
-                        // At the starting split, Reply's rows are its least: a window that changes
-                        // size, or another device's, changes that.
+                        // A resize that didn't take, before a device sized the panes: try again.
                         if let Some(grow) = composer.grow.as_mut()
                             && grow.asked == 0
                             && !grow.busy
                         {
-                            grow.base = r as usize;
+                            grow.since = Some(tokio::time::Instant::now());
                         }
                     }
                     Some(Err(e)) => return Err(e.into()),

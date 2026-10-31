@@ -384,6 +384,8 @@ pub struct Slash {
     theirs: Option<String>,
     /// Project roots by id, for threads without a worktree. Filled in the background.
     roots: Arc<Mutex<HashMap<String, String>>>,
+    /// Whether t3rex's own commands are listed: not before there's a thread to run them on.
+    no_rex: bool,
 }
 
 impl Slash {
@@ -403,6 +405,31 @@ impl Slash {
             }
         });
         slash
+    }
+
+    /// The menu for a new thread's first message: the provider's commands and skills only.
+    pub fn for_new(projects: &[Value]) -> Slash {
+        let mut slash = Slash {
+            no_rex: true,
+            ..Slash::default()
+        };
+        slash.set_projects(projects);
+        slash
+    }
+
+    /// The project roots, from another machine's projects.
+    pub fn set_projects(&mut self, projects: &[Value]) {
+        if let Ok(mut roots) = self.roots.lock() {
+            *roots = projects
+                .iter()
+                .filter_map(|p| {
+                    Some((
+                        p["id"].as_str()?.to_string(),
+                        p["workspaceRoot"].as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -437,6 +464,9 @@ impl Slash {
                 (Some(c), Some(t)) => entries(c, t, &roots),
                 _ => entries(&Value::Null, &Value::Null, &roots),
             };
+            if self.no_rex {
+                self.entries.retain(|e| e.kind != Kind::Rex);
+            }
         }
         let items = rank(&self.entries, &q)
             .into_iter()
@@ -732,6 +762,16 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_new_thread_lists_the_project_folders_commands_without_rexs() {
+        let config = config();
+        let thread = json!({"projectId": "p", "modelSelection": {"instanceId": "claude"}});
+        let mut s = Slash::for_new(&[json!({"id": "p", "workspaceRoot": "/repo"})]);
+        s.sync(&typed("/"), Some(&config), Some(&thread));
+        let listed: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(listed, vec!["deploy", "repo-skill"]);
     }
 
     #[test]

@@ -35,6 +35,7 @@ use crate::compose::{Editor, edit, wrap};
 use crate::icons::{self, Icon, Painter};
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
 use crate::rex::{Rex, lua_str};
+use crate::slash::{self, Slash};
 use crate::t3;
 
 fn out(text: &str) {
@@ -89,6 +90,8 @@ struct NewThread {
     icons: HashMap<String, Icon>,
     logos: HashMap<String, Icon>,
     editor: Editor,
+    /// The `/` menu: the provider's commands and skills, as in Reply.
+    slash: Slash,
     focus: Option<usize>,
     menu: Option<(Field, Menu)>,
     /// The folder being added as a project, from the project chip's Add folder….
@@ -500,6 +503,7 @@ return {{}}"#,
         let (projects, recent) = projects_by_recent(shell);
         self.config = config;
         self.projects = projects;
+        self.slash.set_projects(&self.projects);
         self.recent = recent;
         self.branches.clear();
         self.icons.clear();
@@ -796,6 +800,28 @@ return {{}}"#,
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else if self.menu.is_none() && self.focus.is_none() {
             let (r, c) = (first_body + cursor.0 + 1, left + 3 + cursor.1);
+            // Under the box, over the chips: above it there's only the border.
+            let thread = json!({
+                "modelSelection": {"instanceId": self.settings.instance},
+                "projectId": self.project,
+            });
+            self.slash
+                .sync(&self.editor, Some(&self.config), Some(&thread));
+            let bottom = first_body + body.len() + 1;
+            text.push_str(&self.slash.draw(
+                &mut self.painter,
+                (bottom, bottom),
+                self.rows,
+                left,
+                width,
+            ));
+            let hint_room = inner.saturating_sub(cursor.1 + 1);
+            if let Some(hint) = self.slash.hint().filter(|_| hint_room >= 4) {
+                text.push_str(&format!(
+                    "\x1b[{r};{c}H{DIM}{}{RESET}",
+                    fit(hint, hint_room)
+                ));
+            }
             text.push_str(&format!("\x1b[{r};{c}H\x1b[?25h"));
         } else {
             text.push_str("\x1b[?25l");
@@ -826,6 +852,16 @@ return {{}}"#,
                 MenuKey::Moved => {}
             }
             return false;
+        }
+        if self.focus.is_none() {
+            match self.slash.key(&mut self.editor, key) {
+                slash::Key::Pass => {}
+                slash::Key::Done => return false,
+                slash::Key::Send => {
+                    self.send();
+                    return false;
+                }
+            }
         }
         match (key.code, self.focus) {
             (KeyCode::Tab, f) => {
@@ -1165,6 +1201,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         icons: HashMap::new(),
         logos: HashMap::new(),
         editor: Editor::default(),
+        slash: Slash::for_new(&[]),
         focus: None,
         menu: None,
         folder: None,
@@ -1219,6 +1256,9 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                         ui.focus = None;
                         ui.editor.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
                     }
+                    Some(Ok(Event::Mouse(m))) if !ui.launching && ui.slash.hits(&m) => {
+                        ui.slash.click(&mut ui.editor, &m);
+                    }
                     Some(Ok(Event::Mouse(m))) if !ui.launching => {
                         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                             ui.click(m.column, m.row);
@@ -1255,6 +1295,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     Loaded::Added(Ok(project)) => {
                         let id = project["id"].as_str().unwrap_or_default().to_string();
                         ui.projects.insert(0, project);
+                        ui.slash.set_projects(&ui.projects);
                         ui.folder = None;
                         ui.set_project(id);
                         let (c, t, projects) = (ui.client.clone(), ui.tx.clone(), ui.projects.clone());
