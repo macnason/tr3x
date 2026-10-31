@@ -47,6 +47,25 @@ fn out(text: &str) {
 pub(crate) struct Editor {
     pub(crate) text: Vec<char>,
     pub(crate) cursor: usize,
+    /// The columns the input last wrapped at, so Up, Down and Cmd with the arrows move by the
+    /// rows on screen. 0 before the first draw: by lines.
+    pub(crate) width: usize,
+    undo: Vec<(Vec<char>, usize)>,
+    redo: Vec<(Vec<char>, usize)>,
+    /// The edit before this one, so a word typed or a run of deletes undoes in one go.
+    last: Run,
+    /// What Ctrl+K, Ctrl+U, Ctrl+W and the Delete shortcuts cut last, for Ctrl+Y.
+    killed: Vec<char>,
+    /// The sent message Up has brought back, and the draft it set aside to get there.
+    recalled: Option<(usize, String)>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Run {
+    #[default]
+    None,
+    Typing,
+    Deleting,
 }
 
 impl Editor {
@@ -56,6 +75,12 @@ impl Editor {
             self.text.insert(self.cursor, c);
             self.cursor += 1;
         }
+    }
+    /// A paste: undoes on its own.
+    pub(crate) fn paste(&mut self, s: &str) {
+        let (before, kept) = (self.text.clone(), self.checkpoint(Run::None));
+        self.insert(s);
+        self.edited(&before, kept);
     }
     pub(crate) fn backspace(&mut self) {
         if self.cursor > 0 {
@@ -68,17 +93,18 @@ impl Editor {
             self.text.remove(self.cursor);
         }
     }
-    pub(crate) fn delete_word(&mut self) {
-        let start = self.word_left();
-        while self.cursor > start {
-            self.backspace();
+    /// Cuts `from..to` for Ctrl+Y.
+    fn kill(&mut self, from: usize, to: usize) {
+        if from < to {
+            self.killed = self.text.drain(from..to).collect();
+            self.cursor = from;
         }
     }
+    pub(crate) fn delete_word(&mut self) {
+        self.kill(self.word_left(), self.cursor);
+    }
     pub(crate) fn delete_to_line_start(&mut self) {
-        let start = self.line_start();
-        while self.cursor > start {
-            self.backspace();
-        }
+        self.kill(self.line_start(), self.cursor);
     }
     /// Where the word before the cursor starts, past any spaces.
     pub(crate) fn word_left(&self) -> usize {
@@ -114,12 +140,197 @@ impl Editor {
             .position(|c| *c == '\n')
             .map_or(self.text.len(), |i| self.cursor + i)
     }
+    /// A row on screen, `offset` from the cursor's: its start, its end, the last place on it
+    /// the cursor shows, and the cursor's column on its own row. The end of a row broken
+    /// inside a word is after its last character, where the cursor shows on the next row.
+    fn row(&self, offset: isize) -> Option<((usize, usize, usize), usize)> {
+        let width = if self.width == 0 {
+            usize::MAX
+        } else {
+            self.width
+        };
+        let rows = layout(&self.text, width);
+        let (r, x) = locate(&rows, self.cursor);
+        let r = r.checked_add_signed(offset).filter(|r| *r < rows.len())?;
+        let start = rows[r].first().map_or(self.text.len(), |(i, _)| *i);
+        let (end, last) = match (rows.get(r + 1), rows[r].last()) {
+            (Some(next), Some(&(i, c))) => {
+                let next = next.first().map_or(self.text.len(), |(i, _)| *i);
+                (if c == ' ' || c == '\n' { i } else { next }, i)
+            }
+            _ => (self.text.len(), self.text.len()),
+        };
+        Some(((start, end, last), x))
+    }
+    fn row_start(&self) -> usize {
+        self.row(0).map_or(0, |((start, ..), _)| start)
+    }
+    fn row_end(&self) -> usize {
+        self.row(0).map_or(self.text.len(), |((_, end, _), _)| end)
+    }
+    /// The cursor up or down a row on screen, in the same column where the row is long enough.
+    /// From the first row Up goes to the start, and from the last Down goes to the end, as on
+    /// the Mac.
+    fn vertical(&mut self, down: bool) {
+        let Some(((start, _, end), _)) = self.row(if down { 1 } else { -1 }) else {
+            self.cursor = if down { self.text.len() } else { 0 };
+            return;
+        };
+        let x = self.row(0).map_or(0, |(_, x)| x);
+        let (mut at, mut col) = (start, 0);
+        while at < end && col < x {
+            col += self.text[at].width().unwrap_or(0);
+            at += 1;
+        }
+        self.cursor = at;
+    }
+    /// Option and Up: the start of the paragraph, or of the one before from its start.
+    fn paragraph_up(&mut self) {
+        if self.cursor == self.line_start() && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        self.cursor = self.line_start();
+    }
+    /// Option and Down: the end of the paragraph, or of the one after from its end.
+    fn paragraph_down(&mut self) {
+        if self.cursor == self.line_end() && self.cursor < self.text.len() {
+            self.cursor += 1;
+        }
+        self.cursor = self.line_end();
+    }
+    /// Keeps the text as it is for Undo, before an edit. A run of the same kind of edit keeps
+    /// one. Returns whether it kept one.
+    fn checkpoint(&mut self, run: Run) -> bool {
+        if run != Run::None && run == self.last {
+            return false;
+        }
+        self.last = run;
+        self.undo.push((self.text.clone(), self.cursor));
+        if self.undo.len() > 200 {
+            self.undo.remove(0);
+        }
+        true
+    }
+    /// After an edit: one that changed nothing keeps nothing for Undo and leaves Redo be.
+    fn edited(&mut self, before: &[char], kept: bool) {
+        if self.text != before {
+            self.redo.clear();
+        } else if kept {
+            self.undo.pop();
+            self.last = Run::None;
+        }
+    }
+    pub(crate) fn undo(&mut self) -> bool {
+        while let Some((text, cursor)) = self.undo.pop() {
+            if text == self.text {
+                continue;
+            }
+            self.redo
+                .push((std::mem::replace(&mut self.text, text), self.cursor));
+            self.cursor = cursor;
+            self.last = Run::None;
+            return true;
+        }
+        false
+    }
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some((text, cursor)) = self.redo.pop() else {
+            return false;
+        };
+        self.undo
+            .push((std::mem::replace(&mut self.text, text), self.cursor));
+        self.cursor = cursor;
+        self.last = Run::None;
+        true
+    }
+    /// Empties the input, which Undo brings back.
+    pub(crate) fn clear(&mut self) {
+        self.replace("", false);
+        self.recalled = None;
+    }
+    fn replace(&mut self, text: &str, at_end: bool) {
+        let (before, kept) = (self.text.clone(), self.checkpoint(Run::None));
+        self.text = text.chars().collect();
+        self.cursor = if at_end { self.text.len() } else { 0 };
+        self.edited(&before, kept);
+    }
+    /// Up from the start of the input: the message sent before the one showing, oldest last.
+    /// What was typed is set aside for Down to bring back; a message brought back and then
+    /// changed counts as typed.
+    pub(crate) fn older(&mut self, sent: &[String]) -> bool {
+        let text = self.string();
+        let (i, draft) = match self.recalled.take() {
+            Some((i, draft)) if sent.get(i) == Some(&text) => match i.checked_sub(1) {
+                Some(older) => (older, draft),
+                None => {
+                    self.recalled = Some((i, draft));
+                    return false;
+                }
+            },
+            _ => match sent.len().checked_sub(1) {
+                Some(newest) => (newest, text),
+                None => return false,
+            },
+        };
+        self.replace(&sent[i], false);
+        self.recalled = Some((i, draft));
+        true
+    }
+    /// Down from the end of a message Up brought back: the next one, then the draft.
+    pub(crate) fn newer(&mut self, sent: &[String]) -> bool {
+        let text = self.string();
+        let Some((i, draft)) = self.recalled.take() else {
+            return false;
+        };
+        if sent.get(i) != Some(&text) {
+            return false;
+        }
+        match sent.get(i + 1) {
+            Some(next) => {
+                self.replace(next, true);
+                self.recalled = Some((i + 1, draft));
+            }
+            None => self.replace(&draft, true),
+        }
+        true
+    }
     pub(crate) fn take(&mut self) -> String {
         self.cursor = 0;
+        self.undo.clear();
+        self.redo.clear();
+        self.last = Run::None;
+        self.recalled = None;
         std::mem::take(&mut self.text).into_iter().collect()
     }
     pub(crate) fn string(&self) -> String {
         self.text.iter().collect()
+    }
+}
+
+/// Esc twice in a row clears the input, as in Claude Code and Codex.
+#[derive(Default)]
+pub(crate) struct Escape(Option<std::time::Instant>);
+
+impl Escape {
+    const AGAIN: std::time::Duration = std::time::Duration::from_millis(800);
+    /// What the first Esc says. It goes when the second would no longer count.
+    pub(crate) const NOTE: &str = "Esc again to clear";
+
+    /// Whether an Esc now would be the second.
+    pub(crate) fn armed(&self) -> bool {
+        self.0.is_some_and(|t| t.elapsed() < Self::AGAIN)
+    }
+
+    /// Whether this Esc follows another closely. Any other key in between starts over.
+    pub(crate) fn again(&mut self, key: &KeyEvent) -> bool {
+        if key.code != KeyCode::Esc {
+            self.0 = None;
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let again = self.0.is_some_and(|t| now - t < Self::AGAIN);
+        self.0 = Some(now);
+        again
     }
 }
 
@@ -292,6 +503,7 @@ struct Composer {
     clipboard: paste::Reader,
     /// The last command was `/delete`, so the next one deletes.
     deleting: bool,
+    escape: Escape,
 }
 
 impl Composer {
@@ -461,6 +673,7 @@ impl Composer {
         }
         // The input, wrapped, with the cursor where it is.
         let prompt = format!("{BLUE}{BOLD}›{RESET} ");
+        self.editor.width = width;
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
         if let Some(grow) = self.grow.as_mut() {
             // The question, the input, a row for a note, and the chips.
@@ -554,7 +767,7 @@ impl Composer {
                 Some(got) => self.pasted(got),
                 None => self
                     .editor
-                    .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
+                    .paste(&text.replace("\r\n", "\n").replace('\r', "\n")),
             },
             Got::Images(images) => self.attach(images),
             Got::Nothing(Some(why)) => self.note(why, true),
@@ -870,13 +1083,56 @@ impl Composer {
         }
     }
 
+    /// Esc twice clears what's typed and its pictures; Cmd+Z brings the text back. On an empty
+    /// input one Esc stops the run, as in Claude Code and Codex, but not an Esc that follows
+    /// the two that cleared it.
+    fn escape(&mut self, again: bool) {
+        if self.editor.text.is_empty() && self.images.is_empty() {
+            if !again
+                && self
+                    .state
+                    .as_ref()
+                    .is_some_and(|s| s.active_run().is_some())
+            {
+                self.command("stop");
+            }
+        } else if again {
+            self.editor.clear();
+            self.images.clear();
+        } else {
+            self.note(Escape::NOTE, false);
+            self.note_until = Some(tokio::time::Instant::now() + Escape::AGAIN);
+        }
+    }
+
+    /// The messages sent on the thread, oldest first, for Up to bring back.
+    fn sent(&self) -> Vec<String> {
+        let mut sent: Vec<String> = self
+            .state
+            .as_ref()
+            .map(|s| {
+                s.items()
+                    .into_iter()
+                    .filter(|i| i["type"] == "user_message")
+                    .filter_map(|i| i["text"].as_str())
+                    .filter(|t| !t.trim().is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        sent.dedup();
+        sent
+    }
+
     fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
+        let again = self.escape.again(&key);
         if self.focus.is_none() {
             match self.slash.key(&mut self.editor, key) {
                 slash::Key::Pass => {}
-                slash::Key::Done => return,
+                // An Esc that closes the menu isn't the first of two.
+                slash::Key::Done => return self.escape = Escape::default(),
                 slash::Key::Send => return self.submit(false),
             }
         }
@@ -921,10 +1177,28 @@ impl Composer {
             }
             (KeyCode::Esc | KeyCode::Up, Some(_)) => {
                 self.focus = None;
+                self.escape = Escape::default();
                 return;
             }
             (_, Some(_)) => self.focus = None,
             _ => {}
+        }
+        // Up at the start brings back what was sent before, and Down at the end goes forward
+        // again, as in Claude Code and Codex.
+        if key.modifiers.is_empty() {
+            let edge = match key.code {
+                KeyCode::Up => self.editor.cursor == 0,
+                KeyCode::Down => self.editor.cursor == self.editor.text.len(),
+                _ => false,
+            };
+            if edge {
+                let sent = self.sent();
+                if key.code == KeyCode::Up && self.editor.older(&sent)
+                    || key.code == KeyCode::Down && self.editor.newer(&sent)
+                {
+                    return;
+                }
+            }
         }
         match key.code {
             KeyCode::Enter
@@ -935,9 +1209,10 @@ impl Composer {
                 self.submit(key.modifiers.contains(KeyModifiers::SUPER))
             }
             KeyCode::Char('c') if ctrl => {
-                self.editor.take();
+                self.editor.clear();
                 self.images.clear();
             }
+            KeyCode::Esc => self.escape(again),
             KeyCode::Backspace if self.editor.cursor == 0 && !self.images.is_empty() => {
                 self.images.pop();
             }
@@ -950,29 +1225,98 @@ impl Composer {
     }
 }
 
-/// The editing keys every input shares: Alt+Enter, Shift+Enter or Ctrl+J for a new line,
-/// Ctrl+U, Ctrl+W, Ctrl+A and Ctrl+E as in a shell, the Mac's Cmd and Option with the arrows
-/// and Delete, and the arrows. Cmd arrives as SUPER, with the kitty keyboard protocol on
+/// The editing keys every input shares, as in a Mac text field: Alt+Enter, Shift+Enter or
+/// Ctrl+J for a new line; Cmd and Option with the arrows and Delete; Cmd+Z and Cmd+Shift+Z;
+/// and the Ctrl keys a Mac's text fields and a shell share (A, E, B, F, N, P, D, H, K, Y, T,
+/// O, U, W, and Ctrl+_ to undo). Cmd arrives as SUPER, with the kitty keyboard protocol on
 /// (`scheme::keys`). Returns whether the key was one of them.
 pub(crate) fn edit(editor: &mut Editor, key: KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // What the key does to the text, for Undo to keep what was there before.
+    let run = match key.code {
+        KeyCode::Char(_) if !ctrl && !alt && !cmd => Some(Run::Typing),
+        KeyCode::Backspace | KeyCode::Delete if !alt && !cmd => Some(Run::Deleting),
+        KeyCode::Char('d' | 'h') if ctrl => Some(Run::Deleting),
+        KeyCode::Enter if alt || shift => Some(Run::None),
+        KeyCode::Backspace | KeyCode::Delete => Some(Run::None),
+        KeyCode::Char('j' | 'k' | 'u' | 'w' | 'y' | 't' | 'o') if ctrl => Some(Run::None),
+        KeyCode::Char('d') if alt => Some(Run::None),
+        _ => None,
+    };
+    let before = run.map(|run| (editor.text.clone(), editor.checkpoint(run)));
+    if run.is_none() {
+        editor.last = Run::None;
+    }
     match key.code {
-        KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => editor.insert("\n"),
+        KeyCode::Char('z' | 'Z') if cmd && shift => {
+            editor.redo();
+        }
+        KeyCode::Char('z') if cmd => {
+            editor.undo();
+        }
+        KeyCode::Char('_' | '-') if ctrl => {
+            editor.undo();
+        }
+        KeyCode::Enter if alt || shift => editor.insert("\n"),
         KeyCode::Char('j') if ctrl => editor.insert("\n"),
+        KeyCode::Char('o') if ctrl => {
+            editor.insert("\n");
+            editor.cursor -= 1;
+        }
         KeyCode::Char('u') if ctrl => editor.delete_to_line_start(),
-        KeyCode::Backspace if cmd => editor.delete_to_line_start(),
+        KeyCode::Backspace if cmd => editor.kill(editor.row_start(), editor.cursor),
+        KeyCode::Delete if cmd => editor.kill(editor.cursor, editor.row_end()),
         KeyCode::Char('w') if ctrl => editor.delete_word(),
         KeyCode::Backspace if alt => editor.delete_word(),
+        KeyCode::Delete if alt => editor.kill(editor.cursor, editor.word_right()),
+        KeyCode::Char('d') if alt => editor.kill(editor.cursor, editor.word_right()),
+        // To the end of the paragraph, or its line break when there already.
+        KeyCode::Char('k') if ctrl => {
+            let end = editor.line_end();
+            editor.kill(
+                editor.cursor,
+                end.max(editor.cursor + 1).min(editor.text.len()),
+            );
+        }
+        KeyCode::Char('y') if ctrl => {
+            let killed: String = editor.killed.iter().collect();
+            editor.insert(&killed);
+        }
+        // Swaps the characters either side of the cursor, or the last two at a line's end.
+        KeyCode::Char('t') if ctrl => {
+            let at = if editor.cursor == editor.line_end() {
+                editor.cursor.saturating_sub(1)
+            } else {
+                editor.cursor
+            };
+            if at > 0
+                && at < editor.text.len()
+                && editor.text[at] != '\n'
+                && editor.text[at - 1] != '\n'
+            {
+                editor.text.swap(at - 1, at);
+                editor.cursor = at + 1;
+            }
+        }
+        KeyCode::Char('d') if ctrl => editor.delete(),
+        KeyCode::Char('h') if ctrl => editor.backspace(),
         KeyCode::Char('a') if ctrl => editor.cursor = editor.line_start(),
         KeyCode::Char('e') if ctrl => editor.cursor = editor.line_end(),
+        KeyCode::Char('b') if ctrl => editor.cursor = editor.cursor.saturating_sub(1),
+        KeyCode::Char('f') if ctrl => editor.cursor = (editor.cursor + 1).min(editor.text.len()),
+        KeyCode::Char('p') if ctrl => editor.vertical(false),
+        KeyCode::Char('n') if ctrl => editor.vertical(true),
         KeyCode::Home => editor.cursor = editor.line_start(),
         KeyCode::End => editor.cursor = editor.line_end(),
-        KeyCode::Left if cmd => editor.cursor = editor.line_start(),
-        KeyCode::Right if cmd => editor.cursor = editor.line_end(),
+        KeyCode::Left if cmd => editor.cursor = editor.row_start(),
+        KeyCode::Right if cmd => editor.cursor = editor.row_end(),
         KeyCode::Up if cmd => editor.cursor = 0,
         KeyCode::Down if cmd => editor.cursor = editor.text.len(),
+        KeyCode::Up if alt => editor.paragraph_up(),
+        KeyCode::Down if alt => editor.paragraph_down(),
         // Option and the arrows, and the `Esc b` and `Esc f` some keyboards send for them.
         KeyCode::Left if alt => editor.cursor = editor.word_left(),
         KeyCode::Right if alt => editor.cursor = editor.word_right(),
@@ -980,41 +1324,28 @@ pub(crate) fn edit(editor: &mut Editor, key: KeyEvent) -> bool {
         KeyCode::Char('f') if alt => editor.cursor = editor.word_right(),
         KeyCode::Left => editor.cursor = editor.cursor.saturating_sub(1),
         KeyCode::Right => editor.cursor = (editor.cursor + 1).min(editor.text.len()),
-        KeyCode::Up => {
-            let start = editor.line_start();
-            if start > 0 {
-                let col = editor.cursor - start;
-                let prev_start = editor.text[..start - 1]
-                    .iter()
-                    .rposition(|c| *c == '\n')
-                    .map_or(0, |i| i + 1);
-                editor.cursor = (prev_start + col).min(start - 1);
-            }
-        }
-        KeyCode::Down => {
-            let end = editor.line_end();
-            if end < editor.text.len() {
-                let col = editor.cursor - editor.line_start();
-                let next_end = editor.text[end + 1..]
-                    .iter()
-                    .position(|c| *c == '\n')
-                    .map_or(editor.text.len(), |i| end + 1 + i);
-                editor.cursor = (end + 1 + col).min(next_end);
-            }
-        }
+        KeyCode::Up => editor.vertical(false),
+        KeyCode::Down => editor.vertical(true),
         KeyCode::Backspace => editor.backspace(),
         KeyCode::Delete => editor.delete(),
-        KeyCode::Char(c) if !ctrl && !alt && !cmd => editor.insert(&c.to_string()),
+        KeyCode::Char(c) if !ctrl && !alt && !cmd => {
+            editor.insert(&c.to_string());
+            // A word and the space after it undo together.
+            if c.is_whitespace() {
+                editor.last = Run::None;
+            }
+        }
         _ => return false,
+    }
+    if let Some((before, kept)) = before {
+        editor.edited(&before, kept);
     }
     true
 }
 
-/// `text` broken into rows of at most `width` columns at spaces or newlines, and the cursor's
-/// row and column.
-pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
-    // Each character's row and column, kept up to date as words move down, so the cursor
-    // lands where its character finally is.
+/// `text` as the rows `wrap` shows it: each character with its index, breaking at spaces or
+/// newlines to fit `width` columns. A newline ends its row.
+fn layout(text: &[char], width: usize) -> Vec<Vec<(usize, char)>> {
     let mut rows: Vec<Vec<(usize, char)>> = vec![Vec::new()];
     let mut col = 0;
     for (i, &c) in text.iter().enumerate() {
@@ -1038,16 +1369,33 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
         rows.last_mut().unwrap().push((i, c));
         col += w;
     }
-    let mut at = (rows.len() - 1, col);
+    rows
+}
+
+/// The row and column of `cursor` in `layout`'s rows: where its character finally is, or the
+/// end of the last row.
+fn locate(rows: &[Vec<(usize, char)>], cursor: usize) -> (usize, usize) {
     for (r, row) in rows.iter().enumerate() {
         let mut x = 0;
         for &(i, ch) in row {
             if i == cursor {
-                at = (r, x);
+                return (r, x);
             }
             x += ch.width().unwrap_or(0);
         }
     }
+    let last = rows.len() - 1;
+    (
+        last,
+        rows[last].iter().map(|(_, c)| c.width().unwrap_or(0)).sum(),
+    )
+}
+
+/// `text` broken into rows of at most `width` columns at spaces or newlines, and the cursor's
+/// row and column.
+pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+    let rows = layout(text, width);
+    let at = locate(&rows, cursor);
     let lines = rows
         .into_iter()
         .map(|row| {
@@ -1115,6 +1463,7 @@ pub async fn run(thread: String) -> Result<()> {
             _ => None,
         },
         deleting: false,
+        escape: Escape::default(),
     };
     crossterm::terminal::enable_raw_mode()?;
     // The alternate screen, bracketed paste, and clicks on the chips. Paste events too, where
@@ -1286,14 +1635,180 @@ pub async fn run(thread: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Editor, edit, wrap};
+    use super::{Editor, Escape, edit, wrap};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) -> bool {
+        edit(ed, KeyEvent::new(code, mods))
+    }
+
+    fn typed(ed: &mut Editor, text: &str) {
+        for c in text.chars() {
+            press(ed, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn up_and_down_move_by_the_rows_on_screen() {
+        let mut ed = Editor::default();
+        ed.insert("hello there world");
+        ed.width = 11;
+        // "hello " over "there world", the cursor at the end.
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.cursor, 5);
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.cursor, 0, "Up from the first row goes to the start");
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(ed.cursor, 6);
+        press(&mut ed, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(ed.cursor, 17);
+        press(&mut ed, KeyCode::Left, KeyModifiers::SUPER);
+        assert_eq!(
+            ed.cursor, 6,
+            "Cmd+Left goes to the start of the row, not the line"
+        );
+        press(&mut ed, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(ed.cursor, 17, "Down from the last row goes to the end");
+        press(&mut ed, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(ed.cursor, 5);
+    }
+
+    #[test]
+    fn a_row_broken_inside_a_word_ends_after_it() {
+        let mut ed = Editor::default();
+        ed.insert("abcdefghij");
+        ed.width = 5;
+        ed.cursor = 0;
+        press(&mut ed, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(ed.cursor, 5);
+        ed.cursor = 0;
+        press(&mut ed, KeyCode::Delete, KeyModifiers::SUPER);
+        assert_eq!(ed.string(), "fghij");
+        // Up from the end of a full row stays on the row above.
+        let mut ed = Editor::default();
+        ed.insert("abcdefghij");
+        ed.width = 5;
+        press(&mut ed, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(ed.cursor, 4);
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_keeps_redo() {
+        let mut ed = Editor::default();
+        typed(&mut ed, "ab");
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::SUPER);
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Backspace, KeyModifiers::NONE);
+        press(
+            &mut ed,
+            KeyCode::Char('z'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+        assert_eq!(ed.string(), "ab");
+        // Ctrl+T at a line's start leaves the line break where it is.
+        let mut ed = Editor::default();
+        ed.insert("ab\ncd");
+        ed.cursor = 3;
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "ab\ncd");
+    }
+
+    #[test]
+    fn undo_takes_back_a_word_at_a_time_and_a_clear() {
+        let mut ed = Editor::default();
+        typed(&mut ed, "fix the build");
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::SUPER);
+        assert_eq!(ed.string(), "fix the ");
+        press(&mut ed, KeyCode::Char('_'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "fix ");
+        press(
+            &mut ed,
+            KeyCode::Char('Z'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+        assert_eq!(ed.string(), "fix the ");
+        ed.clear();
+        assert_eq!(ed.string(), "");
+        press(&mut ed, KeyCode::Char('z'), KeyModifiers::SUPER);
+        assert_eq!(ed.string(), "fix the ", "Undo brings back a cleared input");
+        // Sending starts over.
+        ed.take();
+        assert!(!ed.undo());
+    }
+
+    #[test]
+    fn the_macs_control_keys() {
+        let mut ed = Editor::default();
+        ed.insert("one two\nthree");
+        ed.cursor = 4;
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "one \nthree");
+        press(&mut ed, KeyCode::Char('k'), KeyModifiers::CONTROL);
+        assert_eq!(
+            ed.string(),
+            "one three",
+            "Ctrl+K at a line's end joins the next"
+        );
+        press(&mut ed, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "one three\n");
+        press(&mut ed, KeyCode::Up, KeyModifiers::SUPER);
+        assert_eq!(ed.cursor, 0);
+        press(&mut ed, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        press(&mut ed, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "noe three\n");
+        press(&mut ed, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(ed.string(), "no three\n");
+        press(&mut ed, KeyCode::Delete, KeyModifiers::ALT);
+        assert_eq!(ed.string(), "no\n");
+        ed.cursor = 0;
+        press(&mut ed, KeyCode::Delete, KeyModifiers::SUPER);
+        assert_eq!(ed.string(), "\n");
+        press(&mut ed, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!((ed.string().as_str(), ed.cursor), ("\n\n", 0));
+    }
+
+    #[test]
+    fn up_brings_back_what_was_sent_and_down_the_draft() {
+        let sent = vec!["first".to_string(), "second".to_string()];
+        let mut ed = Editor::default();
+        ed.insert("draft");
+        ed.cursor = 0;
+        assert!(ed.older(&sent));
+        assert_eq!(ed.string(), "second");
+        assert!(ed.older(&sent));
+        assert_eq!(ed.string(), "first");
+        assert!(!ed.older(&sent), "nothing before the first");
+        assert!(ed.newer(&sent));
+        assert_eq!((ed.string().as_str(), ed.cursor), ("second", 6));
+        assert!(ed.newer(&sent));
+        assert_eq!(ed.string(), "draft");
+        assert!(!ed.newer(&sent));
+        // A message brought back and changed is a draft of its own.
+        ed.cursor = 0;
+        ed.older(&sent);
+        ed.insert("re: ");
+        assert!(!ed.newer(&sent));
+        ed.cursor = 0;
+        assert!(ed.older(&sent));
+        assert!(ed.newer(&sent));
+        assert_eq!(ed.string(), "re: second");
+    }
+
+    #[test]
+    fn esc_twice_close_together() {
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut escape = Escape::default();
+        assert!(!escape.again(&esc));
+        assert!(escape.again(&esc));
+        escape.again(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!escape.again(&esc), "a key in between starts over");
+    }
 
     #[test]
     fn mac_editing_keys() {
         let mut ed = Editor::default();
         ed.insert("one two\nthree  four");
-        let press = |ed: &mut Editor, code, mods| edit(ed, KeyEvent::new(code, mods));
         press(&mut ed, KeyCode::Left, KeyModifiers::SUPER);
         assert_eq!(ed.cursor, 8);
         press(&mut ed, KeyCode::Right, KeyModifiers::SUPER);

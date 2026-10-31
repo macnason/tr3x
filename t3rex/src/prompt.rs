@@ -8,7 +8,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
-use crate::compose::Editor;
+use crate::compose::{Editor, edit};
 
 fn out(text: &str) {
     let mut stdout = std::io::stdout().lock();
@@ -95,21 +95,11 @@ pub async fn ask(title: &str, initial: &str, confirm: bool) -> Result<Answer> {
                         return Ok(Answer::Text(text.trim().to_string()));
                     }
                 }
-                KeyCode::Char('u') if ctrl => editor.delete_to_line_start(),
-                KeyCode::Char('w') if ctrl => editor.delete_word(),
-                KeyCode::Char('a') if ctrl => editor.cursor = 0,
-                KeyCode::Char('e') if ctrl => editor.cursor = editor.text.len(),
-                KeyCode::Char(c) => editor.insert(&c.to_string()),
-                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-                    editor.delete_word()
+                // One line: the keys that make another do nothing.
+                KeyCode::Char('j' | 'o') if ctrl => {}
+                _ => {
+                    edit(&mut editor, key);
                 }
-                KeyCode::Backspace => editor.backspace(),
-                KeyCode::Delete => editor.delete(),
-                KeyCode::Left => editor.cursor = editor.cursor.saturating_sub(1),
-                KeyCode::Right => editor.cursor = (editor.cursor + 1).min(editor.text.len()),
-                KeyCode::Home => editor.cursor = 0,
-                KeyCode::End => editor.cursor = editor.text.len(),
-                _ => {}
             }
         }
     }

@@ -33,7 +33,7 @@ use t3client::projection::ShellState;
 use tokio::sync::mpsc;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
-use crate::compose::{Editor, edit, wrap};
+use crate::compose::{Editor, Escape, edit, wrap};
 use crate::icons::{self, Icon, Painter};
 use crate::paste::{self, Got, Image};
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
@@ -96,6 +96,7 @@ struct NewThread {
     icons: HashMap<String, Icon>,
     logos: HashMap<String, Icon>,
     editor: Editor,
+    escape: Escape,
     /// The `/` menu: the provider's commands and skills, as in Reply.
     slash: Slash,
     focus: Option<usize>,
@@ -712,6 +713,7 @@ return {{}}"#,
         let mut lines: Vec<String> = vec![String::new()];
         // The message, in a rounded box like T3's composer.
         let inner = width.saturating_sub(4);
+        self.editor.width = inner;
         let (rows, cursor) = wrap(&self.editor.text, self.editor.cursor, inner);
         let mut body: Vec<String> = rows;
         let empty = self.editor.text.is_empty();
@@ -867,6 +869,7 @@ return {{}}"#,
     fn key(&mut self, key: KeyEvent) -> bool {
         self.note = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let again = self.escape.again(&key);
         if self.folder.is_some() {
             if ctrl && key.code == KeyCode::Char('c') {
                 return true;
@@ -885,12 +888,16 @@ return {{}}"#,
                 MenuKey::Close => self.menu = None,
                 MenuKey::Moved => {}
             }
+            self.escape = Escape::default();
             return false;
         }
         if self.focus.is_none() {
             match self.slash.key(&mut self.editor, key) {
                 slash::Key::Pass => {}
-                slash::Key::Done => return false,
+                slash::Key::Done => {
+                    self.escape = Escape::default();
+                    return false;
+                }
                 slash::Key::Send => {
                     self.send();
                     return false;
@@ -912,7 +919,19 @@ return {{}}"#,
                     Some(i) => Some(i - 1),
                 }
             }
-            (KeyCode::Esc, Some(_)) => self.focus = None,
+            (KeyCode::Esc, Some(_)) => {
+                self.focus = None;
+                self.escape = Escape::default();
+            }
+            // Twice clears the message and its pictures, as in Reply.
+            (KeyCode::Esc, None) if !self.editor.text.is_empty() || !self.images.is_empty() => {
+                if again {
+                    self.editor.clear();
+                    self.images.clear();
+                } else {
+                    self.note = Some((Escape::NOTE.into(), false));
+                }
+            }
             (KeyCode::Left, Some(i)) => self.focus = Some(i.saturating_sub(1)),
             (KeyCode::Right, Some(i)) => self.focus = Some((i + 1).min(fields.len() - 1)),
             (KeyCode::Enter | KeyCode::Down | KeyCode::Char(' '), Some(i)) => {
@@ -925,7 +944,7 @@ return {{}}"#,
                 if self.editor.text.is_empty() && self.images.is_empty() {
                     return true;
                 }
-                self.editor.take();
+                self.editor.clear();
                 self.images.clear();
             }
             (KeyCode::Backspace, None) if self.editor.cursor == 0 && !self.images.is_empty() => {
@@ -1008,7 +1027,7 @@ return {{}}"#,
                 Some(got) => self.pasted(got),
                 None => self
                     .editor
-                    .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
+                    .paste(&text.replace("\r\n", "\n").replace('\r', "\n")),
             },
             Got::Images(images) => {
                 let tx = self.tx.clone();
@@ -1285,6 +1304,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         icons: HashMap::new(),
         logos: HashMap::new(),
         editor: Editor::default(),
+        escape: Escape::default(),
         slash: Slash::for_new(&[]),
         focus: None,
         menu: None,
@@ -1373,6 +1393,10 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     _ => continue,
                 },
                 _ = tick.tick() => {
+                    if ui.note.as_ref().is_some_and(|(n, _)| n == Escape::NOTE) && !ui.escape.armed() {
+                        ui.note = None;
+                        ui.draw();
+                    }
                     // A machine paired from the menu joins it.
                     let now = stamp(&t3::hub());
                     if now == paired_at {
