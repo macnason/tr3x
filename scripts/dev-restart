@@ -1,8 +1,9 @@
 #!/bin/sh
-# Development: rebuild, close t3rex's session, and start sync again from a clean state, so every
+# Development: rebuild, close t3rex's sessions, and start sync again from a clean state, so every
 # pane runs the new binary. Uses the state dir in $T3REX_STATE_DIR (required, so it never
 # touches an installed setup's state by accident). The sync Rex runs for an install has its own
-# state and lock, and carries on.
+# state and lock, and carries on. The dev session is called t3x-dev, and its panes only read:
+# they never mark a thread visited. Pairings in the state dir are kept.
 set -e
 : "${T3REX_STATE_DIR:?set T3REX_STATE_DIR to a scratch directory}"
 case "$T3REX_STATE_DIR" in
@@ -13,11 +14,17 @@ REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Con
 cargo build --release -p t3rex --manifest-path "$HERE/Cargo.toml" 2>&1 | grep -E '^(error|warning: unused)' -A5 || true
 pkill -f "$HERE/target/release/t3rex sync" || true
 if [ -f "$T3REX_STATE_DIR/state.json" ]; then
-  S=$(/usr/bin/python3 -I -c "import json,sys;print(json.load(open(sys.argv[1])).get('session_id') or '')" "$T3REX_STATE_DIR/state.json")
-  [ -n "$S" ] && "$REX" kill "$S" >/dev/null 2>&1 || true
+  /usr/bin/python3 -I -c "
+import json,sys
+s=json.load(open(sys.argv[1]))
+ids=[g.get('sessionId') for g in s.get('groups',{}).values()] + [s.get('session_id')]
+print('\n'.join(i for i in ids if i))" "$T3REX_STATE_DIR/state.json" | while read -r S; do
+    "$REX" --autostart=false kill "$S" >/dev/null 2>&1 || true
+  done
 fi
-rm -rf "$T3REX_STATE_DIR"
+rm -f "$T3REX_STATE_DIR/state.json" "$T3REX_STATE_DIR/sync.log"
 mkdir -p "$T3REX_STATE_DIR"
-nohup "$HERE/target/release/t3rex" sync --log > /dev/null 2>&1 &
+T3REX_SESSION_LABEL=${T3REX_SESSION_LABEL:-t3x-dev} T3REX_PASSIVE=1 \
+  nohup "$HERE/target/release/t3rex" sync --log --no-first > /dev/null 2>&1 &
 sleep "${WAIT:-6}"
 cat "$T3REX_STATE_DIR/sync.log"

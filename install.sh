@@ -101,4 +101,9 @@ fi
 ok "t3rex $("$BIN" --version | cut -d' ' -f2)"
 
 # Copies itself to ~/.local/bin when it runs from a build or a download.
-T3REX_REX="$REX" "$BIN" install
+# Piped into sh, stdin is this script: install asks about other machines on the terminal.
+if [ -r /dev/tty ] && [ -t 1 ]; then
+  T3REX_REX="$REX" "$BIN" install </dev/tty
+else
+  T3REX_REX="$REX" "$BIN" install
+fi
