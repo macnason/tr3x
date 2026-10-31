@@ -157,7 +157,10 @@ fn remove_require(dir: &Path) -> Result<()> {
 fn lua(bin: &Path, rex: &Path) -> String {
     LUA.replace("@T3REX@", &bin.to_string_lossy())
         .replace("@REX@", &rex.to_string_lossy())
-        .replace("@T3HOME@", &t3term::discovery::t3_home().to_string_lossy())
+        .replace(
+            "@T3HOME@",
+            &t3client::descriptor::t3_home().to_string_lossy(),
+        )
         .replace("@STATE@", &state::dir().to_string_lossy())
 }
 
@@ -206,7 +209,7 @@ fn log_tail(n: usize) -> Vec<String> {
 
 /// A line of sync's log that says something went wrong, rather than what it synced.
 fn is_error(line: &str) -> bool {
-    !line.contains(" thread(s)")
+    !(line.contains(" thread(s)") || line.ends_with(" is back") || line.contains(": following "))
 }
 
 /// Waits for a sync that started after `since` to save the session.
@@ -224,7 +227,7 @@ async fn first_sync(since: SystemTime) -> Option<State> {
         let state = State::load();
         // The session comes first and its windows a moment later; with no threads, it stays
         // empty but for the new-thread window.
-        if state.session_id.is_some() && (!state.windows.is_empty() || i >= 12) {
+        if state.session().is_some() && (state.window_count() > 0 || i >= 12) {
             return Some(state);
         }
     }
@@ -242,16 +245,14 @@ pub async fn install() -> Result<()> {
         bail!("open Rex first, then run t3rex install again");
     }
     step(true, "Rex", &rex.bin.display().to_string());
-    let client = crate::t3::connect(false)
+    let client = crate::t3::connect()
         .await
         .context("couldn't reach T3 Code; is it running?")?;
+    let found = client.descriptor().expect("a connected machine");
     step(
         true,
         "T3 Code",
-        &format!(
-            "{} at {}",
-            client.runtime.server_version, client.runtime.origin
-        ),
+        &format!("{} at {}", found.server_version, found.origin),
     );
 
     let exe = std::env::current_exe()?;
@@ -315,20 +316,51 @@ pub async fn install() -> Result<()> {
         "Synced",
         &format!(
             "{} thread(s) in the \"{}\" session",
-            state.windows.len(),
+            state.window_count(),
             crate::sync::SESSION_LABEL
         ),
     );
-    if let Some(session) = &state.session_id {
+    if let Some(session) = &state.session() {
         let _ = rex
             .client_do("session.select", &[("session_id", session)])
             .await;
     }
+    other_machines().await;
     println!(
         "\nKeys: ⌘T new thread (in T3 Code) · ⌃⌘N new thread · ⌃⌘I next that needs you · ⌃⌘M model · ⌃⌘S settle · ⌃⌘Z snooze 1h · ⌃⌘P pin · ⌃⌘O open in T3"
     );
     println!("Every action is also in Rex's command palette under T3 Code.");
     Ok(())
+}
+
+/// Offers to pair the machines on the tailnet that run T3: over SSH with one confirm where an
+/// SSH host reaches them, else with a pasted link. Without a terminal to ask in, says how.
+async fn other_machines() {
+    let hub = crate::t3::hub();
+    let home = hub.home();
+    let found = t3client::pair::candidates(home.as_deref(), &hub.registry).await;
+    if found.is_empty() {
+        return;
+    }
+    println!();
+    if !std::io::stdin().is_terminal() {
+        for c in &found {
+            mark(
+                Mark::Warn,
+                &format!("{} runs T3 too", c.label),
+                &format!(
+                    "`t3rex pair {}`",
+                    c.ssh
+                        .clone()
+                        .unwrap_or_else(|| format!("\"{}\" '<link>'", c.label))
+                ),
+            );
+        }
+        return;
+    }
+    for c in &found {
+        crate::machines::offer(&hub, c).await;
+    }
 }
 
 pub async fn uninstall() -> Result<()> {
@@ -343,10 +375,10 @@ pub async fn uninstall() -> Result<()> {
     sync::stop().await;
     step(true, "Stopped sync", "");
     let state = State::load();
-    if let Some(session) = &state.session_id {
+    for session in state.sessions() {
         let gone = tokio::process::Command::new(&rex.bin)
             .args(crate::rex::NO_AUTOSTART)
-            .args(["kill", session])
+            .args(["kill", &session])
             .output()
             .await;
         step(
@@ -357,6 +389,26 @@ pub async fn uninstall() -> Result<()> {
     }
     if fade::restore() {
         step(true, "Put Rex's pane fading back", "");
+    }
+    // Rex leaves T3 → Connections on each machine it can reach.
+    let hub = crate::t3::hub();
+    for machine in hub.registry.machines.clone() {
+        if hub.store.credential(&machine.id).is_none() {
+            continue;
+        }
+        match t3client::pair::forget(&hub.store, &machine).await {
+            Ok(t3client::pair::Forgot::Revoked) => {
+                step(true, &format!("Unpaired {}", machine.name()), "")
+            }
+            _ => mark(
+                Mark::Warn,
+                &format!(
+                    "Remove Rex from T3 → Settings → Connections on {}",
+                    machine.name()
+                ),
+                "",
+            ),
+        }
     }
     let _ = std::fs::remove_dir_all(state::dir());
     let _ = std::fs::remove_dir_all(home().join("Library/Caches/t3rex"));
@@ -470,48 +522,81 @@ pub async fn doctor() -> Result<()> {
         );
     }
 
-    match crate::t3::connect(false).await {
-        Ok(client) => {
-            let runtime = &client.runtime;
-            step(
-                true,
-                "T3 server",
-                &format!("{} at {}", runtime.server_version, runtime.origin),
-            );
-            if !runtime.protocol_supported() {
-                fail(
-                    "T3 speaks another protocol",
-                    &format!(
-                        "{:?}, t3rex speaks {}",
-                        runtime.protocol_version,
-                        t3term::discovery::PROTOCOL_VERSION
-                    ),
-                    "Update T3 Code, or t3rex if T3 is newer.",
-                );
-            }
-            let missing: Vec<&str> = ["threadSettlement", "threadSnooze"]
-                .into_iter()
-                .filter(|c| !runtime.has_capability(c))
-                .collect();
-            if missing.is_empty() {
-                step(true, "T3 capabilities", "threadSettlement, threadSnooze");
-            } else {
-                fail(
-                    "T3 is missing capabilities",
-                    &missing.join(", "),
-                    "Update T3 Code.",
-                );
-            }
-            match client.shell().await {
-                Ok(shell) => step(
-                    true,
-                    "T3 threads",
-                    &format!("{} in the shell", shell.threads.len()),
-                ),
-                Err(e) => fail("T3 threads", &format!("{e:#}"), "Open T3 Code and sign in."),
-            }
+    // Each machine: whether it answers, as which T3, and whether Rex is still paired there.
+    let hub = crate::t3::hub();
+    if hub.envs().is_empty() {
+        fail(
+            "T3 server",
+            "T3 Code isn't set up on this Mac",
+            "Open T3 Code once, or `t3rex pair` a machine that runs it.",
+        );
+    }
+    let checks = hub.envs().iter().map(|env| {
+        let env = env.clone();
+        async move {
+            let checked = tokio::time::timeout(Duration::from_secs(8), env.check()).await;
+            (env, checked)
         }
-        Err(e) => fail("T3 server", &format!("{e:#}"), "Open T3 Code and sign in."),
+    });
+    for (env, checked) in futures_util::future::join_all(checks).await {
+        let name = env.name().to_string();
+        let what = if env.is_local() {
+            "T3 server".to_string()
+        } else {
+            format!("T3 on {name}")
+        };
+        match checked {
+            Ok(Ok(found)) => {
+                step(
+                    true,
+                    &what,
+                    &format!("{} at {}", found.server_version, found.origin),
+                );
+                let missing: Vec<&str> = ["threadSettlement", "threadSnooze"]
+                    .into_iter()
+                    .filter(|c| !found.has_capability(c))
+                    .collect();
+                if !missing.is_empty() {
+                    fail(
+                        &format!("T3 on {name} is missing capabilities"),
+                        &missing.join(", "),
+                        "Update T3 Code there.",
+                    );
+                }
+                let machine = env.machine();
+                if let Some(c) = hub.store.credential(env.id())
+                    && machine.via == t3client::store::Via::Link
+                    && c.expires_at - crate::t3::now_ms() < 7 * 86_400_000
+                {
+                    mark(
+                        Mark::Warn,
+                        &format!("Rex's pairing with {name} ends within a week"),
+                        &format!("`t3rex pair \"{name}\" '<link>'` with a new link from T3 there"),
+                    );
+                }
+            }
+            Ok(Err(e)) if t3client::env::is_pairing_error(&e) => fail(
+                &format!("{name} needs pairing again"),
+                "",
+                &format!("Run `t3rex pair \"{name}\"`."),
+            ),
+            Ok(Err(e)) if env.is_local() => fail(&what, &format!("{e:#}"), "Open T3 Code."),
+            // Another machine can be asleep or away; its windows wait for it.
+            Ok(Err(e)) => mark(Mark::Warn, &format!("{name} is offline"), &format!("{e:#}")),
+            Err(_) => mark(Mark::Warn, &format!("{name} didn't answer"), ""),
+        }
+    }
+    for c in t3client::pair::candidates(hub.home().as_deref(), &hub.registry).await {
+        mark(
+            Mark::Warn,
+            &format!("{} runs T3 and isn't paired", c.label),
+            &format!(
+                "`t3rex pair {}`",
+                c.ssh
+                    .clone()
+                    .unwrap_or_else(|| format!("\"{}\" '<link>'", c.label))
+            ),
+        );
     }
 
     let log = sync::log_path();
@@ -536,7 +621,7 @@ pub async fn doctor() -> Result<()> {
         None => {}
     }
     let state = State::load();
-    let session_ok = match (&state.session_id, &sessions) {
+    let session_ok = match (&state.session(), &sessions) {
         (Some(id), Ok(list)) => list.iter().any(|s| s["session_id"].as_str() == Some(id)),
         _ => false,
     };
@@ -544,7 +629,7 @@ pub async fn doctor() -> Result<()> {
         step(
             true,
             "T3 Code session",
-            &format!("{} window(s)", state.windows.len()),
+            &format!("{} window(s)", state.window_count()),
         );
     } else {
         fail(
@@ -573,9 +658,8 @@ pub async fn doctor() -> Result<()> {
 
 /// Opens the thread in the T3 Code desktop app.
 pub async fn open_in_t3(thread: &str) -> Result<()> {
-    let client = crate::t3::connect(false).await?;
-    let runtime = &client.runtime;
-    let url = format!("t3code://threads/{}/{}", runtime.environment_id, thread);
+    let (_, thread) = crate::t3::thread(thread)?;
+    let url = format!("t3code://threads/{}/{}", thread.env, thread.thread);
     let opened = tokio::process::Command::new("/usr/bin/open")
         .arg(&url)
         .output()
@@ -586,30 +670,29 @@ pub async fn open_in_t3(thread: &str) -> Result<()> {
     Ok(())
 }
 
-/// Where to go for the thread that most needs you: the first window of the T3 session, which
-/// sync keeps in T3's order. Fails when sync isn't running, so Rex's actions start it.
+/// Where to go for the thread that most needs you, on any machine, as sync last worked it out
+/// in T3's order: `session_id` and `window_id`, as Rex's `session.select` takes them. Also
+/// `home`, the session new threads open in, and `sessions`, every session t3rex keeps. Fails
+/// when sync isn't running, so Rex's actions start it.
 pub async fn inbox() -> Result<()> {
     if sync::running().is_none() {
         bail!("t3rex isn't syncing");
     }
     let state = State::load();
-    let session = state.session_id.context("t3rex hasn't synced yet")?;
-    let view = Rex::find().inspect(&session).await?;
-    let mine: std::collections::HashSet<&str> = state
-        .windows
-        .values()
-        .map(|w| w.window_id.as_str())
-        .collect();
-    let first = view["windows"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|w| w["window_id"].as_str())
-        .find(|id| mine.contains(id));
-    let out = match first {
-        Some(window) => serde_json::json!({"session_id": session, "window_id": window}),
-        None => serde_json::json!({"session_id": session}),
+    let home = crate::t3::hub()
+        .home_id()
+        .and_then(|id| state.groups.get(id))
+        .and_then(|g| g.session_id.clone())
+        .or_else(|| state.session())
+        .context("t3rex hasn't synced yet")?;
+    let mut out = match &state.next {
+        Some(next) => {
+            serde_json::json!({"session_id": next.session_id, "window_id": next.window_id})
+        }
+        None => serde_json::json!({"session_id": home}),
     };
+    out["home"] = serde_json::json!(home);
+    out["sessions"] = serde_json::json!(state.sessions());
     println!("{out}");
     Ok(())
 }

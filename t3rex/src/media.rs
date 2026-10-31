@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use t3term::projection::ThreadState;
+use t3client::projection::ThreadState;
 
 /// How much picture a pane holds at once. The terminal keeps each picture as RGBA pixels in
 /// the snapshot it sends when Rex's app connects, and the app shows a pane whose snapshot is

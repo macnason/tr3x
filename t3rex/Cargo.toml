@@ -7,7 +7,7 @@ repository = "https://github.com/macnason/t3rex"
 description = "Rex as the interface to T3 Code: one Rex window per T3 thread."
 
 [dependencies]
-t3term = { path = "../t3term" }
+t3client = { path = "../t3client" }
 anyhow = "1.0.104"
 base64 = "0.22"
 clap = { version = "4.6.7", features = ["derive", "env"] }

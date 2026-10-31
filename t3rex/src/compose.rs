@@ -17,9 +17,9 @@ use crossterm::event::{
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use t3term::client::{Client, IfBusy, WatchEvent};
-use t3term::models::{self, Choice};
-use t3term::projection::ThreadState;
+use t3client::env::{Env, IfBusy, WatchEvent};
+use t3client::models::{self, Choice};
+use t3client::projection::ThreadState;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
@@ -121,7 +121,9 @@ enum Done {
 
 struct Composer {
     thread_id: String,
-    client: Arc<Client>,
+    client: Arc<Env>,
+    /// What to say while the thread's machine is out of reach.
+    offline: Option<String>,
     state: Option<ThreadState>,
     config: Option<Value>,
     editor: Editor,
@@ -235,7 +237,7 @@ impl Composer {
         let Ok(session) = std::env::var("REX_SESSION") else {
             return self.note("Open this in Rex to choose a model", true);
         };
-        let thread = self.thread_id.clone();
+        let thread = format!("{}/{}", self.client.id(), self.thread_id);
         self.spawn(async move {
             crate::pick::float(&session, &thread, field).await?;
             Ok(String::new())
@@ -445,6 +447,10 @@ impl Composer {
         if trimmed.is_empty() {
             return;
         }
+        // Out of reach: nothing goes, and the text stays for when the machine is back.
+        if let Some(offline) = self.offline.clone() {
+            return self.note(offline, true);
+        }
         // A pending question takes the input as its answer: a number picks an option.
         if let Some((request, item)) = self.pending()
             && request["kind"] == "user_input"
@@ -575,17 +581,15 @@ impl Composer {
             // Opening goes to the Mac this runs on. With a laptop or phone attached, which
             // may be where this was typed, the note is a link to click there instead.
             "open" => {
-                let link = crate::link::thread(
-                    self.config.as_ref(),
-                    &self.client.runtime.environment_id,
-                    &self.thread_id,
-                );
+                let link =
+                    crate::link::thread(self.config.as_ref(), self.client.id(), &self.thread_id);
+                let key = format!("{}/{}", self.client.id(), self.thread_id);
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     let done = if !crate::link::only_here().await {
                         Done::Link(link)
                     } else {
-                        match crate::install::open_in_t3(&thread).await {
+                        match crate::install::open_in_t3(&key).await {
                             Ok(()) => Done::Note("Opened in T3 Code".into(), false),
                             Err(e) => Done::Note(format!("{e:#}"), true),
                         }
@@ -806,8 +810,9 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
     (lines, at)
 }
 
-pub async fn run(thread_id: String) -> Result<()> {
-    let client = t3::connect(true).await?;
+pub async fn run(thread: String) -> Result<()> {
+    let (client, thread) = t3::thread(&thread)?;
+    let thread_id = thread.thread;
     // The scheme first, so the logos loaded next are for the screen they're seen on.
     let mut scheme = crate::scheme::listen();
     let mut events = client.watch_thread(&thread_id, None);
@@ -827,6 +832,7 @@ pub async fn run(thread_id: String) -> Result<()> {
     let mut composer = Composer {
         thread_id,
         client,
+        offline: None,
         state: None,
         config: None,
         editor: Editor::default(),
@@ -865,10 +871,13 @@ pub async fn run(thread_id: String) -> Result<()> {
                         if composer.pending().is_none() {
                             composer.answers.clear();
                         }
+                        composer.offline = None;
+                    }
+                    Some(WatchEvent::Reconnecting { reason, retry_in }) => {
+                        composer.offline = Some(crate::chat::offline_line(composer.client.name(), &reason, retry_in));
                     }
                     Some(WatchEvent::Failed(m)) => anyhow::bail!("T3 refused the thread: {m}"),
                     None => anyhow::bail!("the thread's subscription ended"),
-                    _ => {}
                 },
                 event = done.recv() => match event {
                     Some(Done::Note(text, error)) => if !text.is_empty() { composer.note(text, error) },

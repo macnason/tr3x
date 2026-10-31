@@ -101,7 +101,7 @@ fn ours() -> PathBuf {
 
 /// T3 Code's client settings, where its Chat width lives.
 fn t3s() -> PathBuf {
-    t3term::discovery::t3_home().join("userdata/client-settings.json")
+    t3client::descriptor::t3_home().join("userdata/client-settings.json")
 }
 
 /// t3rex's own settings, `~/.config/t3rex/settings.json`.
@@ -131,11 +131,16 @@ pub fn current() -> (ChatWidth, &'static str) {
 
 /// Sets t3rex's own width, or with `None` goes back to following T3's.
 pub fn set(width: Option<ChatWidth>) -> Result<()> {
+    set_setting("chatWidth", width.map(|w| w.to_json()))
+}
+
+/// Sets one of t3rex's own settings, or with `None` takes it out.
+pub fn set_setting(key: &str, value: Option<Value>) -> Result<()> {
     let path = ours();
     let mut map = read(&path).unwrap_or_default();
-    match width {
-        Some(w) => map.insert("chatWidth".into(), w.to_json()),
-        None => map.remove("chatWidth"),
+    match value {
+        Some(v) => map.insert(key.into(), v),
+        None => map.remove(key),
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

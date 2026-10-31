@@ -111,6 +111,11 @@ impl Rex {
         .map(drop)
     }
 
+    /// Calls one of the server's API methods with `args`, a JSON object.
+    pub async fn call(&self, method: &str, args: &str) -> Result<Value> {
+        self.json(&["api", "call", method, args], None).await
+    }
+
     /// Runs a Lua script against `session` and returns what it returned.
     pub async fn lua(&self, session: &str, script: &str) -> Result<Value> {
         self.json(&["do", "-s", session, "-"], Some(script)).await
@@ -132,6 +137,32 @@ impl Rex {
         }
         Ok(())
     }
+}
+
+/// The settings a pane needs from the process that starts it, which Rex doesn't pass on: a
+/// pane starts with the Rex server's environment, so a sync or a pane with its own state
+/// directory hands it on with `--set-env`.
+pub const PANE_ENV: &[&str] = &[
+    "T3REX_STATE_DIR",
+    "T3CODE_HOME",
+    "XDG_CONFIG_HOME",
+    "T3REX_REX",
+    "T3REX_PASSIVE",
+    "T3REX_SESSION_LABEL",
+];
+
+/// `program`, then `--set-env` for each of `PANE_ENV` set here, then `args`: the command line
+/// of a pane this process starts.
+pub fn pane_argv(program: &str, args: &[&str]) -> Vec<String> {
+    let mut argv = vec![program.to_string()];
+    for key in PANE_ENV {
+        if let Some(value) = std::env::var_os(key) {
+            argv.push("--set-env".into());
+            argv.push(format!("{key}={}", value.to_string_lossy()));
+        }
+    }
+    argv.extend(args.iter().map(|a| a.to_string()));
+    argv
 }
 
 /// A Lua string literal that holds `text` exactly. Long brackets need no escaping, so pick a

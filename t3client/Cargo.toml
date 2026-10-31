@@ -1,0 +1,21 @@
+[package]
+name = "t3client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A T3 Code client: pairing, one connection per machine, and T3's thread and sidebar logic."
+
+[dependencies]
+anyhow = "1.0.104"
+futures-util = "0.3.34"
+libc = "0.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "fs"] }
+unicode-width = "0.2.2"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+uuid = { version = "1.27.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

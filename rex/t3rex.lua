@@ -11,6 +11,17 @@ local function sync()
 end
 sync()
 
+-- A pane runs with the Rex server's environment, so the paths above go on its command line.
+local function pane(args)
+  local argv = { T3REX }
+  for k, v in pairs(ENV) do
+    table.insert(argv, "--set-env")
+    table.insert(argv, k .. "=" .. v)
+  end
+  for _, a in ipairs(args) do table.insert(argv, a) end
+  return argv
+end
+
 local function t3rex(ctx, args)
   local argv = { T3REX }
   for _, a in ipairs(args) do table.insert(argv, a) end
@@ -66,13 +77,13 @@ rex.action{
   run = function(ctx)
     local r = rex.exec({ T3REX, "inbox" }, { env = ENV, timeout = 10 })
     if not (r and r.ok) then sync(); error("t3rex wasn't syncing; starting it", 0) end
-    local sid = rex.json.decode(r.stdout).session_id
+    local sid = rex.json.decode(r.stdout).home
     local w, err = rex.session.new_window{
       session_id = sid,
       window_label = "New Thread",
       focus = true,
       layout = { block = { flavor = "com.superlogical.terminal.shell", label = "New Thread",
-        options = { shell = "none", login = false, command = { T3REX, "new" } } } },
+        options = { shell = "none", login = false, command = pane({ "new" }) } } },
     }
     if err then error(err, 0) end
     rex.session.disown_block{ session_id = sid }
@@ -122,10 +133,39 @@ rex.action{
   category = "T3 Code",
   keywords = "t3 size resize screen phone ipad laptop layout own",
   run = function(ctx)
-    local r = rex.exec({ T3REX, "inbox" }, { timeout = 10 })
+    local r = rex.exec({ T3REX, "inbox" }, { env = ENV, timeout = 10 })
     if not (r and r.ok) then error("t3rex isn't syncing", 0) end
-    local sid = rex.json.decode(r.stdout).session_id
-    local _, err = rex.session.own_block{ session_id = sid, mode = "take" }
+    for _, sid in ipairs(rex.json.decode(r.stdout).sessions or {}) do
+      local _, err = rex.session.own_block{ session_id = sid, mode = "take" }
+      if err then error(err, 0) end
+    end
+  end,
+}
+
+-- Pairs another machine that runs T3, in a floating window: over SSH, or with a pasted link.
+rex.action{
+  name = "t3_pair",
+  title = "Pair Another Machine…",
+  category = "T3 Code",
+  keywords = "t3 machine device computer environment link connect ssh",
+  run = function(ctx)
+    local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.15, 0.2, 0.7, 0.5 }, focus = true,
+      layout = { block = { flavor = "com.superlogical.terminal.shell", label = "Pair",
+        options = { shell = "none", login = false, command = pane({ "pair", "--wait" }) } } } }
+    rex.session.disown_block{ session_id = ctx.session_id }
     if err then error(err, 0) end
   end,
 }
+
+-- One T3 Code session for every machine, or a session for each.
+local function sessions_action(name, title, split)
+  rex.action{
+    name = name,
+    title = title,
+    category = "T3 Code",
+    keywords = "t3 machine device sessions split merge",
+    run = function(ctx) t3rex({}, { "sessions", split }) end,
+  }
+end
+sessions_action("t3_sessions_per_machine", "Sessions: One per Machine", "per-machine")
+sessions_action("t3_sessions_merged", "Sessions: One for All Machines", "merged")

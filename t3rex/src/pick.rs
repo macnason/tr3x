@@ -10,7 +10,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
 use serde_json::json;
-use t3term::models;
+use t3client::models;
 
 use crate::chat::{RED, RESET, fit};
 use crate::icons::Painter;
@@ -39,7 +39,7 @@ pub async fn float(session: &str, thread: &str, field: Field) -> Result<()> {
         Field::Effort => "effort",
         Field::Access => "access",
     };
-    let data = json!({"argv": [exe, "pick", thread, "--field", field]});
+    let data = json!({"argv": crate::rex::pane_argv(&exe, &["pick", thread, "--field", field])});
     let script = format!(
         r#"local d = rex.json.decode({})
 local _, err = rex.session.new_layer{{ bounds = {{ 0.2, 0.12, 0.6, 0.76 }}, focus = true,
@@ -53,8 +53,9 @@ return {{}}"#,
     Rex::find().lua(session, &script).await.map(drop)
 }
 
-pub async fn run(thread_id: String, first: Field) -> Result<()> {
-    let client = t3::connect(true).await?;
+pub async fn run(thread: String, first: Field) -> Result<()> {
+    let (client, thread) = t3::thread(&thread)?;
+    let thread_id = thread.thread;
     let _scheme = crate::scheme::listen();
     let (config, state) =
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;

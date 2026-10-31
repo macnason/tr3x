@@ -4,7 +4,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
-use t3term::models;
+use t3client::models;
 
 use crate::chat::{BOLD, DIM, RESET, fit};
 use crate::icons::{Icon, Painter};

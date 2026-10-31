@@ -1,7 +1,7 @@
 # How it works
 
-T3 Code is the source of truth. t3rex never decides a thread's state; it follows T3 and draws
-what T3 says into one Rex session.
+T3 Code is the source of truth. t3rex never decides a thread's state; it follows T3, on every
+machine it's paired with, and draws what T3 says into one Rex session.
 
 ## The session
 
@@ -9,15 +9,17 @@ what T3 says into one Rex session.
   detached command that outlives the load, a config reload and a restart of Rex's server. Each
   load starts another; the sync already running holds `sync.lock`, so the new one leaves at
   once. The actions that need sync (⌃⌘I, ⌃⌘N) start it again if it isn't running. Sync never
-  starts a Rex server itself: while Rex is quit it waits, and picks up when Rex is back. A lost
-  connection to T3 starts over after a pause, from 2 seconds up to a minute. It logs to
-  `~/.local/state/t3rex/sync.log`.
-- `t3rex sync` follows T3's shell subscription (`orchestration.subscribeShell`) and reconciles
-  the Rex session after each change: it creates, closes, relabels and reorders windows with one
-  Lua script per change through `rex do`. Blocks are created and disowned in that same
-  connection, so they size to whichever Rex app is looking at them.
-- The order is T3's own sidebar logic, from t3term's port of `Sidebar.logic.ts` and
-  `threadInbox.ts`. A pinned thread stays put while it works, as in T3.
+  starts a Rex server itself: while Rex is quit it waits, and picks up when Rex is back. It logs
+  to `~/.local/state/t3rex/sync.log`.
+- `t3rex sync` follows each machine's shell subscription (`orchestration.subscribeShell`), each
+  on a connection of its own that drops and resumes on its own, after the last event it had,
+  from a quarter of a second up to 10 seconds apart. After each change it reconciles the Rex
+  session: it creates, closes, relabels and reorders windows with one Lua script per change
+  through `rex do`. Blocks are created and disowned in that same connection, so they size to
+  whichever Rex app is looking at them.
+- The order is T3's own sidebar logic, a port of `Sidebar.logic.ts` and `threadInbox.ts`
+  in `t3client`, over every machine's threads at once. A pinned thread stays put while it
+  works, as in T3.
 - A window the user closes is noticed on sync's next pass (at most 5 seconds). Sync settles the
   thread with a plain `thread.settle`, never stopping a run. A thread that's running or waiting
   on you is only hidden until it changes. Every window going at once is the session closing,
@@ -25,8 +27,29 @@ what T3 says into one Rex session.
 - Subagents get a window under their parent only while they work or need you. Once one
   finishes, its result belongs to the parent thread, which is where T3 shows it.
 - State lives in `~/.local/state/t3rex/state.json`: the session id, the window of each thread,
-  and threads hidden by a closed window. t3rex never touches a session or window it didn't
-  make.
+  keyed `<environment>/<thread>`, and threads hidden by a closed window. t3rex never touches a
+  session or window it didn't make. A state file from before machines moves to this Mac's
+  environment as sync starts.
+
+## Machines
+
+- **One session.** Every machine's threads share **T3 Code** in T3's order, so ⌃⌘I goes to
+  whatever needs you wherever it runs. Once two or more machines are paired, each thread on
+  another machine carries its name after the title, `Fix the build · omarchy`. Rex has no badge
+  for a window, so the name lives in the label. The name is T3's for the machine, or the one
+  `t3rex env rename` gives it; pairing over SSH names it after the SSH host.
+- **A session each.** With `"sessions": "per-machine"` in `~/.config/t3rex/settings.json`
+  (`t3rex sessions per-machine`), each machine gets **T3 Code · its name**, and a New Tab there
+  starts on that machine. Rex can't move a window between sessions, so switching closes
+  t3rex's old sessions without settling anything and opens the tabs again in the new ones.
+- **Out of reach.** Sync creates, closes or settles a machine's windows only once that
+  machine's shell has caught up on its current connection. Until then its windows stay where
+  they are, and after 30 seconds out of reach they read `(offline)`. A window closed while its
+  machine is away isn't settled. The conversation shows `omarchy is offline · retrying` and
+  Reply keeps what's typed. A machine that no longer accepts Rex's token says
+  `Run t3rex pair omarchy`.
+- **Folders.** A thread on another machine works in a folder there, so its panes start in the
+  home folder. HTML snapshots read T3's attachments from disk, so they're this Mac's only.
 
 ## The panes
 
@@ -82,17 +105,55 @@ Sync keeps a `rex do` script running with `rex.on("window_created")`. A window t
 unlabelled shell (Rex's New Tab) gets `t3rex new` split in beside the shell, which then closes,
 so the window keeps its place and focus. t3rex labels its own panes as it makes them.
 
-`t3rex new` labels itself `t3:<thread>` before it launches, with the id the launch will use,
-then turns into `t3rex chat` (exec) with Reply split under it. Sync adopts the window once T3
-reports the thread. Ids longer than Rex's 128-character labels are tagged `t3#` and a hash.
+`t3rex new` labels itself `t3:<env8>/<thread>`, with the first eight characters of the
+machine's environment id and the id the launch will use, before it launches through
+`orchestration.launchThread` on that machine's connection. Then it turns into `t3rex chat`
+(exec) with Reply split under it. Sync adopts the window once T3 reports the thread. Tags
+longer than Rex's 128-character labels are `t3#` and a hash. Windows tagged before machines,
+`t3:<thread>`, are adopted as this Mac's.
+
+With more than one machine to choose from, a machine chip comes first. It lists the paired
+machines, marked `offline` when they don't answer, and the machines `t3rex pair` would find,
+as **Pair…**, which pairs in a floating window. Choosing one loads its config and shell, so the
+project, model, effort and branch chips are that machine's. When this Mac's T3 isn't running,
+the window opens on the first paired machine that answers.
 
 A project added from the project chip goes to T3 as `projects.mutate` with `project.create`,
-the call `t3 project add` makes, titled after its folder.
+the call `t3 project add` makes, titled after its folder. It's offered on this Mac's machine
+only, since the folders it lists are this Mac's.
 
-## Logging in to T3
+## Pairing with T3
 
-Each process logs in to T3 with a temporary session and revokes it on exit, so the Keychain
-never prompts. Set `T3REX_SAVED_LOGIN=1` to use t3term's saved login instead.
+t3rex pairs with T3 the way T3's own apps do. A one-time pairing code is traded at
+`POST /oauth/token` for a token that lasts 30 days. It shows in T3 → Settings → Connections as
+**Rex on** and this Mac's name. The code comes from:
+
+- **This Mac**: T3's own CLI, `t3 auth pairing create`. The first t3rex process that needs T3
+  does it, so there's nothing to set up.
+- **SSH**: the same command on the other machine, over `ssh -o BatchMode=yes <host>`, as T3's
+  desktop app does for its SSH machines. It finds `t3` on the PATH, in `~/.local/bin` or in
+  `~/.t3/runtime/versions`. SSH never prompts; a host that wants a password says so and stops.
+- **A link**: every form T3 accepts. `https://host/pair#token=…`, `?token=…`, the hosted
+  `?host=…&token=…`, `t3code://pair?pairingUrl=…`, or a host and a code.
+
+`t3rex pair` finds machines from `tailscale status` and the linked environments T3 lists
+(`peerLinks.list`), each checked at `:3773/.well-known/t3/environment`, and matches them to
+the hosts in `~/.ssh/config` (and the files it includes) by `ssh -G`. Before a code is traded,
+the server's descriptor has to name the machine it came from.
+
+Each machine's id, name, alias, addresses and how it was paired are in `envs.json`; its token,
+scopes and expiry in `credentials.json` (mode 0600), both in t3rex's state directory and read
+by every t3rex process. A token is only sent to a server whose descriptor names the machine it
+was issued for, checked on every connection. One that's rejected or a day from running out is
+replaced the way the machine was paired, under `pair.lock`, so panes that find it at once pair
+only once, and the session it replaces is revoked through the machine's CLI. A machine paired
+with a link needs a new link. `t3rex env forget` revokes Rex's session through the machine's
+CLI where t3rex can run it. Rex asks for `orchestration:read`, `orchestration:operate`,
+`access:read`, `filesystem:read` and `source-control:write`.
+
+Panes Rex starts get the Rex server's environment, not their starter's, so sync and the panes
+hand on t3rex's own settings (`T3REX_STATE_DIR`, `T3CODE_HOME`, `XDG_CONFIG_HOME`) on the
+command line as `--set-env`.
 
 ## Install, in detail
 
@@ -109,14 +170,18 @@ never prompts. Set `T3REX_SAVED_LOGIN=1` to use t3term's saved login instead.
    `init.lua.before-t3rex`,
 5. reloads Rex's config, which starts sync,
 6. waits for the first sync and switches Rex to the **T3 Code** session. If sync doesn't
-   arrive in 20 seconds, it prints the end of `sync.log` and exits with an error.
+   arrive in 20 seconds, it prints the end of `sync.log` and exits with an error,
+7. offers each machine on the tailnet that runs T3: over SSH with one confirm, else a link.
 
 `t3rex uninstall` undoes all of it: it removes the `require` line and the actions, stops sync,
-closes only the session t3rex made, and deletes the binary, its state and its caches.
+closes only the sessions t3rex made, revokes Rex's session on each machine it can, and deletes
+the binary, its state and its caches.
 
-`t3rex doctor` checks Rex, the config line, that Rex loaded the config without errors, T3 and
-the capabilities t3rex needs (`threadSettlement`, `threadSnooze`, orchestration protocol 2),
-that sync is running and what it last logged, and the session. Each ✗ comes with its fix, and
+`t3rex doctor` checks Rex, the config line, that Rex loaded the config without errors, T3 on
+each machine and the capabilities t3rex needs (`threadSettlement`, `threadSnooze`,
+orchestration protocol 2), that sync is running and what it last logged, and the session. A
+machine that needs pairing is a ✗; one that's out of reach, or a pairing link that ends within
+a week, is a warning. Machines on the tailnet that run T3 and aren't paired are listed. Each ✗ comes with its fix, and
 any ✗ exits non-zero. A missing headless Chromium is only a warning.
 
 ## Pane fading
@@ -137,8 +202,8 @@ the open question; the app only links the in-process change notification for its
 
 | Path | |
 |---|---|
-| `t3rex/` | The crate: `sync.rs`, `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
-| `t3term/` | [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT), vendored. t3rex uses its T3 client, auth and sidebar logic. The only changes are a small public API at the end of `src/tui/sidebar.rs`, re-exported from `src/tui/mod.rs`, and an `access:read` scope in `src/auth.rs`. |
+| `t3rex/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `slash.rs` (the `/` menu), `new.rs` (new thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
+| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines t3rex knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch and transcripts. The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/t3rex.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
@@ -148,10 +213,15 @@ the open question; the app only links the in-process change notification for its
 ## Development
 
 ```sh
-cargo test --release -p t3rex
-cargo clippy --release -p t3rex --all-targets
+cargo test --release
+cargo clippy --release --all-targets
 T3REX_STATE_DIR=/tmp/t3rex-dev scripts/dev-restart   # a sync with its own state, not the installed one
 ```
+
+`dev-restart` names its session **t3x-dev** (`T3REX_SESSION_LABEL`) and starts its panes with
+`--passive` (`T3REX_PASSIVE`), so they never mark a thread visited beside an installed sync.
+Pair machines into its state with `T3REX_STATE_DIR=… t3rex pair`. `t3rex rpc --env omarchy
+<method> '<json>'` calls one machine.
 
 To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest release.
 
@@ -162,10 +232,5 @@ To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest relea
   but `defaults write` with the button names didn't take effect in Rex 0.1.0 (1642) while it
   ran, and hiding them everywhere would also hide them in your other sessions. Fading is
   likewise only global; see [pane fading](#pane-fading).
-- Launching on a linked device: `orchestration.launchThread` has no environment to name, so it
-  starts threads only where it's called. T3 forwards its agent tools, `t3_thread_launch` among
-  them, to a linked environment named by `environmentId`, over the peer link (no attachments,
-  and only with Linked environments on in Labs). That needs a session for T3's `/mcp` endpoint,
-  which `t3 thread start` issues in-process and t3rex's login doesn't have, so linked
-  environments stay out of the chips until t3rex pairs with each one. Cloning a project to
-  another machine (`projectClone.start`) isn't wired up.
+- Other machines' pictures and HTML snapshots: attachments are read from T3's folder on this
+  Mac. Over HTTP, `attachments` and `assets.createUrl` would serve them; not wired up yet.
