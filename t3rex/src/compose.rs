@@ -150,8 +150,10 @@ enum Done {
 /// The share of the window the conversation has over Reply, as sync and `new` split it. Reply
 /// is never smaller than that.
 const SPLIT: f64 = 0.86;
-/// Reply's rows at rest: about seven lines of text over the chip.
+/// Reply's rows at rest: about seven lines of text over the chip, within this share of the
+/// window.
 const REST_ROWS: usize = 9;
+const REST_SHARE: f64 = 0.25;
 /// Reply grows by at most this many rows past that, and to at most this share of the window.
 const GROW_LINES: usize = 7;
 const GROW_SHARE: f64 = 0.35;
@@ -190,8 +192,9 @@ struct Grow {
     busy: bool,
 }
 
-/// Moves the split so Reply has `want` rows, within `GROW_SHARE` of the window and no less
-/// than the starting split. None when it couldn't.
+/// Moves the split so Reply has `want` rows, the `REST_ROWS` of them within `REST_SHARE` of
+/// the window and all within `GROW_SHARE`, and no less than the starting split. None when it
+/// couldn't.
 async fn resize(session: String, block: String, want: usize) -> Option<()> {
     let rex = crate::rex::Rex::find();
     // The conversation: the pane before Reply in its window's split, and the split as it is.
@@ -231,8 +234,9 @@ async fn resize(session: String, block: String, want: usize) -> Option<()> {
     let share = 1.0 - ratio;
     let header = ((share * (chat_rows + reply_rows) - reply_rows) / (1.0 - 2.0 * share)).max(0.0);
     let all = chat_rows + reply_rows + 2.0 * header;
+    let rest = (REST_ROWS as f64).min(((chat_rows + reply_rows) * REST_SHARE).floor());
     let most = ((chat_rows + reply_rows) * GROW_SHARE).floor();
-    let want = (want as f64).min(most);
+    let want = (rest + want.saturating_sub(REST_ROWS) as f64).min(most);
     let next = (1.0 - (want + header + 0.5) / all).clamp(1.0 - GROW_SHARE - 0.1, SPLIT);
     if (next - ratio).abs() < 0.001 {
         return Some(());
