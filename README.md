@@ -89,10 +89,11 @@ the tab says so and carries on once it is.
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
+| Pull request | **Create Pull Request** in the palette, or `/pr create` in Reply: T3 commits, pushes and opens one with the title and body it writes, as its own Create PR does, on a new branch if the thread is on the default one. **Show Pull Request** or `/pr` opens the thread's. Either way it opens in a drawer on the right of the thread, full height when the window is wide enough, else floating over it. [sup](https://github.com/superultrainc/sup) shows it there: description, conversation, review threads, checks and files; `m` merges, `A` approves, `M` comments, `q` steps back to sup's list of your pull requests and again closes the drawer. Without sup, the drawer shows `gh pr view`. |
 | Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. `/settle` settles it whatever it's doing. **Reopen Last Settled** in the palette undoes a tab closed by accident. |
 | Find | **Find Thread…** in the palette lists every thread on every machine, grouped Open, Snoozed, Settled and Archived, newest first. Typing filters. Enter brings one back to its tab, unsettling, waking or unarchiving it as needed; ⌥Enter opens it in T3. |
 | Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
-| Commands | `/steer …` `/settle` `/unsettle` `/snooze` `/wake` `/pin` `/unpin` `/rename` `/retitle` `/fork` `/archive` `/delete` `/stop` `/force-stop` `/model` `/effort` `/mode` `/open` `/width`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. A command the thread's machine is too old for isn't listed. |
+| Commands | `/steer …` `/settle` `/unsettle` `/snooze` `/wake` `/pin` `/unpin` `/rename` `/retitle` `/fork` `/archive` `/delete` `/stop` `/force-stop` `/model` `/effort` `/mode` `/open` `/pr` `/width`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. A command the thread's machine is too old for isn't listed. |
 | Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you |
 | Palette | Everything else is in Rex's command palette (⌘⇧P) under **T3 Code**. To give an action a key, add a line like `rex.bind("ctrl+cmd+s", "t3_settle")` to `~/.config/rex/init.lua`. |
 
@@ -138,6 +139,8 @@ a column count). `/width t3` goes back to following T3.
   answers again. Nothing is settled or closed for a machine sync can't see.
 - **Other machines' files.** HTML snapshots need the attachment on this Mac, so on another
   machine an embed is a titled link. Add folder adds folders on this Mac only.
+- **Pull requests on GitHub.** sup reads GitHub with this Mac's `gh` login, whichever machine
+  the thread runs on. T3 makes the pull request with its own login there.
 - **Tailscale for other machines.** Finding and joining machines goes over your tailnet. Without
   Tailscale, pair with SSH or a link. Pairings renew on their own; one made before t3rex asked
   for `access:write` renews the old way, so a linked machine from then needs one more link.

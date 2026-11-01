@@ -17,6 +17,7 @@ mod paste;
 mod pick;
 mod picker;
 mod picture;
+mod pr;
 mod prompt;
 mod render;
 mod rex;
@@ -177,6 +178,22 @@ enum Command {
     /// Open the thread in T3 Code.
     #[command(hide = true)]
     Open(Target),
+    /// Show the thread's pull request in a drawer beside it; --create makes it first.
+    #[command(hide = true)]
+    Pr {
+        /// Commit, push and open the pull request through T3 first.
+        #[arg(long)]
+        create: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// The pull request drawer, as `pr` opens it.
+    #[command(hide = true)]
+    PrPane {
+        thread: String,
+        #[arg(long)]
+        create: bool,
+    },
     /// Call a T3 RPC method and print its answer, for development.
     #[command(hide = true)]
     Rpc {
@@ -556,6 +573,12 @@ async fn run(cli: Cli) -> Result<()> {
             let thread = t.resolve().await?;
             install::open_in_t3(&thread).await
         }
+        Command::Pr { create, target } => {
+            let thread = target.resolve().await?;
+            let block = target.block.context("run this in a T3 window in Rex")?;
+            pr::open(&thread, &block, create).await
+        }
+        Command::PrPane { thread, create } => pr::pane(thread, create).await,
         Command::Which(t) => {
             println!("{}", t.resolve().await?);
             Ok(())

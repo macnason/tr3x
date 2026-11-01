@@ -14,3 +14,4 @@ snapshots, images) don't appear here; their rows show blank.
 | `real-thread-dark.png`, `real-thread-light.png` | Real threads: headings, bold, lists, links, the run footer. |
 | `html-embed-snapshot-dark.png` | The snapshot t3rex took of an `html_render` embed, which draws inline in Rex. |
 | `busy-day-mock-dark.png`, `busy-day-mock-light.png` | **Mock sidebar** (made-up thread names) around the real approval window, to show a busier day: needs-you first, then idle, then working with Rex's `•••`. |
+| `pr-drawer-dark.png` | Drawn 1 Nov 2026, the same way. Create Pull Request on this thread: T3 pushed and opened #1 with the text it wrote, and the drawer on the right is sup on it, full height beside the conversation and Reply. Its merge box still showed the conflict with `master` that a rebase then cleared. |

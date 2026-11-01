@@ -201,6 +201,21 @@ pub const ALL: &[Action] = &[
         ..NONE
     },
     Action {
+        id: "t3_pr",
+        title: "Show Pull Request",
+        keywords: "t3 pr github review merge checks comments drawer",
+        args: &["pr"],
+        slash: slash("pr", "Show the pull request", Some("create")),
+        ..NONE
+    },
+    Action {
+        id: "t3_pr_create",
+        title: "Create Pull Request",
+        keywords: "t3 pr github commit push open",
+        args: &["pr", "--create"],
+        ..NONE
+    },
+    Action {
         slash: slash(
             "width",
             "Set the chat width",

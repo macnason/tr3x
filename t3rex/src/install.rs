@@ -657,6 +657,13 @@ pub async fn doctor() -> Result<()> {
         println!("  For snapshots: `npx playwright install chromium-headless-shell`.");
     }
 
+    if crate::pr::has_sup() {
+        step(true, "sup", "for pull requests");
+    } else {
+        mark(Mark::Warn, "No sup", "Show Pull Request falls back to gh");
+        println!("  For reviews and merging: https://github.com/superultrainc/sup#install");
+    }
+
     if failed > 0 {
         bail!("{failed} check(s) failed");
     }
