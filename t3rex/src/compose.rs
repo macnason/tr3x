@@ -6,8 +6,8 @@
 //! Enter sends. To a running turn it steers or queues, as T3's Follow-up behavior says, and
 //! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
-//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3. `/` first opens a menu of
-//! those, the provider's commands and skills (`slash`).
+//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3, /reply inline|pane.
+//! `/` first opens a menu of those, the provider's commands and skills (`slash`).
 //!
 //! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
 //! over the input; its ✕, or Backspace at the start of the input, takes it off.
@@ -358,9 +358,29 @@ pub(crate) enum Done {
     Link(String),
 }
 
-/// Reply's rows at most, as a share of the pane, and the input's rows at most within them.
+/// Reply's rows at most, as a share of a pane it shares with the conversation, and the
+/// input's rows at most within them.
 const MOST_SHARE: f64 = 0.5;
 const INPUT_ROWS: usize = 8;
+
+/// The input's fill: the terminal's background, a step lighter on a dark screen and a step
+/// darker on a light one. None until the terminal says what its background is.
+fn fill() -> Option<String> {
+    let [r, g, b] = crate::scheme::background()?;
+    let dark = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64) < 128.0;
+    let step = |c: u8| {
+        let c = c as f64;
+        (if dark {
+            c + (255.0 - c) * 0.07
+        } else {
+            c * 0.95
+        })
+        .round() as u8
+    };
+    Some(format!("\x1b[48;2;{};{};{}m", step(r), step(g), step(b)))
+}
+/// The columns the prompt takes from the text: `› `.
+const PROMPT: usize = 2;
 
 pub(crate) struct Composer {
     thread_id: String,
@@ -402,6 +422,12 @@ pub(crate) struct Composer {
     pub(crate) width_set: Option<ChatWidth>,
     /// What puts the cursor back in the input after the conversation draws.
     pub(crate) parked: String,
+    /// Reply's rows at most, as a share of its pane: all of it when it has a pane of its own.
+    pub(crate) share: f64,
+    /// The rows Reply would take with room for all of them, up to `INPUT_ROWS` of input.
+    pub(crate) wanted: usize,
+    /// The input's background, empty when it sits between rules instead.
+    fill: String,
     /// The last frame drawn, less the cursor.
     drawn: String,
 }
@@ -509,8 +535,9 @@ impl Composer {
         });
     }
 
-    /// Reply's rows, top to bottom: a rule, what's pending and its buttons, the pictures, room
-    /// for the slash menu, the input, a note, and the chip. At most `MOST_SHARE` of the pane;
+    /// Reply's rows, top to bottom: what's pending and its buttons, the pictures, room for the
+    /// slash menu, the input on its fill (or between two rules, before the terminal says what
+    /// its background is), a note, and the chip. At most `share` of the pane;
     /// the input shows the rows around the cursor when there's less room than it has.
     fn layout(&mut self) -> Laid {
         self.slash.sync(
@@ -523,10 +550,10 @@ impl Composer {
             0 => 0,
             n => n.max(self.menu_rows),
         };
-        // The conversation's column, less the prompt's two.
+        // The conversation's column, less the prompt.
         let (left, column) = self.column;
-        let width = column.saturating_sub(2).max(10);
-        let mut rows: Vec<String> = vec![format!("{DIM}{}{RESET}", "─".repeat(column))];
+        let width = column.saturating_sub(PROMPT).max(10);
+        let mut rows: Vec<String> = Vec::new();
         let mut hits: Vec<(usize, (usize, usize), Hit)> = Vec::new();
         if let Some((request, item)) = self.pending() {
             let ask = if crate::ask::is_question(&request) {
@@ -597,20 +624,40 @@ impl Composer {
         // The input, wrapped, and as many of its rows as there's room for around the cursor.
         self.editor.width = width;
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
-        let most = ((self.rows as f64 * MOST_SHARE) as usize).max(3);
+        self.wanted = rows.len() + lines.len().min(INPUT_ROWS) + 2 + below.len();
+        let most = ((self.rows as f64 * self.share) as usize).max(3);
         let room = most
-            .saturating_sub(rows.len() + below.len())
+            .saturating_sub(rows.len() + below.len() + 2)
             .clamp(1, INPUT_ROWS);
         let start = (cursor.0 + 1)
             .saturating_sub(room)
             .min(lines.len().saturating_sub(room));
+        self.fill = fill().unwrap_or_default();
+        let bg = self.fill.clone();
+        // On a fill, a column of it either side of the conversation's, and a row above and
+        // below the input. Without one, a rule above and below.
+        let edge = if bg.is_empty() {
+            format!("{DIM}{}{RESET}", "─".repeat(column))
+        } else {
+            format!("\x1b[{left}G{bg}{}{RESET}", " ".repeat(column + 2))
+        };
+        rows.push(edge.clone());
         let first_input = rows.len();
         let prompt = format!("{BLUE}{BOLD}›{RESET} ");
         for (i, line) in lines.iter().enumerate().skip(start).take(room) {
             let lead = if i == 0 { prompt.clone() } else { "  ".into() };
-            rows.push(format!("{lead}{line}"));
+            if bg.is_empty() {
+                rows.push(format!("{lead}{line}"));
+            } else {
+                let lead = lead.replace(RESET, &format!("{RESET}{bg}"));
+                let pad = " ".repeat(
+                    width.saturating_sub(unicode_width::UnicodeWidthStr::width(line.as_str())) + 1,
+                );
+                rows.push(format!("\x1b[{left}G{bg} {lead}{line}{pad}{RESET}"));
+            }
         }
         let shown = rows.len() - first_input;
+        rows.push(edge);
         let cursor = (first_input + cursor.0 - start, cursor.1);
         if let Some((spans, chips)) = chip_row {
             let at = rows.len() + below.len() - 1;
@@ -651,7 +698,7 @@ impl Composer {
         let mut text = String::new();
         let laid = self.layout();
         let (left, column) = self.column;
-        let width = column.saturating_sub(2).max(10);
+        let width = column.saturating_sub(PROMPT).max(10);
         for (i, row) in laid.rows.iter().enumerate() {
             text.push_str(&format!(
                 "\x1b[{};1H\x1b[2K\x1b[{}G{row}",
@@ -668,19 +715,20 @@ impl Composer {
             .into_iter()
             .map(|(row, cols, hit)| (top + row, cols, hit))
             .collect();
+        // The menu goes right above the top rule, so the rules count as the input's.
         let (first, shown) = laid.input;
         text.push_str(&self.slash.draw(
             &mut self.painter,
-            (top + first, top + first + shown.max(1) - 1),
+            (top + first - 1, top + first + shown.max(1)),
             self.rows,
             left,
             column,
         ));
-        let (r, c) = (top + laid.cursor.0, left + 3 + laid.cursor.1);
+        let (r, c) = (top + laid.cursor.0, left + PROMPT + 1 + laid.cursor.1);
         let hint_room = width.saturating_sub(laid.cursor.1 + 1);
         if let Some(hint) = self.slash.hint().filter(|_| hint_room >= 4) {
             let hint = fit(hint, hint_room);
-            text.push_str(&format!("\x1b[{r};{c}H{DIM}{hint}{RESET}"));
+            text.push_str(&format!("\x1b[{r};{c}H{}{DIM}{hint}{RESET}", self.fill));
         }
         // The cursor hides while a button has focus, as it does on a chip in a new thread.
         let cursor = if self.focus.is_some() { "?25l" } else { "?25h" };
@@ -990,6 +1038,10 @@ impl Composer {
                 self.note("Deleting can't be undone. /delete again to delete", true);
             }
             "delete" => self.spawn(lifecycle(Lifecycle::Delete, "Deleted")),
+            "reply" => match crate::reply::apply(arg) {
+                Ok(note) => self.note(note, false),
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
             "width" => match crate::width::apply(arg) {
                 Ok(note) => {
                     self.width_set = Some(crate::width::current().0);
@@ -1438,6 +1490,9 @@ impl Composer {
             width_set: None,
             parked: String::new(),
             drawn: String::new(),
+            share: MOST_SHARE,
+            wanted: 0,
+            fill: String::new(),
         };
         (composer, done)
     }

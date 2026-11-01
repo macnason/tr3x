@@ -18,3 +18,5 @@ snapshots, images) don't appear here; their rows show blank.
 | `one-pane-desktop-dark.png`, `one-pane-phone-dark.png` | Drawn 1 Nov 2026 from `rex capture --format=html` of the dev session, rendered in headless Chrome. A thread's window as one pane: the conversation scrolls above, Reply stays at the bottom. The phone frame is the same pane at 46 columns. |
 | `one-pane-approval-dark.png` | An approval in the one pane: the request and its buttons in Reply. Clicks are on only while they show; a click on Approve sent `accept`. |
 | `one-pane-phone-slash-dark.png` | The slash menu at phone width, in rows Reply keeps for it above the input. |
+| `reply-fill-dark.png` | Drawn 2 Nov 2026, the same way. Reply's input on a fill, the Rex theme's background a step lighter. The thin bands between the fill's rows come from the HTML capture; in Rex the fill is solid. |
+| `reply-pane-dark.png` | With `/reply pane`: the conversation in its pane, and Reply in a pane of its own under it. Sync reshaped the open windows both ways. The panes were 100×18 and 100×4 for the frame; nobody was viewing the session, so Reply hadn't fitted its pane. |

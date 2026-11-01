@@ -1,4 +1,5 @@
-//! A thread's pane: the conversation, and Reply under it (`compose`). The conversation is
+//! A thread's pane: the conversation, and Reply under it (`compose`), or with the `reply`
+//! setting at `pane`, either of them in a pane of its own (`Role`). The conversation is
 //! plain terminal output, so Rex's scrollback, find, selection and links work on it. Finished
 //! blocks print once and stay. The blocks of a running turn form a live tail at the bottom
 //! that redraws in place until they finish. It prints in a scroll region over Reply's rows, so
@@ -537,8 +538,8 @@ const TOOLS_SHOWN: usize = 3;
 
 /// For each block, whether it shows. A run of tool calls (reasoning between them doesn't
 /// break it) shows its first few calls and folds the rest into one "more" line, when that
-/// hides at least two. Running and failed calls always show.
-fn visible_tools(blocks: &[Block]) -> Vec<bool> {
+/// hides at least two. Running and failed calls always show, and so do HTML embeds, `embeds`.
+fn visible_tools(blocks: &[Block], embeds: &HashMap<String, media::Embed>) -> Vec<bool> {
     let mut shown = vec![true; blocks.len()];
     let mut i = 0;
     while i < blocks.len() {
@@ -553,9 +554,18 @@ fn visible_tools(blocks: &[Block]) -> Vec<bool> {
         let tools: Vec<usize> = (start..i)
             .filter(|&j| blocks[j].kind == BlockKind::Tool)
             .collect();
-        if tools.len() >= TOOLS_SHOWN + 2 {
-            for &j in &tools[TOOLS_SHOWN..] {
-                shown[j] = is_running(&blocks[j]) || failed(&blocks[j]);
+        let fold: Vec<usize> = tools
+            .iter()
+            .skip(TOOLS_SHOWN)
+            .copied()
+            .filter(|&j| {
+                let b = &blocks[j];
+                !(is_running(b) || failed(b) || embeds.contains_key(&b.item_id))
+            })
+            .collect();
+        if fold.len() >= 2 {
+            for j in fold {
+                shown[j] = false;
             }
         }
     }
@@ -779,8 +789,8 @@ impl Pane {
             self.header = true;
         }
         let (left, width) = self.column();
-        let shown = visible_tools(&blocks);
         let embeds = media::embeds(state);
+        let shown = visible_tools(&blocks, &embeds);
         if self.media.can_snapshot() {
             for embed in embeds.values() {
                 self.media.ask(embed, self.snapshots.clone());
@@ -940,6 +950,17 @@ impl Pane {
     }
 }
 
+/// What a thread's pane shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The conversation, with Reply in its bottom rows.
+    Inline,
+    /// The conversation alone, over a Reply pane.
+    Conversation,
+    /// Reply alone, under the conversation's pane, sized to fit.
+    Reply,
+}
+
 /// Clicks on, for Reply's buttons and menu, or off, for the scrollback and selection.
 fn clicks(on: bool) -> &'static str {
     if on {
@@ -949,16 +970,18 @@ fn clicks(on: bool) -> &'static str {
     }
 }
 
-pub async fn run(thread: String, passive: bool) -> Result<()> {
+pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     let (client, thread) = t3::thread(&thread)?;
     let thread_id = thread.thread;
-    let mut thread_events = client.watch_thread(&thread_id, None);
-    let mut shell_events = client.watch_shell(None);
     let scheme = crate::scheme::listen();
     crossterm::terminal::enable_raw_mode()?;
     // Clear what the login printed, and ask for focus reports and bracketed paste. Paste
     // events too, where the filter can take the clipboard's replies.
     let clipboard = crate::scheme::clipboard();
+    // Reply alone keeps nothing to scroll back to, so it takes the alternate screen.
+    if role == Role::Reply {
+        out("\x1b[?1049h");
+    }
     out("\x1b[H\x1b[2J\x1b[3J\x1b[?1004h\x1b[?2004h");
     if clipboard.is_some() {
         out(paste::ON);
@@ -970,21 +993,17 @@ pub async fn run(thread: String, passive: bool) -> Result<()> {
         ));
     }
     let keys = crate::scheme::keys();
-    let result = event_loop(
-        passive,
-        &client,
-        &thread_id,
-        &mut thread_events,
-        &mut shell_events,
-        scheme,
-        clipboard,
-    )
-    .await;
+    let result = event_loop(passive, role, &client, &thread_id, scheme, clipboard).await;
     drop(keys);
     out(&format!(
-        "{}{}\x1b[r\x1b[?2004l\x1b[?1004l\x1b[?25h",
+        "{}{}\x1b[r\x1b[?2004l\x1b[?1004l\x1b[?25h{}",
         paste::OFF,
-        clicks(false)
+        clicks(false),
+        if role == Role::Reply {
+            "\x1b[?1049l"
+        } else {
+            ""
+        }
     ));
     let _ = crossterm::terminal::disable_raw_mode();
     result
@@ -992,18 +1011,27 @@ pub async fn run(thread: String, passive: bool) -> Result<()> {
 
 async fn event_loop(
     passive: bool,
+    role: Role,
     client: &std::sync::Arc<t3client::env::Env>,
     thread_id: &str,
-    thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
-    shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     mut scheme: tokio::sync::watch::Receiver<Option<bool>>,
     mut clipboard: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
+    let mut thread_events = client.watch_thread(thread_id, None);
+    let mut shell_events = client.watch_shell(None);
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
     // Reply asks for the machine's config: the provider's driver for each instance, so the pane
     // can take its provider's name, and the address T3 serves its web app at, for the
     // thread's link.
     let (mut composer, mut done) = Composer::new(client.clone(), thread_id.to_string());
+    if role == Role::Reply {
+        composer.share = 1.0;
+    }
+    // Reply alone fits its pane to what it shows, by moving the split above it.
+    let mut fit = (role == Role::Reply).then(crate::reply::Fit::new).flatten();
+    let (fitted_tx, mut fitted) = mpsc::unbounded_channel();
+    // Where Reply alone starts in its pane, to clear above it when that moves.
+    let mut reply_top = 0;
     let link = crate::link::thread(None, client.id(), thread_id);
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
     let mut shell = ShellState::default();
@@ -1050,8 +1078,13 @@ async fn event_loop(
             },
             event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
-                let thread = t3client::inbox::find_thread(&shell, thread_id);
-                pane.set_status(thread, composer.state.as_ref());
+                if role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    pane.set_status(thread, composer.state.as_ref());
+                }
+            },
+            Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
+                fit.finished(ok);
             },
             event = done.recv() => if let Some(event) = event {
                 if let crate::compose::Done::Config(found) = &event {
@@ -1077,6 +1110,9 @@ async fn event_loop(
                     }
                     Some(Ok(Event::FocusGained)) => focused = true,
                     Some(Ok(Event::FocusLost)) => focused = false,
+                    // The conversation alone has nothing to type into.
+                    Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
+                        if role == Role::Conversation => reply = false,
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         wheeled = false;
                         composer.key(key);
@@ -1105,6 +1141,8 @@ async fn event_loop(
             },
             // A screen that turns light or dark: snapshots and logos again in its scheme.
             Ok(()) = scheme.changed() => {
+                // The fill under the input follows the new background.
+                crate::scheme::ask_background();
                 let dark = crate::scheme::dark();
                 if dark != pane.media.dark {
                     pane.media.set_dark(dark);
@@ -1123,6 +1161,14 @@ async fn event_loop(
                 reply = true;
             }
             _ = tick.tick() => {
+                if let Some(fit) = fit.as_mut()
+                    && let Some(job) = fit.due()
+                {
+                    let tx = fitted_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(job.await);
+                    });
+                }
                 if pane.animating {
                     pane.frame += 1;
                     dirty = true;
@@ -1164,8 +1210,31 @@ async fn event_loop(
         composer.cols = pane.cols;
         composer.rows = pane.rows;
         composer.column = pane.column();
-        let height = composer.height().min(pane.rows.saturating_sub(1)).max(1);
-        let mut text = pane.set_region(pane.rows.saturating_sub(height).max(1));
+        let height = match role {
+            Role::Inline => composer.height().min(pane.rows.saturating_sub(1)).max(1),
+            Role::Conversation => 0,
+            Role::Reply => composer.height().min(pane.rows).max(1),
+        };
+        let mut text = String::new();
+        if role == Role::Reply {
+            if let Some(fit) = fit.as_mut() {
+                fit.want(composer.wanted);
+            }
+            // Reply alone sits at the bottom of its pane, over blank rows.
+            let top = pane.rows + 1 - height;
+            let force = std::mem::take(&mut pane.reflow) || top != reply_top;
+            if force {
+                text.push_str("\x1b[H\x1b[2J");
+            }
+            reply_top = top;
+            if reply || force {
+                text.push_str(&composer.draw(top, force));
+                reply = false;
+            }
+            dirty = false;
+        } else {
+            text = pane.set_region(pane.rows.saturating_sub(height).max(1));
+        }
         dirty |= pane.reflow;
         if dirty && let Some(s) = composer.state.as_ref() {
             let thread = t3client::inbox::find_thread(&shell, thread_id);
@@ -1180,11 +1249,13 @@ async fn event_loop(
         }
         // A frame that cleared the screen needs Reply again; any frame, the cursor back in the
         // input.
-        if reply || pane.cleared || !text.is_empty() && composer.parked.is_empty() {
-            text.push_str(&composer.draw(pane.region + 1, pane.cleared));
-            reply = false;
-        } else if !text.is_empty() {
-            text.push_str(&composer.parked);
+        if role == Role::Inline {
+            if reply || pane.cleared || !text.is_empty() && composer.parked.is_empty() {
+                text.push_str(&composer.draw(pane.region + 1, pane.cleared));
+                reply = false;
+            } else if !text.is_empty() {
+                text.push_str(&composer.parked);
+            }
         }
         // A new question or approval turns clicks back on.
         let ask = crate::ask::pending(
@@ -1199,7 +1270,12 @@ async fn event_loop(
             asking = ask;
             wheeled = false;
         }
-        let want = composer.wants_clicks() && !wheeled;
+        // Reply alone has no scrollback for the wheel, so clicks stay on there.
+        let want = match role {
+            Role::Inline => composer.wants_clicks() && !wheeled,
+            Role::Conversation => false,
+            Role::Reply => true,
+        };
         if want != clicking {
             clicking = want;
             text.push_str(clicks(want));
@@ -1319,10 +1395,26 @@ mod tests {
         let blocks: Vec<Block> = (0..6)
             .map(|_| tool("command_execution", "$ ls", "ls", ""))
             .collect();
-        let shown = visible_tools(&blocks);
+        let none = HashMap::new();
+        let shown = visible_tools(&blocks, &none);
         assert_eq!(shown, vec![true, true, true, false, false, false]);
         // Folding one call saves nothing, so a run of four shows all four.
-        assert!(visible_tools(&blocks[..4]).iter().all(|s| *s));
+        assert!(visible_tools(&blocks[..4], &none).iter().all(|s| *s));
+        // An HTML embed always shows, and the calls around it still fold.
+        let mut blocks = blocks;
+        blocks[4].item_id = "embed".into();
+        let embed = media::Embed {
+            attachment: "a".into(),
+            title: "Options".into(),
+            height: 400,
+        };
+        let embeds = HashMap::from([("embed".to_string(), embed)]);
+        assert_eq!(
+            visible_tools(&blocks, &embeds),
+            vec![true, true, true, false, true, false]
+        );
+        // Then folding one call is all that's left, which saves nothing.
+        assert!(visible_tools(&blocks[..5], &embeds).iter().all(|s| *s));
     }
 
     #[test]

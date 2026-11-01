@@ -54,7 +54,14 @@ machine it's paired with, and draws what T3 says into one Rex session.
 ## The panes
 
 - A thread's window is one pane, `t3rex chat`, so a phone looking at the session gets one
-  window per thread, not a window per pane. The conversation prints in a scroll region (DECSTBM)
+  window per thread, not a window per pane. With the `reply` setting at `pane`, `t3rex chat`
+  draws only the conversation and `t3rex compose` draws Reply in a pane under it, on the
+  alternate screen. That pane moves the split above it (`session.resize_pane`) to fit what it
+  shows, once a device has sized both panes, within half the window.
+- The input sits on a fill: the screen's background a step lighter, or darker on a light
+  screen. Rex doesn't answer OSC 11, so the background is that of the Rex theme the app on this
+  Mac uses for the screen's scheme (`Workspace.darkThemeID`, `lightThemeID`, in the themes Rex
+  ships). A theme of your own has none, and the input sits between two rules instead. The conversation prints in a scroll region (DECSTBM)
   over Reply's rows: what scrolls off its top goes into Rex's scrollback, and Reply stays at
   the bottom. Reply growing pushes the conversation up into the scrollback; shrinking under a
   conversation that filled its rows prints the thread again, so no gap is left.
@@ -75,8 +82,11 @@ machine it's paired with, and draws what T3 says into one Rex session.
   on every way out, a signal or a panic too. Without it Rex sends Shift+Enter as
   `CSI 27 ; 2 ; 13 ~`, which crossterm drops; with it Shift+Enter is `CSI 13 ; 2 u`.
 - Reply grows one row per input line, up to 8, within half the pane.
-- Windows from before, with a Reply pane of their own, get one pane in place on sync's next
-  pass: the new pane splits in beside the old ones, which close, so the window keeps its spot.
+- A run of tool calls folds past the first three into one "more" line, but an HTML embed
+  always shows.
+- A window whose panes don't match the `reply` setting gets the right ones in place on sync's
+  next pass: the new panes split in beside the old ones, which close, so the window keeps its
+  spot.
 - Reply answers an approval with the same `respond` call T3's buttons make (`accept`,
   `acceptForSession`, `decline`), and a question's option with its value, as typing its number
   does.

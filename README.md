@@ -17,7 +17,8 @@ goes for every machine you run T3 on, without the T3 app.
   find, selection and links all work. Markdown, tables, highlighted code and inline images
   render in a centred column at T3's chat width.
 - **Reply where you read.** One input at the bottom of the conversation, in the same pane, with
-  T3's chips for model, effort and access. Approvals and questions get buttons right there: one click on a Mac, one
+  T3's chips for model, effort and access. Or in a pane of its own under the conversation, with
+  `/reply pane`. Approvals and questions get buttons right there: one click on a Mac, one
   tap on a phone.
 - **Rex's markers are T3's.** Each tab reports its thread's status to Rex, so the dot on a tab
   means what it means in T3, and a waiting tab says what it's waiting on: the command, the file
@@ -87,6 +88,7 @@ the tab says so and carries on once it is.
 | Another machine | On it, run `curl -fsSL http://<this Mac>:3779/join \| sh`; `t3rex pair` prints the exact command. That's all: it pairs that machine's T3 with Rex over your tailnet, and only your own machines can. Where `ssh <host>` already works, `t3rex pair` does it from here with one confirm instead. A link from T3 → Settings → Connections there works too (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
+| Reply pane | `/reply pane` in Reply, or `t3rex reply pane`, gives Reply a pane of its own under the conversation, sized to fit it; `/reply inline` puts it back. Open windows change within a few seconds. Rex's iPhone app shows each pane as a window of its own, so inline suits a phone. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
 | Pull request | **Create Pull Request** in the palette, or `/pr create` in Reply: T3 commits, pushes and opens one with the title and body it writes, as its own Create PR does, on a new branch if the thread is on the default one. **Show Pull Request** or `/pr` opens the thread's. Either way it opens in a drawer floating over the right of the thread, full height when the window is wide enough, else over nearly all of it. [sup](https://github.com/superultrainc/sup) shows it there: description, conversation, review threads, checks and files; `m` merges, `A` approves, `M` comments, `q` steps back to sup's list of your pull requests and again closes the drawer. Without sup, the drawer shows `gh pr view`. |

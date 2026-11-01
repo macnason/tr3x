@@ -279,11 +279,12 @@ pub struct Plan {
     pub order: Vec<Slot>,
     /// Threads whose window the user closed, to settle in T3.
     pub settle: Vec<ThreadRef>,
-    /// Windows from before Reply joined the conversation pane, to give one pane in place.
+    /// Windows whose panes don't match the `reply` setting, to reshape in place.
     pub rebuild: Vec<Rebuild>,
 }
 
-/// A thread's window with the panes it had before, `blocks`, which one pane replaces.
+/// A thread's window with the panes it has, `blocks`, which the shape the setting asks for
+/// replaces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rebuild {
     pub window: String,
@@ -542,9 +543,9 @@ fn adopt(
     extra
 }
 
-/// The windows in `group` that still have a Reply pane of their own, from before Reply drew
-/// under the conversation, with what to run in their place.
-fn two_panes(windows: &[Value], group: &Group, wants: &[Want]) -> Vec<Rebuild> {
+/// The windows in `group` whose shape isn't the one the setting asks for, Reply in a pane of
+/// its own or not, with what to run in their place.
+fn reshape(windows: &[Value], group: &Group, wants: &[Want], own_pane: bool) -> Vec<Rebuild> {
     group
         .windows
         .iter()
@@ -558,7 +559,7 @@ fn two_panes(windows: &[Value], group: &Group, wants: &[Want]) -> Vec<Rebuild> {
                 .filter(|l| l["kind"] != "floating")
                 .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
                 .collect();
-            if !blocks.iter().any(|b| b["label"] == "Reply") {
+            if crate::reply::shaped(window, own_pane) {
                 return None;
             }
             Some(Rebuild {
@@ -577,7 +578,13 @@ fn two_panes(windows: &[Value], group: &Group, wants: &[Want]) -> Vec<Rebuild> {
 /// the client that made them and size to whoever views them.
 /// Each pane runs t3rex under the name of the thread's provider, so Rex's sidebar shows that
 /// provider's glyph for the window.
-pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Value>) -> String {
+/// With `own_pane`, each window has Reply in a pane of its own under the conversation.
+pub fn script(
+    plan: &Plan,
+    exe: &std::path::Path,
+    configs: &HashMap<String, Value>,
+    own_pane: bool,
+) -> String {
     let pane = |want: &Want| {
         let config = configs.get(&want.thread.env);
         let program =
@@ -589,7 +596,8 @@ pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Valu
             "tag": tag(&want.thread),
             "label": want.label,
             "cwd": want.cwd,
-            "chat": chat_argv(&program, &key),
+            "chat": chat_argv(&program, &["chat", &key]),
+            "compose": chat_argv(&program, &["compose", &key]),
         })
     };
     let create: Vec<Value> = plan.create.iter().map(pane).collect();
@@ -616,6 +624,7 @@ pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Valu
         "rebuild": rebuild,
         "relabel": plan.relabel.iter().map(|(w, l)| json!({"window": w, "label": l})).collect::<Vec<_>>(),
         "order": order,
+        "split": own_pane.then_some(crate::reply::SPLIT),
     });
     format!(
         r#"local plan = rex.json.decode({data})
@@ -625,6 +634,13 @@ local out = {{ created = {{}}, errors = {{}} }}
 local function pane(argv, cwd, label)
   return {{ block = {{ flavor = term, label = label, options = {{ shell = "none", login = false, command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }} }}
 end
+-- A thread's window: the conversation, and Reply under it when it has a pane of its own.
+local function shape(c)
+  if plan.split then
+    return rex.layout.vertical(plan.split, pane(c.chat, c.cwd, c.tag), pane(c.compose, c.cwd, "Reply"))
+  end
+  return pane(c.chat, c.cwd, c.tag)
+end
 for _, id in ipairs(plan.close or {{}}) do
   local _, err = rex.session.close_window{{ window_id = id }}
   if err then table.insert(out.errors, err) end
@@ -633,7 +649,7 @@ for _, c in ipairs(plan.create or {{}}) do
   local w, err = rex.session.new_window{{
     window_label = c.label,
     focus = false,
-    layout = pane(c.chat, c.cwd, c.tag),
+    layout = shape(c),
   }}
   if w then
     out.created[c.thread] = w.window_id
@@ -641,10 +657,10 @@ for _, c in ipairs(plan.create or {{}}) do
     table.insert(out.errors, err)
   end
 end
--- The new pane goes in beside the old ones, which then close, so the window keeps its place.
+-- The new panes go in beside the old ones, which then close, so the window keeps its place.
 for _, r in ipairs(plan.rebuild or {{}}) do
   local _, err = rex.session.new_split{{ anchor_id = r.blocks[1], direction = "vertical",
-    side = "after", ratio = 0.5, focus = false, layout = pane(r.chat, r.cwd, r.tag) }}
+    side = "after", ratio = 0.5, focus = false, layout = shape(r) }}
   if err then
     table.insert(out.errors, err)
   else
@@ -667,10 +683,10 @@ return out
     )
 }
 
-/// A conversation pane's command line. A development sync (`T3REX_PASSIVE`) starts panes that
-/// only read, beside an installed one.
-fn chat_argv(program: &str, key: &str) -> Value {
-    let mut argv = crate::rex::pane_argv(program, &["chat", key]);
+/// A thread pane's command line, `args` after the program. A development sync
+/// (`T3REX_PASSIVE`) starts panes that only read, beside an installed one.
+fn chat_argv(program: &str, args: &[&str]) -> Value {
+    let mut argv = crate::rex::pane_argv(program, args);
     if std::env::var_os("T3REX_PASSIVE").is_some() {
         argv.push("--passive".into());
     }
@@ -879,7 +895,8 @@ impl Syncer {
         self.closed.append(&mut plan.settle);
         plan.close.append(&mut extra);
         let closing = plan.close.clone();
-        plan.rebuild = two_panes(windows, group, wants);
+        let own_pane = crate::reply::own_pane();
+        plan.rebuild = reshape(windows, group, wants, own_pane);
         plan.rebuild.retain(|r| !closing.contains(&r.window));
         if plan.is_empty() {
             self.state.save()?;
@@ -887,7 +904,7 @@ impl Syncer {
         }
         let result = self
             .rex
-            .lua(&session, &script(&plan, &self.exe, &self.configs))
+            .lua(&session, &script(&plan, &self.exe, &self.configs, own_pane))
             .await?;
         let group = self.state.groups.entry(spec.key.clone()).or_default();
         for (key, id) in result["created"].as_object().into_iter().flatten() {
@@ -1605,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_with_a_reply_pane_get_one_pane() {
+    fn windows_take_the_shape_the_setting_asks_for() {
         let mut group = Group::default();
         group.windows.insert("home-env/a".into(), win("w-a", "A"));
         group.windows.insert("home-env/b".into(), win("w-b", "B"));
@@ -1626,11 +1643,15 @@ mod tests {
                 settles: true,
             })
             .collect();
-        let rebuild = two_panes(&windows, &group, &wants);
+        let rebuild = reshape(&windows, &group, &wants, false);
         assert_eq!(rebuild.len(), 1);
         assert_eq!(rebuild[0].window, "w-a");
         assert_eq!(rebuild[0].blocks, vec!["b1".to_string(), "b2".to_string()]);
         assert_eq!(rebuild[0].want.key(), "home-env/a");
+        let rebuild = reshape(&windows, &group, &wants, true);
+        assert_eq!(rebuild.len(), 1);
+        assert_eq!(rebuild[0].window, "w-b");
+        assert_eq!(rebuild[0].blocks, vec!["b9".to_string()]);
     }
 
     #[test]
