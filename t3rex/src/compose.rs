@@ -1,12 +1,13 @@
-//! The reply pane under the conversation: one input, and the thread's pending approval or
-//! question when there is one. Its header, set with OSC 2, names the model, effort and access
-//! the next message goes out with.
+//! Reply: the bottom rows of a thread's pane, under the conversation. One input, and the
+//! thread's pending approval or question when there is one, and under them the chip that
+//! names the model, effort and access the next message goes out with. The conversation pane
+//! (`chat`) runs it, and keeps the conversation scrolling above it.
 //!
 //! Enter sends. To a running turn it steers or queues, as T3's Follow-up behavior says, and
 //! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
-//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3. `/` first opens a menu of
-//! those, the provider's commands and skills (`slash`).
+//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3, /reply inline|pane.
+//! `/` first opens a menu of those, the provider's commands and skills (`slash`).
 //!
 //! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
 //! over the input; its ✕, or Backspace at the start of the input, takes it off.
@@ -15,13 +16,10 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
-use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
-use futures_util::StreamExt;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use t3client::env::{Env, IfBusy, WatchEvent};
+use t3client::env::{Env, IfBusy};
 use t3client::models::{self, Choice};
 use t3client::projection::ThreadState;
 use tokio::sync::mpsc;
@@ -35,7 +33,7 @@ use crate::picker::{self, Chip, Settings};
 use crate::picture::{self, Tray};
 use crate::slash::{self, Slash};
 use crate::t3::{self, Lifecycle};
-use crate::width::Follow;
+use crate::width::ChatWidth;
 
 fn out(text: &str) {
     let mut stdout = std::io::stdout().lock();
@@ -336,7 +334,7 @@ impl Escape {
 
 /// What a click or a focused chip does.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Hit {
+pub(crate) enum Hit {
     /// Opens the model picker on a field.
     Field(Field),
     /// Answers the pending approval.
@@ -348,7 +346,7 @@ enum Hit {
 }
 
 /// What came back from work started in the background.
-enum Done {
+pub(crate) enum Done {
     Note(String, bool),
     /// A message that failed to send, back into the input if it's empty.
     Restore(String, Vec<Image>),
@@ -358,152 +356,89 @@ enum Done {
     Logos(HashMap<String, Icon>),
     /// A link to open the thread with, on the device it's clicked on.
     Link(String),
-    /// A resize finished, or gave up.
-    Resized(bool),
 }
 
-/// The share of the window the conversation has over Reply, as sync and `new` split it. Reply
-/// is never smaller than that.
-const SPLIT: f64 = 0.86;
-/// Reply's rows at rest: about seven lines of text over the chip, within this share of the
-/// window.
-const REST_ROWS: usize = 9;
-const REST_SHARE: f64 = 0.25;
-/// Reply grows by at most this many rows past that, and to at most this share of the window.
-const GROW_LINES: usize = 7;
-const GROW_SHARE: f64 = 0.35;
-/// How long the line count has to hold before Reply resizes. Each resize reprints the
-/// conversation, so typing through a wrap doesn't resize twice.
-const GROW_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// Reply's rows at most, as a share of a pane it shares with the conversation, and the
+/// input's rows at most within them.
+const MOST_SHARE: f64 = 0.5;
+const INPUT_ROWS: usize = 8;
 
-/// The pane before `block` in the vertical split it's the after side of, and that split's
-/// ratio, in a layout as `session inspect` prints it.
-fn split_above(layout: &Value, block: &str) -> Option<(String, f64)> {
-    let split = &layout["split"];
-    if split.is_null() {
-        return None;
-    }
-    if split["direction"] == "vertical"
-        && split["after"]["block_id"] == block
-        && let Some(before) = split["before"]["block_id"].as_str()
-    {
-        return Some((before.to_string(), split["ratio"].as_f64()?));
-    }
-    split_above(&split["before"], block).or_else(|| split_above(&split["after"], block))
-}
-
-/// Reply at `REST_ROWS`, growing with its text, by moving the split between the conversation
-/// and Reply (`session.resize_pane`). The split is the session's, so every device looking at
-/// it sees the same.
-struct Grow {
-    session: String,
-    block: String,
-    /// The rows the split was last asked for, 0 when that didn't take, and the ones Reply
-    /// wants now.
-    asked: usize,
-    wants: usize,
-    /// When `wants` changed; Reply resizes once it has held for `GROW_WAIT`.
-    since: Option<tokio::time::Instant>,
-    busy: bool,
-}
-
-/// Moves the split so Reply has `want` rows, the `REST_ROWS` of them within `REST_SHARE` of
-/// the window and all within `GROW_SHARE`, and no less than the starting split. None when it
-/// couldn't.
-async fn resize(session: String, block: String, want: usize) -> Option<()> {
-    let rex = crate::rex::Rex::find();
-    // The conversation: the pane before Reply in its window's split, and the split as it is.
-    let view = rex.inspect(&session).await.ok()?;
-    let (chat, ratio) = view["windows"]
-        .as_array()?
-        .iter()
-        .flat_map(|w| w["layers"].as_array().into_iter().flatten())
-        .find_map(|l| split_above(&l["layout"], &block))?;
-    let size = |b: String| {
-        let (rex, session) = (rex.clone(), session.clone());
-        async move {
-            let out = tokio::process::Command::new(&rex.bin)
-                .args(crate::rex::NO_AUTOSTART)
-                .args([
-                    "do",
-                    "-s",
-                    &session,
-                    "-b",
-                    &b,
-                    "com.superlogical.terminal.size",
-                ])
-                .output()
-                .await
-                .ok()?;
-            serde_json::from_slice::<Value>(&out.stdout).ok()
-        }
+/// The input's fill: the terminal's background, a step lighter on a dark screen and a step
+/// darker on a light one. None until the terminal says what its background is.
+fn fill() -> Option<String> {
+    let [r, g, b] = crate::scheme::background()?;
+    let dark = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64) < 128.0;
+    let step = |c: u8| {
+        let c = c as f64;
+        (if dark {
+            c + (255.0 - c) * 0.07
+        } else {
+            c * 0.95
+        })
+        .round() as u8
     };
-    let (chat_size, reply_size) = (size(chat.clone()).await?, size(block.clone()).await?);
-    // Rows mean something only once a device sizes both panes; a pane no one owns reads 24.
-    if chat_size["owner"].is_null() || chat_size["owner"] != reply_size["owner"] {
-        return None;
-    }
-    let (chat_rows, reply_rows) = (chat_size["rows"].as_f64()?, reply_size["rows"].as_f64()?);
-    // Each pane loses a few rows to its header. Work that out from the split as it is:
-    // reply = (1 - ratio) * all - header, with all = chat + reply + 2 * header.
-    let share = 1.0 - ratio;
-    let header = ((share * (chat_rows + reply_rows) - reply_rows) / (1.0 - 2.0 * share)).max(0.0);
-    let all = chat_rows + reply_rows + 2.0 * header;
-    let rest = (REST_ROWS as f64).min(((chat_rows + reply_rows) * REST_SHARE).floor());
-    let most = ((chat_rows + reply_rows) * GROW_SHARE).floor();
-    let want = (rest + want.saturating_sub(REST_ROWS) as f64).min(most);
-    let next = (1.0 - (want + header + 0.5) / all).clamp(1.0 - GROW_SHARE - 0.1, SPLIT);
-    if (next - ratio).abs() < 0.001 {
-        return Some(());
-    }
-    let args = json!({
-        "session_id": session, "direction": "vertical", "before_block_id": chat,
-        "after_block_id": block, "ratio": next,
-    });
-    rex.call("session.resize_pane", &args.to_string())
-        .await
-        .ok()
-        .map(drop)
+    Some(format!("\x1b[48;2;{};{};{}m", step(r), step(g), step(b)))
 }
+/// The columns the prompt takes from the text: `› `.
+const PROMPT: usize = 2;
 
-struct Composer {
+pub(crate) struct Composer {
     thread_id: String,
     client: Arc<Env>,
     /// What to say while the thread's machine is out of reach.
-    offline: Option<String>,
-    state: Option<ThreadState>,
-    config: Option<Value>,
-    editor: Editor,
+    pub(crate) offline: Option<String>,
+    pub(crate) state: Option<ThreadState>,
+    pub(crate) config: Option<Value>,
+    pub(crate) editor: Editor,
     /// Answers to the pending question so far, by question id.
-    answers: serde_json::Map<String, Value>,
+    pub(crate) answers: serde_json::Map<String, Value>,
     /// A line under the input: what just happened, or what went wrong, and when it goes.
     note: Option<(String, bool)>,
-    note_until: Option<tokio::time::Instant>,
+    pub(crate) note_until: Option<tokio::time::Instant>,
     /// The thread's link, under the input until the next key.
     link: Option<String>,
-    cols: usize,
-    rows: usize,
-    title: String,
-    tx: mpsc::UnboundedSender<Done>,
-    logos: HashMap<String, Icon>,
+    /// The pane's size, and the conversation's column in it: its left edge and its width.
+    pub(crate) cols: usize,
+    pub(crate) rows: usize,
+    pub(crate) column: (usize, usize),
+    pub(crate) tx: mpsc::UnboundedSender<Done>,
+    pub(crate) logos: HashMap<String, Icon>,
     painter: Painter,
     /// Each chip's and button's screen row and columns, for clicks.
     spans: Vec<(usize, (usize, usize), Hit)>,
     /// The approval or question button Tab moved to, by index.
     focus: Option<usize>,
-    /// Started again under the provider's name once already; don't loop if that failed.
-    renamed: bool,
-    /// The chat width setting: the input sits in the conversation's column.
-    chat_width: Follow,
-    slash: Slash,
-    /// None outside a Rex window, where there is no split to move.
-    grow: Option<Grow>,
+    pub(crate) slash: Slash,
+    /// The rows kept for the slash menu while it's open: the most it has needed, so Reply
+    /// doesn't change height as the menu narrows.
+    menu_rows: usize,
     /// The pictures the next message takes.
-    images: Tray,
-    clipboard: paste::Reader,
+    pub(crate) images: Tray,
+    pub(crate) clipboard: paste::Reader,
     /// The last command was `/delete`, so the next one deletes.
     deleting: bool,
     escape: Escape,
+    /// A width `/width` chose, for the pane to take up.
+    pub(crate) width_set: Option<ChatWidth>,
+    /// What puts the cursor back in the input after the conversation draws.
+    pub(crate) parked: String,
+    /// Reply's rows at most, as a share of its pane: all of it when it has a pane of its own.
+    pub(crate) share: f64,
+    /// The rows Reply would take with room for all of them, up to `INPUT_ROWS` of input.
+    pub(crate) wanted: usize,
+    /// The input's background, empty when it sits between rules instead.
+    fill: String,
+    /// The last frame drawn, less the cursor.
+    drawn: String,
+}
+
+/// Reply's rows before they're placed: each row, the clickable spans on each by row index,
+/// the input's rows, and the cursor's row and column.
+struct Laid {
+    rows: Vec<String>,
+    hits: Vec<(usize, (usize, usize), Hit)>,
+    input: (usize, usize),
+    cursor: (usize, usize),
 }
 
 impl Composer {
@@ -600,37 +535,25 @@ impl Composer {
         });
     }
 
-    fn draw(&mut self) {
-        let title = "Reply".to_string();
-        let mut text = String::from("\x1b[?2026h");
-        if title != self.title {
-            text.push_str(&format!(
-                "\x1b]2;{}\x07",
-                title.replace(|c: char| c.is_control(), "")
-            ));
-            self.title = title;
-        }
-        text.push_str("\x1b[H\x1b[2J");
-        text.push_str(Painter::clear());
+    /// Reply's rows, top to bottom: what's pending and its buttons, the pictures, room for the
+    /// slash menu, the input on its fill (or between two rules, before the terminal says what
+    /// its background is), a note, and the chip. At most `share` of the pane;
+    /// the input shows the rows around the cursor when there's less room than it has.
+    fn layout(&mut self) -> Laid {
         self.slash.sync(
             &self.editor,
             self.config.as_ref(),
             self.state.as_ref().map(|s| s.thread()),
             &self.client.capabilities(),
         );
-        // The conversation's column, less the prompt's two.
-        let (left, column) = self.chat_width.width.column(self.cols);
-        let width = column.saturating_sub(2).max(10);
-        // The chips take the bottom row, and a blank row above them when there is room.
-        let chips: Vec<(Chip, Field)> = self.chips(column);
-        let reserved = match (chips.is_empty(), self.rows) {
-            (true, _) => 0,
-            (false, r) if r >= 5 => 2,
-            _ => 1,
+        self.menu_rows = match self.slash.rows() {
+            0 => 0,
+            n => n.max(self.menu_rows),
         };
-        let room = self.rows.saturating_sub(reserved).max(1);
+        // The conversation's column, less the prompt.
+        let (left, column) = self.column;
+        let width = column.saturating_sub(PROMPT).max(10);
         let mut rows: Vec<String> = Vec::new();
-        // The buttons on each row, by the row's index in `rows`.
         let mut hits: Vec<(usize, (usize, usize), Hit)> = Vec::new();
         if let Some((request, item)) = self.pending() {
             let ask = if crate::ask::is_question(&request) {
@@ -671,48 +594,22 @@ impl Composer {
             }
             rows.push(line);
         }
-        // The input, wrapped, with the cursor where it is.
-        let prompt = format!("{BLUE}{BOLD}›{RESET} ");
-        self.editor.width = width;
-        let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
-        if let Some(grow) = self.grow.as_mut() {
-            // The question, the input, a row for a note, and the chips.
-            let need = rows.len() + lines.len() + 1 + reserved;
-            let wants = need.clamp(REST_ROWS, REST_ROWS + GROW_LINES);
-            if wants != grow.wants {
-                grow.wants = wants;
-                grow.since = Some(tokio::time::Instant::now());
-            }
-        }
-        let first_input = rows.len();
-        for (i, line) in lines.iter().enumerate() {
-            let lead = if i == 0 { prompt.clone() } else { "  ".into() };
-            rows.push(format!("{lead}{line}"));
-        }
+        // The menu draws over these, right above the input.
+        rows.extend(std::iter::repeat_n(String::new(), self.menu_rows));
+        let mut below: Vec<String> = Vec::new();
         if let Some((note, error)) = &self.note {
             let color = if *error { RED } else { DIM };
-            rows.push(format!("{color}{}{RESET}", fit(note, width)));
+            below.push(format!("{color}{}{RESET}", fit(note, width)));
         } else if let Some(url) = &self.link {
-            rows.push(format!(
+            below.push(format!(
                 "{DIM}{}{RESET}",
                 crate::link::osc8(url, "Open in T3 ↗")
             ));
         }
-        // Keep the cursor's row on screen in a pane shorter than the text.
-        let cursor_row = first_input + cursor.0;
-        let start = (cursor_row + 1)
-            .saturating_sub(room)
-            .min(rows.len().saturating_sub(room.min(rows.len())));
-        let shown: Vec<&String> = rows.iter().skip(start).take(room).collect();
-        for (i, row) in shown.iter().enumerate() {
-            text.push_str(&format!("\x1b[{};{}H{row}", i + 1, left + 1));
-        }
-        self.spans = hits
-            .into_iter()
-            .filter(|(row, _, _)| (start..start + room).contains(row))
-            .map(|(row, cols, hit)| (row - start + 1, cols, hit))
-            .collect();
-        if !chips.is_empty() {
+        let chips = self.chips(column);
+        let chip_row = if chips.is_empty() {
+            None
+        } else {
             let only: Vec<Chip> = chips
                 .iter()
                 .map(|(c, _)| Chip {
@@ -721,34 +618,152 @@ impl Composer {
                 })
                 .collect();
             let (line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
-            let bottom = self.rows;
-            self.spans.extend(
+            below.push(line);
+            Some((spans, chips))
+        };
+        // The input, wrapped, and as many of its rows as there's room for around the cursor.
+        self.editor.width = width;
+        let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
+        self.wanted = rows.len() + lines.len().min(INPUT_ROWS) + 2 + below.len();
+        let most = ((self.rows as f64 * self.share) as usize).max(3);
+        let room = most
+            .saturating_sub(rows.len() + below.len() + 2)
+            .clamp(1, INPUT_ROWS);
+        let start = (cursor.0 + 1)
+            .saturating_sub(room)
+            .min(lines.len().saturating_sub(room));
+        self.fill = fill().unwrap_or_default();
+        let bg = self.fill.clone();
+        // On a fill, a column of it either side of the conversation's, and a row above and
+        // below the input. Without one, a rule above and below.
+        let edge = if bg.is_empty() {
+            format!("{DIM}{}{RESET}", "─".repeat(column))
+        } else {
+            format!("\x1b[{left}G{bg}{}{RESET}", " ".repeat(column + 2))
+        };
+        rows.push(edge.clone());
+        let first_input = rows.len();
+        let prompt = format!("{BLUE}{BOLD}›{RESET} ");
+        for (i, line) in lines.iter().enumerate().skip(start).take(room) {
+            let lead = if i == 0 { prompt.clone() } else { "  ".into() };
+            if bg.is_empty() {
+                rows.push(format!("{lead}{line}"));
+            } else {
+                let lead = lead.replace(RESET, &format!("{RESET}{bg}"));
+                let pad = " ".repeat(
+                    width.saturating_sub(unicode_width::UnicodeWidthStr::width(line.as_str())) + 1,
+                );
+                rows.push(format!("\x1b[{left}G{bg} {lead}{line}{pad}{RESET}"));
+            }
+        }
+        let shown = rows.len() - first_input;
+        rows.push(edge);
+        let cursor = (first_input + cursor.0 - start, cursor.1);
+        if let Some((spans, chips)) = chip_row {
+            let at = rows.len() + below.len() - 1;
+            hits.extend(
                 spans
                     .into_iter()
                     .zip(chips.iter().map(|(_, f)| Hit::Field(*f)))
-                    .map(|(cols, hit)| (bottom, cols, hit)),
+                    .map(|(cols, hit)| (at, cols, hit)),
             );
-            text.push_str(&format!("\x1b[{};{}H{line}", self.rows, left + 1));
         }
-        let (r, c) = (cursor_row.saturating_sub(start) + 1, left + 3 + cursor.1);
-        let input_top = (first_input + 1).saturating_sub(start).max(1);
-        let input_bottom = (first_input + lines.len()).saturating_sub(start).min(room);
+        rows.extend(below);
+        Laid {
+            rows,
+            hits,
+            input: (first_input, shown),
+            cursor,
+        }
+    }
+
+    /// The rows Reply takes at the bottom of the pane.
+    pub(crate) fn height(&mut self) -> usize {
+        // Laid out with a painter of its own, so the pictures drawn keep their ids.
+        let painter = std::mem::replace(&mut self.painter, Painter::tagged());
+        let rows = self.layout().rows.len();
+        self.painter = painter;
+        rows
+    }
+
+    /// Whether anything on Reply needs clicks: buttons to answer what's pending, or the menu.
+    pub(crate) fn wants_clicks(&self) -> bool {
+        self.slash.is_open() || !self.buttons().is_empty()
+    }
+
+    /// Reply drawn from the pane's row `top` (1-based) to its bottom, leaving the cursor in the
+    /// input. Only the cursor moves when it would draw the same as last time, unless `force`.
+    pub(crate) fn draw(&mut self, top: usize, force: bool) -> String {
+        let clear = self.painter.clear_own();
+        let mut text = String::new();
+        let laid = self.layout();
+        let (left, column) = self.column;
+        let width = column.saturating_sub(PROMPT).max(10);
+        for (i, row) in laid.rows.iter().enumerate() {
+            text.push_str(&format!(
+                "\x1b[{};1H\x1b[2K\x1b[{}G{row}",
+                top + i,
+                left + 1
+            ));
+        }
+        // Rows under Reply, which a pane taller than it was may have.
+        for row in top + laid.rows.len()..=self.rows {
+            text.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+        }
+        self.spans = laid
+            .hits
+            .into_iter()
+            .map(|(row, cols, hit)| (top + row, cols, hit))
+            .collect();
+        // The menu goes right above the top rule, so the rules count as the input's.
+        let (first, shown) = laid.input;
         text.push_str(&self.slash.draw(
             &mut self.painter,
-            (input_top, input_bottom),
+            (top + first - 1, top + first + shown.max(1)),
             self.rows,
             left,
             column,
         ));
-        let hint_room = width.saturating_sub(cursor.1 + 1);
+        let (r, c) = (top + laid.cursor.0, left + PROMPT + 1 + laid.cursor.1);
+        let hint_room = width.saturating_sub(laid.cursor.1 + 1);
         if let Some(hint) = self.slash.hint().filter(|_| hint_room >= 4) {
             let hint = fit(hint, hint_room);
-            text.push_str(&format!("\x1b[{r};{c}H{DIM}{hint}{RESET}"));
+            text.push_str(&format!("\x1b[{r};{c}H{}{DIM}{hint}{RESET}", self.fill));
         }
         // The cursor hides while a button has focus, as it does on a chip in a new thread.
         let cursor = if self.focus.is_some() { "?25l" } else { "?25h" };
-        text.push_str(&format!("\x1b[{r};{c}H\x1b[{cursor}\x1b[?2026l"));
-        out(&text);
+        self.parked = format!("\x1b[{r};{c}H\x1b[{cursor}");
+        if !force && text == self.drawn {
+            return self.parked.clone();
+        }
+        self.drawn = text.clone();
+        format!("{clear}{text}{}", self.parked)
+    }
+
+    /// A click, at the pane's 0-based row and column: the menu's, else a chip's or a button's.
+    /// Returns whether it landed on something.
+    pub(crate) fn click(&mut self, m: &MouseEvent) -> bool {
+        if self.slash.hits(m) {
+            self.slash.click(&mut self.editor, m);
+            return true;
+        }
+        let (row, col) = (m.row as usize + 1, m.column as usize + 1);
+        let hit = self
+            .spans
+            .iter()
+            .find(|(r, (a, b), _)| *r == row && (*a..=*b).contains(&col))
+            .map(|(_, _, hit)| *hit);
+        match (m.kind, hit) {
+            (
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                Some(hit),
+            ) => {
+                self.note = None;
+                self.press(hit);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Pictures to send with the next message, made ready on the way.
@@ -760,7 +775,7 @@ impl Composer {
     }
 
     /// What a paste came to: pictures, or text to type.
-    fn pasted(&mut self, got: Got) {
+    pub(crate) fn pasted(&mut self, got: Got) {
         match got {
             Got::Offer(request) => out(&request),
             Got::Text(text) => match paste::dropped(&text) {
@@ -1023,9 +1038,13 @@ impl Composer {
                 self.note("Deleting can't be undone. /delete again to delete", true);
             }
             "delete" => self.spawn(lifecycle(Lifecycle::Delete, "Deleted")),
+            "reply" => match crate::reply::apply(arg) {
+                Ok(note) => self.note(note, false),
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
             "width" => match crate::width::apply(arg) {
                 Ok(note) => {
-                    self.chat_width.width = crate::width::current().0;
+                    self.width_set = Some(crate::width::current().0);
                     self.note(note, false);
                 }
                 Err(e) => self.note(format!("{e:#}"), true),
@@ -1135,7 +1154,7 @@ impl Composer {
         sent
     }
 
-    fn key(&mut self, key: KeyEvent) {
+    pub(crate) fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
         let again = self.escape.again(&key);
@@ -1419,229 +1438,118 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
     (lines, at)
 }
 
-pub async fn run(thread: String) -> Result<()> {
-    let (client, thread) = t3::thread(&thread)?;
-    let thread_id = thread.thread;
-    // The scheme first, so the logos loaded next are for the screen they're seen on.
-    let mut scheme = crate::scheme::listen();
-    let mut events = client.watch_thread(&thread_id, None);
-    let (tx, mut done) = mpsc::unbounded_channel();
-    {
-        let (client, tx) = (client.clone(), tx.clone());
-        tokio::spawn(async move {
-            if let Ok(config) = client.server_config().await {
-                let providers = models::providers(&config).to_vec();
-                let _ = tx.send(Done::Config(config));
-                let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
-            }
-        });
-    }
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 5));
-    let slash = Slash::new(client.clone());
-    let mut composer = Composer {
-        thread_id,
-        client,
-        offline: None,
-        state: None,
-        config: None,
-        editor: Editor::default(),
-        answers: serde_json::Map::new(),
-        note: None,
-        note_until: None,
-        link: None,
-        cols: cols as usize,
-        rows: rows as usize,
-        title: String::new(),
-        tx,
-        logos: HashMap::new(),
-        painter: Painter,
-        spans: Vec::new(),
-        focus: None,
-        renamed: false,
-        chat_width: Follow::new(),
-        slash,
-        images: Tray::default(),
-        clipboard: paste::Reader::default(),
-        grow: match (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK")) {
-            (Ok(session), Ok(block)) => Some(Grow {
-                session,
-                block,
-                asked: 0,
-                wants: REST_ROWS,
-                since: Some(tokio::time::Instant::now()),
-                busy: false,
-            }),
-            _ => None,
-        },
-        deleting: false,
-        escape: Escape::default(),
-    };
-    crossterm::terminal::enable_raw_mode()?;
-    // The alternate screen, bracketed paste, and clicks on the chips. Paste events too, where
-    // the filter can take the clipboard's replies.
-    let mut clipboard = crate::scheme::clipboard();
-    out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
-    if clipboard.is_some() {
-        out(paste::ON);
-    }
-    let keys = crate::scheme::keys();
-    let mut input = EventStream::new();
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    composer.draw();
-    let result: Result<()> = async {
-        loop {
-            tokio::select! {
-                event = events.recv() => match event {
-                    Some(WatchEvent::Item(item)) => {
-                        if item["kind"] == "snapshot" {
-                            composer.state = ThreadState::from_snapshot(&item);
-                        } else if let Some(s) = composer.state.as_mut() {
-                            s.apply(&item);
-                        }
-                        if composer.pending().is_none() {
-                            composer.answers.clear();
-                        }
-                        composer.offline = None;
-                    }
-                    Some(WatchEvent::Reconnecting { reason, retry_in }) => {
-                        composer.offline = Some(crate::chat::offline_line(composer.client.name(), &reason, retry_in));
-                    }
-                    Some(WatchEvent::Failed(m)) => anyhow::bail!("T3 refused the thread: {m}"),
-                    None => anyhow::bail!("the thread's subscription ended"),
-                },
-                event = done.recv() => match event {
-                    Some(Done::Note(text, error)) => if !text.is_empty() { composer.note(text, error) },
-                    Some(Done::Restore(text, images)) => {
-                        if composer.editor.text.is_empty() {
-                            composer.editor.insert(&text);
-                        }
-                        if composer.images.is_empty() {
-                            composer.attach(images);
-                        }
-                    }
-                    Some(Done::Picture(ready)) => if let Some(why) = composer.images.ready(ready) {
-                        composer.note(why, true);
-                    },
-                    Some(Done::Config(config)) => composer.config = Some(config),
-                    Some(Done::Link(url)) => composer.link = Some(url),
-                    Some(Done::Logos(logos)) => composer.logos = logos,
-                    Some(Done::Resized(ok)) => if let Some(grow) = composer.grow.as_mut() {
-                        grow.busy = false;
-                        if !ok {
-                            grow.asked = 0;
-                        }
-                        // The text may have changed while it resized.
-                        if grow.wants != grow.asked {
-                            grow.since = Some(tokio::time::Instant::now());
-                        }
-                        continue;
-                    },
-                    None => {}
-                },
-                Ok(()) = scheme.changed() => if let Some(config) = composer.config.as_ref() {
-                    let (tx, providers) = (composer.tx.clone(), models::providers(config).to_vec());
-                    tokio::spawn(async move {
+impl Composer {
+    /// Reply for `thread_id`, and where its background work reports back. It asks for the
+    /// machine's config and the providers' logos straight away.
+    pub(crate) fn new(
+        client: Arc<Env>,
+        thread_id: String,
+    ) -> (Composer, mpsc::UnboundedReceiver<Done>) {
+        let (tx, done) = mpsc::unbounded_channel();
+        {
+            let (client, tx) = (client.clone(), tx.clone());
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(config) = client.server_config().await {
+                        let providers = models::providers(&config).to_vec();
+                        let _ = tx.send(Done::Config(config));
                         let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
-                    });
-                    continue;
-                } else {
-                    continue;
-                },
-                Some(packet) = async {
-                    match clipboard.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
+                        return;
                     }
-                } => match composer.clipboard.feed(&packet) {
-                    Some(got) => composer.pasted(got),
-                    None => continue,
-                },
-                _ = tick.tick() => if !composer.chat_width.changed() {
-                    continue;
-                },
-                _ = tokio::time::sleep_until(composer.grow.as_ref().and_then(|g| g.since).unwrap_or_else(tokio::time::Instant::now) + GROW_WAIT),
-                    if composer.grow.as_ref().is_some_and(|g| g.since.is_some() && !g.busy) => {
-                    let grow = composer.grow.as_mut().expect("checked above");
-                    grow.since = None;
-                    if grow.wants != grow.asked {
-                        grow.asked = grow.wants;
-                        grow.busy = true;
-                        let (session, block, want, tx) = (grow.session.clone(), grow.block.clone(), grow.wants, composer.tx.clone());
-                        tokio::spawn(async move {
-                            let ok = resize(session, block, want).await.is_some();
-                            let _ = tx.send(Done::Resized(ok));
-                        });
-                    }
-                    continue;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
-                _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
-                    composer.note = None;
-                    composer.note_until = None;
-                }
-                event = input.next() => match event {
-                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => composer.key(key),
-                    Some(Ok(Event::Mouse(m))) if composer.slash.hits(&m) => composer.slash.click(&mut composer.editor, &m),
-                    Some(Ok(Event::Mouse(m))) => {
-                        let (row, col) = (m.row as usize + 1, m.column as usize + 1);
-                        let hit = composer
-                            .spans
-                            .iter()
-                            .find(|(r, (a, b), _)| *r == row && (*a..=*b).contains(&col))
-                            .map(|(_, _, hit)| *hit);
-                        match (m.kind, hit) {
-                            (MouseEventKind::Down(MouseButton::Left), Some(hit)) => {
-                                composer.note = None;
-                                composer.press(hit);
-                            }
-                            _ => continue,
-                        }
-                    }
-                    Some(Ok(Event::Paste(text))) => composer.pasted(Got::Text(text)),
-                    Some(Ok(Event::Resize(c, r))) => {
-                        composer.cols = c as usize;
-                        composer.rows = r as usize;
-                        // A resize that didn't take, before a device sized the panes: try again.
-                        if let Some(grow) = composer.grow.as_mut()
-                            && grow.asked == 0
-                            && !grow.busy
-                        {
-                            grow.since = Some(tokio::time::Instant::now());
-                        }
-                    }
-                    Some(Err(e)) => return Err(e.into()),
-                    None => return Ok(()),
-                    _ => continue,
-                },
-            }
-            // A thread that moved to another provider: once the input is empty, start again
-            // under that provider's name, so Rex's sidebar shows its glyph.
-            if composer.editor.text.is_empty()
-                && composer.answers.is_empty()
-                && let (Some(state), Some(config)) = (composer.state.as_ref(), composer.config.as_ref())
-            {
-                let instance = state.thread()["modelSelection"]["instanceId"].as_str().unwrap_or_default();
-                let driver = crate::icons::driver_of(Some(config), instance).to_string();
-                let want = crate::icons::program_name(&driver).unwrap_or("t3rex");
-                if !instance.is_empty() && crate::icons::started_as() != want && !composer.renamed {
-                    composer.renamed = true;
-                    crate::scheme::keys_off();
-                    out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
-                    let _ = crossterm::terminal::disable_raw_mode();
-                    crate::icons::become_program(&driver);
-                    out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
-                    crate::scheme::keys_on();
-                    let _ = crossterm::terminal::enable_raw_mode();
-                }
-            }
-            composer.draw();
+            });
+        }
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let slash = Slash::new(client.clone());
+        let composer = Composer {
+            thread_id,
+            client,
+            offline: None,
+            state: None,
+            config: None,
+            editor: Editor::default(),
+            answers: serde_json::Map::new(),
+            note: None,
+            note_until: None,
+            link: None,
+            cols: cols as usize,
+            rows: rows as usize,
+            column: (0, cols as usize),
+            tx,
+            logos: HashMap::new(),
+            painter: Painter::tagged(),
+            spans: Vec::new(),
+            focus: None,
+            slash,
+            menu_rows: 0,
+            images: Tray::default(),
+            clipboard: paste::Reader::default(),
+            deleting: false,
+            escape: Escape::default(),
+            width_set: None,
+            parked: String::new(),
+            drawn: String::new(),
+            share: MOST_SHARE,
+            wanted: 0,
+            fill: String::new(),
+        };
+        (composer, done)
+    }
+
+    /// After the thread changes: answers to a question that's gone go too.
+    pub(crate) fn thread_changed(&mut self) {
+        if self.pending().is_none() {
+            self.answers.clear();
         }
     }
-    .await;
-    drop(keys);
-    out(paste::OFF);
-    out("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l");
-    let _ = crossterm::terminal::disable_raw_mode();
-    result
+
+    /// Whether nothing is typed or half-answered, so the pane can start again.
+    pub(crate) fn idle(&self) -> bool {
+        self.editor.text.is_empty() && self.answers.is_empty() && self.images.is_empty()
+    }
+
+    /// What background work came back with.
+    pub(crate) fn done(&mut self, done: Done) {
+        match done {
+            Done::Note(text, error) => {
+                if !text.is_empty() {
+                    self.note(text, error)
+                }
+            }
+            Done::Restore(text, images) => {
+                if self.editor.text.is_empty() {
+                    self.editor.insert(&text);
+                }
+                if self.images.is_empty() {
+                    self.attach(images);
+                }
+            }
+            Done::Picture(ready) => {
+                if let Some(why) = self.images.ready(ready) {
+                    self.note(why, true);
+                }
+            }
+            Done::Config(config) => self.config = Some(config),
+            Done::Link(url) => self.link = Some(url),
+            Done::Logos(logos) => self.logos = logos,
+        }
+    }
+
+    /// The logos again, for a screen that turned light or dark.
+    pub(crate) fn reload_logos(&self) {
+        if let Some(config) = self.config.as_ref() {
+            let (tx, providers) = (self.tx.clone(), models::providers(config).to_vec());
+            tokio::spawn(async move {
+                let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
+            });
+        }
+    }
+
+    pub(crate) fn clear_note(&mut self) {
+        self.note = None;
+        self.note_until = None;
+    }
 }
 
 #[cfg(test)]

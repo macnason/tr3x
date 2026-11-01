@@ -1,5 +1,5 @@
-//! What a thread is waiting on you for, in one line: the command, file or question. The Reply
-//! pane shows it over its chips, and the conversation pane reports it to Rex.
+//! What a thread is waiting on you for, in one line: the command, file or question. Reply
+//! shows it over its chips, and the pane reports it to Rex.
 
 use serde_json::Value;
 use t3client::projection::ThreadState;

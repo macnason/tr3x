@@ -1,6 +1,15 @@
-//! The conversation pane: the thread as plain terminal output, so Rex's scrollback, find,
-//! selection and links work on it. Finished blocks print once and stay. The blocks of a
-//! running turn form a live tail at the bottom that redraws in place until they finish.
+//! A thread's pane: the conversation, and Reply under it (`compose`), or with the `reply`
+//! setting at `pane`, either of them in a pane of its own (`Role`). The conversation is
+//! plain terminal output, so Rex's scrollback, find, selection and links work on it. Finished
+//! blocks print once and stay. The blocks of a running turn form a live tail at the bottom
+//! that redraws in place until they finish. It prints in a scroll region over Reply's rows, so
+//! what scrolls off its top goes into the scrollback and Reply stays put at the bottom, on a
+//! phone as on a Mac.
+//!
+//! Clicks reach the pane only while Reply has something to click, an approval's or a
+//! question's buttons or the slash menu: while they're on, the wheel and drags would reach the
+//! pane too, not the scrollback and selection. The first turn of the wheel turns them off
+//! until the next key.
 //!
 //! The pane also tells Rex what the thread is doing with OSC 7501, from the same status word
 //! T3's sidebar shows, names itself with OSC 2, and reports the thread's folder with OSC 7, so
@@ -11,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use base64::Engine;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use serde_json::Value;
 use t3client::env::WatchEvent;
@@ -22,7 +31,9 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+use crate::compose::Composer;
 use crate::media::{self, Embed, Media};
+use crate::paste::{self, Got};
 use crate::render::{self, visible_width};
 use crate::t3;
 use crate::width::Follow;
@@ -47,6 +58,12 @@ struct Pane {
     committed: Vec<(String, String)>,
     /// Rows the live tail takes at the bottom, which the next frame rewrites.
     live_rows: usize,
+    /// The rows the conversation scrolls in, above Reply's.
+    region: usize,
+    /// The cursor's row, 1-based: the row after the last one printed.
+    row: usize,
+    /// The last frame cleared the screen, Reply's rows too.
+    cleared: bool,
     /// Lines from the top of the live tail that have printed for good, because the tail
     /// outgrew the screen. Later frames and the commit skip them.
     spilled: usize,
@@ -521,8 +538,8 @@ const TOOLS_SHOWN: usize = 3;
 
 /// For each block, whether it shows. A run of tool calls (reasoning between them doesn't
 /// break it) shows its first few calls and folds the rest into one "more" line, when that
-/// hides at least two. Running and failed calls always show.
-fn visible_tools(blocks: &[Block]) -> Vec<bool> {
+/// hides at least two. Running and failed calls always show, and so do HTML embeds, `embeds`.
+fn visible_tools(blocks: &[Block], embeds: &HashMap<String, media::Embed>) -> Vec<bool> {
     let mut shown = vec![true; blocks.len()];
     let mut i = 0;
     while i < blocks.len() {
@@ -537,9 +554,18 @@ fn visible_tools(blocks: &[Block]) -> Vec<bool> {
         let tools: Vec<usize> = (start..i)
             .filter(|&j| blocks[j].kind == BlockKind::Tool)
             .collect();
-        if tools.len() >= TOOLS_SHOWN + 2 {
-            for &j in &tools[TOOLS_SHOWN..] {
-                shown[j] = is_running(&blocks[j]) || failed(&blocks[j]);
+        let fold: Vec<usize> = tools
+            .iter()
+            .skip(TOOLS_SHOWN)
+            .copied()
+            .filter(|&j| {
+                let b = &blocks[j];
+                !(is_running(b) || failed(b) || embeds.contains_key(&b.item_id))
+            })
+            .collect();
+        if fold.len() >= 2 {
+            for j in fold {
+                shown[j] = false;
             }
         }
     }
@@ -625,7 +651,7 @@ pub fn offline_line(machine: &str, reason: &str, retry_in: Duration) -> String {
 
 impl Pane {
     /// Before the thread has loaded: the offline line alone, at the top.
-    fn waiting(&self) {
+    fn waiting(&mut self) {
         if let Some(offline) = &self.offline {
             let (left, width) = self.column();
             out(&format!(
@@ -633,7 +659,45 @@ impl Pane {
                 " ".repeat(left),
                 fit(offline, width)
             ));
+            self.row = 3;
+            self.cleared = true;
         }
+    }
+
+    /// The conversation's rows become `region`, for Reply growing or shrinking under it.
+    /// Growing pushes the conversation up into the scrollback as far as it needs; when that
+    /// would take rows of the live tail, which the next frame rewrites, it prints again. So
+    /// does shrinking under a conversation that filled its rows, which would leave a gap.
+    fn set_region(&mut self, region: usize) -> String {
+        if region == self.region {
+            return String::new();
+        }
+        let old = std::mem::replace(&mut self.region, region);
+        let margins = format!("\x1b[1;{region}r");
+        if region > old && self.header && self.row >= old {
+            self.reflow = true;
+            return margins;
+        }
+        // Reply's old rows, the conversation's now.
+        if region > old {
+            let clear: String = (old + 1..=region)
+                .map(|r| format!("\x1b[{r};1H\x1b[2K"))
+                .collect();
+            return clear + &margins;
+        }
+        if !self.header {
+            return margins;
+        }
+        let k = self.row.saturating_sub(region);
+        if k == 0 {
+            return margins;
+        }
+        if self.live_rows > 0 && self.row - self.live_rows <= k {
+            self.reflow = true;
+            return margins;
+        }
+        self.row -= k;
+        format!("\x1b[{old};1H{}{margins}", "\n".repeat(k))
     }
 
     fn new(
@@ -647,6 +711,9 @@ impl Pane {
             rows: rows as usize,
             committed: Vec::new(),
             live_rows: 0,
+            region: rows as usize,
+            row: 1,
+            cleared: false,
             spilled: 0,
             status: String::new(),
             title: String::new(),
@@ -669,8 +736,8 @@ impl Pane {
         self.chat_width.width.column(self.cols)
     }
 
-    /// Prints the thread's blocks: what's new and finished for good, then the live tail.
-    fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) {
+    /// The thread's blocks: what's new and finished for good, then the live tail.
+    fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
         let blocks = transcript::blocks(state);
         self.animating = state.active_run().is_some() || blocks.iter().any(is_running);
         let run_active = state.active_run().is_some();
@@ -694,28 +761,36 @@ impl Pane {
             self.reflow |= self.header;
             self.last_user = newest;
         }
-        let mut text = String::from("\x1b[?2026h");
+        let mut text = format!("\x1b[{};1H", self.row);
         let reflow = std::mem::take(&mut self.reflow);
+        self.cleared = false;
         // The first frame too, which frees pictures an earlier process left in this terminal.
         if !self.header || !matches || self.committed.len() > blocks.len() || reflow {
             text.push_str(self.media.free_all());
-            text.push_str("\x1b[H\x1b[2J\x1b[3J");
+            text.push_str(&format!("\x1b[H\x1b[2J\x1b[3J\x1b[1;{}r", self.region));
+            self.row = 1;
+            self.cleared = true;
             self.committed.clear();
             self.live_rows = 0;
             self.spilled = 0;
             self.header = false;
         }
-        // Back to the top of the live tail, and clear it.
+        // Back to the top of the live tail, and clear it, down to Reply.
         if self.live_rows > 0 {
-            text.push_str(&format!("\x1b[{}F\x1b[J", self.live_rows));
+            self.row -= self.live_rows.min(self.row - 1);
+            for r in self.row..=self.region {
+                text.push_str(&format!("\x1b[{r};1H\x1b[2K"));
+            }
+            text.push_str(&format!("\x1b[{};1H", self.row));
         }
+        let printed_from = text.len();
         if !self.header {
             text.push_str(&self.header_lines(state, shell_thread));
             self.header = true;
         }
         let (left, width) = self.column();
-        let shown = visible_tools(&blocks);
         let embeds = media::embeds(state);
+        let shown = visible_tools(&blocks, &embeds);
         if self.media.can_snapshot() {
             for embed in embeds.values() {
                 self.media.ask(embed, self.snapshots.clone());
@@ -781,7 +856,7 @@ impl Pane {
         }
         // A tail taller than the screen can't be rewritten once its top has scrolled away, so
         // anything above the last screenful prints for good now.
-        let room = self.rows.saturating_sub(1).max(1);
+        let room = self.region.saturating_sub(1).max(1);
         if live.len() > room {
             let cut = live.len() - room;
             for line in live.drain(..cut) {
@@ -795,8 +870,9 @@ impl Pane {
             text.push_str("\r\n");
         }
         self.live_rows = live.len();
-        text.push_str("\x1b[?2026l");
-        out(&text);
+        let lines = text[printed_from..].matches("\r\n").count();
+        self.row = (self.row + lines).min(self.region);
+        text
     }
 
     fn footer(&self, state: &ThreadState) -> Option<String> {
@@ -874,144 +950,126 @@ impl Pane {
     }
 }
 
-/// The sibling pane in this window: the composer.
-async fn composer_block() -> Option<String> {
-    let me = std::env::var("REX_BLOCK").ok()?;
-    let session = std::env::var("REX_SESSION").ok()?;
-    let view = crate::rex::Rex::find().inspect(&session).await.ok()?;
-    for window in view["windows"].as_array()? {
-        let blocks: Vec<&str> = window["layers"]
-            .as_array()?
-            .iter()
-            .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
-            .filter_map(|b| b["block_id"].as_str())
-            .collect();
-        if blocks.contains(&me.as_str()) {
-            return blocks.into_iter().find(|b| *b != me).map(str::to_string);
-        }
+/// What a thread's pane shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The conversation, with Reply in its bottom rows.
+    Inline,
+    /// The conversation alone, over a Reply pane.
+    Conversation,
+    /// Reply alone, under the conversation's pane, sized to fit.
+    Reply,
+}
+
+/// Clicks on, for Reply's buttons and menu, or off, for the scrollback and selection.
+fn clicks(on: bool) -> &'static str {
+    if on {
+        "\x1b[?1000h\x1b[?1006h"
+    } else {
+        "\x1b[?1006l\x1b[?1000l"
     }
-    None
 }
 
-/// Typing in the conversation goes to the composer: focus moves there with the keys typed.
-/// Keys go through one task in order, so a burst of typing arrives as typed.
-fn spawn_handoff() -> mpsc::UnboundedSender<String> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    tokio::spawn(async move {
-        let bin = crate::rex::Rex::find().bin;
-        let session = std::env::var("REX_SESSION").unwrap_or_default();
-        let mut block: Option<String> = None;
-        while let Some(first) = rx.recv().await {
-            let mut text = first;
-            while let Ok(more) = rx.try_recv() {
-                text.push_str(&more);
-            }
-            if block.is_none() {
-                block = composer_block().await;
-            }
-            let Some(block) = block.as_deref() else {
-                continue;
-            };
-            let _ = tokio::process::Command::new(&bin)
-                .args(["focus", "-s", &session, block])
-                .output()
-                .await;
-            if !text.is_empty() {
-                let _ = tokio::process::Command::new(&bin)
-                    .args(["send", "-b", block, &text])
-                    .output()
-                    .await;
-            }
-        }
-    });
-    tx
-}
-
-pub async fn run(thread: String, passive: bool) -> Result<()> {
+pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     let (client, thread) = t3::thread(&thread)?;
     let thread_id = thread.thread;
-    let mut thread_events = client.watch_thread(&thread_id, None);
-    let mut shell_events = client.watch_shell(None);
     let scheme = crate::scheme::listen();
     crossterm::terminal::enable_raw_mode()?;
-    // Clear what the login printed, hide the cursor, and ask for focus reports.
-    out("\x1b[H\x1b[2J\x1b[3J\x1b[?25l\x1b[?1004h");
+    // Clear what the login printed, and ask for focus reports and bracketed paste. Paste
+    // events too, where the filter can take the clipboard's replies.
+    let clipboard = crate::scheme::clipboard();
+    // Reply alone keeps nothing to scroll back to, so it takes the alternate screen.
+    if role == Role::Reply {
+        out("\x1b[?1049h");
+    }
+    out("\x1b[H\x1b[2J\x1b[3J\x1b[?1004h\x1b[?2004h");
+    if clipboard.is_some() {
+        out(paste::ON);
+    }
     if let Ok(cwd) = std::env::current_dir() {
         out(&format!(
             "\x1b]7;file://localhost{}\x1b\\",
             percent(&cwd.to_string_lossy())
         ));
     }
-    let result = event_loop(
-        passive,
-        &client,
-        &thread_id,
-        &mut thread_events,
-        &mut shell_events,
-        scheme,
-    )
-    .await;
-    out("\x1b[?1004l\x1b[?25h");
+    let keys = crate::scheme::keys();
+    let result = event_loop(passive, role, &client, &thread_id, scheme, clipboard).await;
+    drop(keys);
+    out(&format!(
+        "{}{}\x1b[r\x1b[?2004l\x1b[?1004l\x1b[?25h{}",
+        paste::OFF,
+        clicks(false),
+        if role == Role::Reply {
+            "\x1b[?1049l"
+        } else {
+            ""
+        }
+    ));
     let _ = crossterm::terminal::disable_raw_mode();
     result
 }
 
 async fn event_loop(
     passive: bool,
+    role: Role,
     client: &std::sync::Arc<t3client::env::Env>,
     thread_id: &str,
-    thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
-    shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     mut scheme: tokio::sync::watch::Receiver<Option<bool>>,
+    mut clipboard: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
+    let mut thread_events = client.watch_thread(thread_id, None);
+    let mut shell_events = client.watch_shell(None);
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
-    // The provider's driver for each instance, so the pane can take its provider's name, and
-    // the address T3 serves its web app at, for the thread's link. Asked for until the machine
-    // answers.
-    let (config_tx, mut config_rx) = mpsc::unbounded_channel();
-    {
-        let client = client.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Ok(config) = client.server_config().await {
-                    let _ = config_tx.send(config);
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
+    // Reply asks for the machine's config: the provider's driver for each instance, so the pane
+    // can take its provider's name, and the address T3 serves its web app at, for the
+    // thread's link.
+    let (mut composer, mut done) = Composer::new(client.clone(), thread_id.to_string());
+    if role == Role::Reply {
+        composer.share = 1.0;
     }
-    let mut config: Option<Value> = None;
+    // Reply alone fits its pane to what it shows, by moving the split above it.
+    let mut fit = (role == Role::Reply).then(crate::reply::Fit::new).flatten();
+    let (fitted_tx, mut fitted) = mpsc::unbounded_channel();
+    // Where Reply alone starts in its pane, to clear above it when that moves.
+    let mut reply_top = 0;
     let link = crate::link::thread(None, client.id(), thread_id);
-    let handoff = spawn_handoff();
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
-    let mut state: Option<ThreadState> = None;
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     let mut visited_for = String::new();
     let mut dirty = false;
+    // Reply draws again only when something it shows may have changed.
+    let mut reply = true;
     let mut focused = true;
     let mut renamed = false;
+    // Whether clicks are on, and whether the wheel turned them off until the next key.
+    let (mut clicking, mut wheeled) = (false, false);
+    let mut asking = String::new();
     loop {
         tokio::select! {
             event = thread_events.recv() => match event {
                 Some(WatchEvent::Item(item)) => {
                     if item["kind"] == "snapshot" {
-                        state = ThreadState::from_snapshot(&item);
-                    } else if let Some(s) = state.as_mut() {
+                        composer.state = ThreadState::from_snapshot(&item);
+                    } else if let Some(s) = composer.state.as_mut() {
                         s.apply(&item);
                     }
+                    composer.thread_changed();
                     pane.offline = None;
+                    composer.offline = None;
                     dirty = true;
+                    reply = true;
                 }
                 Some(WatchEvent::Reconnecting { reason, retry_in }) => {
                     let said = offline_line(client.name(), &reason, retry_in);
+                    composer.offline = Some(said.clone());
                     if pane.offline.as_deref() != Some(said.as_str()) {
                         pane.offline = Some(said);
                         dirty = true;
-                        if state.is_none() {
+                        if composer.state.is_none() {
                             pane.waiting();
+                            reply = true;
                         }
                     }
                 }
@@ -1020,54 +1078,97 @@ async fn event_loop(
             },
             event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
-                let thread = t3client::inbox::find_thread(&shell, thread_id);
-                pane.set_status(thread, state.as_ref());
-            },
-            event = input.next() => match event {
-                Some(Ok(Event::Resize(cols, rows))) => {
-                    if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
-                        pane.reflow = cols as usize != pane.cols;
-                        pane.cols = cols as usize;
-                        pane.rows = rows as usize;
-                        dirty = true;
-                    }
+                if role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    pane.set_status(thread, composer.state.as_ref());
                 }
-                Some(Ok(Event::FocusGained)) => focused = true,
-                Some(Ok(Event::FocusLost)) => focused = false,
-                Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                        continue;
-                    }
-                    let typed = match key.code {
-                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => c.to_string(),
-                        _ => String::new(),
-                    };
-                    let _ = handoff.send(typed);
-                }
-                Some(Err(_)) | None => {}
-                _ => {}
             },
-            // A screen that turns light or dark: snapshots again in its scheme.
+            Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
+                fit.finished(ok);
+            },
+            event = done.recv() => if let Some(event) = event {
+                if let crate::compose::Done::Config(found) = &event {
+                    pane.link = crate::link::thread(Some(found), client.id(), thread_id);
+                    pane.reflow = true;
+                    dirty = true;
+                }
+                composer.done(event);
+                reply = true;
+            },
+            event = input.next() => {
+                reply = true;
+                match event {
+                    Some(Ok(Event::Resize(cols, rows))) => {
+                        if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
+                            // Each terminal does its own thing with margins and rows on a
+                            // resize, so the thread prints again from the top.
+                            pane.reflow = true;
+                            pane.cols = cols as usize;
+                            pane.rows = rows as usize;
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(Event::FocusGained)) => focused = true,
+                    Some(Ok(Event::FocusLost)) => focused = false,
+                    // The conversation alone has nothing to type into.
+                    Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
+                        if role == Role::Conversation => reply = false,
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        wheeled = false;
+                        composer.key(key);
+                    }
+                    Some(Ok(Event::Mouse(m))) => {
+                        if !composer.click(&m)
+                            && matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                        {
+                            wheeled = true;
+                        }
+                    }
+                    Some(Ok(Event::Paste(text))) => composer.pasted(Got::Text(text)),
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Ok(()),
+                    _ => reply = false,
+                }
+            },
+            Some(packet) = async {
+                match clipboard.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => if let Some(got) = composer.clipboard.feed(&packet) {
+                composer.pasted(got);
+                reply = true;
+            },
+            // A screen that turns light or dark: snapshots and logos again in its scheme.
             Ok(()) = scheme.changed() => {
+                // The fill under the input follows the new background.
+                crate::scheme::ask_background();
                 let dark = crate::scheme::dark();
                 if dark != pane.media.dark {
                     pane.media.set_dark(dark);
                     pane.reflow = true;
                     dirty = true;
                 }
-            }
-            Some(found) = config_rx.recv() => {
-                pane.link = crate::link::thread(Some(&found), client.id(), thread_id);
-                pane.reflow = true;
-                config = Some(found);
-                dirty = true;
+                composer.reload_logos();
             }
             Some((attachment, png)) = snap_rx.recv() => {
                 pane.media.snapshots.insert(attachment, png);
                 pane.reflow = true;
                 dirty = true;
             }
+            _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
+                composer.clear_note();
+                reply = true;
+            }
             _ = tick.tick() => {
+                if let Some(fit) = fit.as_mut()
+                    && let Some(job) = fit.due()
+                {
+                    let tx = fitted_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(job.await);
+                    });
+                }
                 if pane.animating {
                     pane.frame += 1;
                     dirty = true;
@@ -1078,22 +1179,64 @@ async fn event_loop(
                 }
             }
         }
-        // A thread that moved to another provider: start again under that provider's name,
-        // so Rex's sidebar shows its glyph. The thread prints again from the top.
-        if !renamed && let Some(s) = state.as_ref() {
+        if let Some(width) = composer.width_set.take() {
+            pane.chat_width.width = width;
+            pane.reflow = true;
+            dirty = true;
+        }
+        // A thread that moved to another provider: once nothing is typed, start again under
+        // that provider's name, so Rex's sidebar shows its glyph. The thread prints again from
+        // the top.
+        if !renamed
+            && composer.idle()
+            && let Some(s) = composer.state.as_ref()
+        {
             let instance = s.thread()["modelSelection"]["instanceId"]
                 .as_str()
                 .unwrap_or_default();
-            let driver = crate::icons::driver_of(config.as_ref(), instance);
+            let driver = crate::icons::driver_of(composer.config.as_ref(), instance);
             let want = crate::icons::program_name(driver).unwrap_or("t3rex");
-            if !instance.is_empty() && crate::icons::started_as() != want {
+            if !instance.is_empty()
+                && composer.config.is_some()
+                && crate::icons::started_as() != want
+            {
                 renamed = true;
-                out("\x1b[?1004l\x1b[?25h");
+                out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
                 let _ = crossterm::terminal::disable_raw_mode();
                 crate::icons::become_program(driver);
             }
         }
-        if dirty && let Some(s) = state.as_ref() {
+        // Reply's rows at the bottom, and the conversation's above them.
+        composer.cols = pane.cols;
+        composer.rows = pane.rows;
+        composer.column = pane.column();
+        let height = match role {
+            Role::Inline => composer.height().min(pane.rows.saturating_sub(1)).max(1),
+            Role::Conversation => 0,
+            Role::Reply => composer.height().min(pane.rows).max(1),
+        };
+        let mut text = String::new();
+        if role == Role::Reply {
+            if let Some(fit) = fit.as_mut() {
+                fit.want(composer.wanted);
+            }
+            // Reply alone sits at the bottom of its pane, over blank rows.
+            let top = pane.rows + 1 - height;
+            let force = std::mem::take(&mut pane.reflow) || top != reply_top;
+            if force {
+                text.push_str("\x1b[H\x1b[2J");
+            }
+            reply_top = top;
+            if reply || force {
+                text.push_str(&composer.draw(top, force));
+                reply = false;
+            }
+            dirty = false;
+        } else {
+            text = pane.set_region(pane.rows.saturating_sub(height).max(1));
+        }
+        dirty |= pane.reflow;
+        if dirty && let Some(s) = composer.state.as_ref() {
             let thread = t3client::inbox::find_thread(&shell, thread_id);
             let project = thread
                 .and_then(|t| t["projectId"].as_str())
@@ -1101,8 +1244,44 @@ async fn event_loop(
                 .and_then(|p| p["title"].as_str());
             pane.set_title(s, project);
             pane.set_status(thread, Some(s));
-            pane.draw(s, thread);
+            text.push_str(&pane.draw(s, thread));
             dirty = false;
+        }
+        // A frame that cleared the screen needs Reply again; any frame, the cursor back in the
+        // input.
+        if role == Role::Inline {
+            if reply || pane.cleared || !text.is_empty() && composer.parked.is_empty() {
+                text.push_str(&composer.draw(pane.region + 1, pane.cleared));
+                reply = false;
+            } else if !text.is_empty() {
+                text.push_str(&composer.parked);
+            }
+        }
+        // A new question or approval turns clicks back on.
+        let ask = crate::ask::pending(
+            composer
+                .state
+                .as_ref()
+                .map_or(&ThreadState::default(), |s| s),
+        )
+        .map(|(r, _)| r["id"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+        if ask != asking {
+            asking = ask;
+            wheeled = false;
+        }
+        // Reply alone has no scrollback for the wheel, so clicks stay on there.
+        let want = match role {
+            Role::Inline => composer.wants_clicks() && !wheeled,
+            Role::Conversation => false,
+            Role::Reply => true,
+        };
+        if want != clicking {
+            clicking = want;
+            text.push_str(clicks(want));
+        }
+        if !text.is_empty() {
+            out(&format!("\x1b[?2026h\x1b[?25l{text}\x1b[?2026l"));
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
         if focused
@@ -1216,10 +1395,26 @@ mod tests {
         let blocks: Vec<Block> = (0..6)
             .map(|_| tool("command_execution", "$ ls", "ls", ""))
             .collect();
-        let shown = visible_tools(&blocks);
+        let none = HashMap::new();
+        let shown = visible_tools(&blocks, &none);
         assert_eq!(shown, vec![true, true, true, false, false, false]);
         // Folding one call saves nothing, so a run of four shows all four.
-        assert!(visible_tools(&blocks[..4]).iter().all(|s| *s));
+        assert!(visible_tools(&blocks[..4], &none).iter().all(|s| *s));
+        // An HTML embed always shows, and the calls around it still fold.
+        let mut blocks = blocks;
+        blocks[4].item_id = "embed".into();
+        let embed = media::Embed {
+            attachment: "a".into(),
+            title: "Options".into(),
+            height: 400,
+        };
+        let embeds = HashMap::from([("embed".to_string(), embed)]);
+        assert_eq!(
+            visible_tools(&blocks, &embeds),
+            vec![true, true, true, false, true, false]
+        );
+        // Then folding one call is all that's left, which saves nothing.
+        assert!(visible_tools(&blocks[..5], &embeds).iter().all(|s| *s));
     }
 
     #[test]
@@ -1263,6 +1458,48 @@ mod tests {
         assert_eq!(field("title").len(), 192);
         assert_eq!(field("msg").len(), 2048);
         assert!(seq.len() < 4096);
+    }
+
+    fn pane(region: usize, row: usize, live_rows: usize) -> Pane {
+        let (tx, _) = mpsc::unbounded_channel();
+        let mut pane = Pane::new(Media::new(None), String::new(), tx);
+        (pane.region, pane.row, pane.live_rows, pane.header) = (region, row, live_rows, true);
+        pane
+    }
+
+    #[test]
+    fn reply_growing_pushes_the_conversation_up() {
+        // Full: the cursor sits on the region's last row. Two more rows for Reply scroll the
+        // conversation up two, from the old bottom, before the margins move.
+        let mut p = pane(20, 20, 2);
+        assert_eq!(p.set_region(18), "\x1b[20;1H\n\n\x1b[1;18r");
+        assert_eq!(p.row, 18);
+        assert!(!p.reflow);
+        // A short conversation has room: only the margins move.
+        let mut p = pane(20, 5, 2);
+        assert_eq!(p.set_region(18), "\x1b[1;18r");
+        assert_eq!(p.row, 5);
+    }
+
+    #[test]
+    fn reply_growing_into_the_live_tail_prints_again() {
+        let mut p = pane(20, 20, 19);
+        p.set_region(17);
+        assert!(p.reflow);
+    }
+
+    #[test]
+    fn reply_shrinking_under_a_full_conversation_prints_again() {
+        let mut p = pane(18, 18, 2);
+        p.set_region(20);
+        assert!(p.reflow);
+        // Under a short one, Reply's old rows are just cleared.
+        let mut p = pane(18, 5, 2);
+        assert_eq!(
+            p.set_region(20),
+            "\x1b[19;1H\x1b[2K\x1b[20;1H\x1b[2K\x1b[1;20r"
+        );
+        assert!(!p.reflow);
     }
 
     #[test]

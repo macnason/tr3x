@@ -1,4 +1,4 @@
-//! The model picker: a floating layer over a thread's window, opened from the Reply pane with
+//! The model picker: a floating layer over a thread's window, opened from Reply with
 //! /model, /effort or /mode alone, or Change Model… in the palette. It lists every enabled provider's models under the
 //! provider's logo, then the model's efforts, and the access modes. A choice applies to the
 //! thread's next message at once, as T3's composer chips do, and the Reply header follows.
@@ -92,7 +92,7 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
     };
     let mut field = first;
     let mut menu = open(field, &settings, &logos);
-    let mut painter = Painter;
+    let mut painter = Painter::default();
     let mut note: Option<String> = None;
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((60, 20));

@@ -9,8 +9,8 @@
 //! everything else on. crossterm reads the other end, which is a terminal too, while sizes
 //! still come from the controlling terminal.
 //!
-//! The filter also keeps the terminal's clipboard replies (OSC 5522), for `paste`: crossterm
-//! would read their bytes as keys.
+//! The filter also keeps the terminal's clipboard replies (OSC 5522), for `paste`, and its
+//! background colour (OSC 11), for Reply's fill: crossterm would read their bytes as keys.
 
 use std::os::fd::RawFd;
 use std::sync::Mutex;
@@ -28,6 +28,8 @@ static CHANGES: Mutex<Option<watch::Sender<Option<bool>>>> = Mutex::new(None);
 static CLIPBOARD: Mutex<Option<mpsc::UnboundedSender<String>>> = Mutex::new(None);
 /// The real terminal and its settings from before, while input passes through the filter.
 static FILTER: Mutex<Option<(RawFd, libc::termios)>> = Mutex::new(None);
+/// The terminal's background colour, once it has said.
+static BACKGROUND: Mutex<Option<[u8; 3]>> = Mutex::new(None);
 /// Whether this process has the kitty keyboard protocol on.
 static KEYS: AtomicBool = AtomicBool::new(false);
 
@@ -39,8 +41,68 @@ pub fn listen() -> watch::Receiver<Option<bool>> {
     // SAFETY: plain calls on file descriptors this process owns.
     if unsafe { libc::isatty(0) } == 1 && unsafe { start() }.is_ok() {
         out("\x1b[?2031h\x1b[?996n");
+        ask_background();
     }
     rx
+}
+
+/// Asks the terminal for its background colour again, as after it turns light or dark.
+pub fn ask_background() {
+    if FILTER.lock().unwrap().is_some() {
+        out("\x1b]11;?\x1b\\");
+    }
+}
+
+/// The screen's background colour: the terminal's, once it has said, else that of the Rex
+/// theme the app on this Mac uses for a light or dark screen. Rex doesn't answer OSC 11.
+pub fn background() -> Option<[u8; 3]> {
+    if let Some(rgb) = *BACKGROUND.lock().unwrap() {
+        return Some(rgb);
+    }
+    static THEMES: std::sync::OnceLock<[Option<[u8; 3]>; 2]> = std::sync::OnceLock::new();
+    let [light, dark_bg] = *THEMES.get_or_init(|| [false, true].map(rex_theme));
+    if dark() { dark_bg } else { light }
+}
+
+/// The background of the Rex theme the app uses for a light or a dark screen, from the
+/// themes Rex ships. None for a theme of your own.
+fn rex_theme(dark: bool) -> Option<[u8; 3]> {
+    let key = if dark {
+        "Workspace.darkThemeID"
+    } else {
+        "Workspace.lightThemeID"
+    };
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", crate::fade::DOMAIN, key])
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // The app the Rex CLI comes in, through the link Rex puts on a terminal's PATH, else the
+    // app in /Applications: a running server is a copy of its own, without the themes.
+    let bin = crate::rex::Rex::find().bin;
+    let bin = std::fs::canonicalize(&bin).unwrap_or(bin);
+    let apps = bin
+        .ancestors()
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+        .map(std::path::Path::to_path_buf)
+        .chain(["Rex Beta.app", "Rex.app"].map(|a| std::path::Path::new("/Applications").join(a)));
+    let themes = apps
+        .map(|app| {
+            app.join(
+                "Contents/Resources/SuperUI_SuperDesignTokens.bundle/Contents/Resources/themes.json",
+            )
+        })
+        .find_map(|path| std::fs::read(path).ok())?;
+    let themes: serde_json::Value = serde_json::from_slice(&themes).ok()?;
+    let hex = themes.as_array()?.iter().find(|t| t["id"] == id.as_str())?["source"]["background"]
+        .as_str()?
+        .strip_prefix('#')?
+        .to_string();
+    if hex.len() != 6 {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
 /// The terminal's clipboard replies, once input passes through the filter. `None` without it,
@@ -196,6 +258,9 @@ fn pass(real: RawFd, master: RawFd) {
             return;
         }
         let (keep, scheme, packets) = strip.feed(&buf[..n as usize]);
+        if let Some(rgb) = strip.background.take() {
+            *BACKGROUND.lock().unwrap() = Some(rgb);
+        }
         if let Some(tx) = CLIPBOARD.lock().unwrap().as_ref() {
             for packet in packets {
                 let _ = tx.send(packet);
@@ -229,14 +294,31 @@ fn write_all(fd: RawFd, mut bytes: &[u8]) {
 
 const REPORT: &[u8] = b"\x1b[?997;";
 const OSC: &[u8] = b"\x1b]5522;";
+const BG: &[u8] = b"\x1b]11;";
 
-/// Takes `CSI ? 997 ; Ps n` and `OSC 5522 ; … ST` out of a stream of input, across reads.
+/// Takes `CSI ? 997 ; Ps n`, `OSC 5522 ; … ST` and `OSC 11 ; … ST` out of a stream of input,
+/// across reads.
 #[derive(Default)]
 struct Strip {
     /// The start of what may be a report, held until it is one or isn't.
     held: Vec<u8>,
-    /// Inside a clipboard reply: everything is held until its terminator.
+    /// Inside a clipboard or background reply: everything is held until its terminator.
     osc: bool,
+    /// The last background colour reported.
+    background: Option<[u8; 3]>,
+}
+
+/// `rgb:RRRR/GGGG/BBBB`, with one to four hex digits a channel, as 8 bits a channel.
+fn rgb(text: &str) -> Option<[u8; 3]> {
+    let mut parts = text.strip_prefix("rgb:")?.split('/');
+    let mut out = [0u8; 3];
+    for c in &mut out {
+        let hex = parts.next()?;
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        let max = (1u32 << (4 * hex.len().clamp(1, 4))) - 1;
+        *c = (v * 255 / max) as u8;
+    }
+    Some(out)
 }
 
 impl Strip {
@@ -250,7 +332,13 @@ impl Strip {
                 // BEL or ESC \ ends it.
                 if b == 0x07 || b == b'\\' && self.held.last() == Some(&0x1b) {
                     let end = self.held.len() - usize::from(b != 0x07);
-                    packets.push(String::from_utf8_lossy(&self.held[OSC.len()..end]).into_owned());
+                    if self.held.starts_with(BG) {
+                        let text = String::from_utf8_lossy(&self.held[BG.len()..end]);
+                        self.background = rgb(&text).or(self.background);
+                    } else {
+                        packets
+                            .push(String::from_utf8_lossy(&self.held[OSC.len()..end]).into_owned());
+                    }
                     self.held.clear();
                     self.osc = false;
                 } else {
@@ -260,8 +348,10 @@ impl Strip {
             }
             self.held.push(b);
             let n = self.held.len();
-            if n <= OSC.len() && self.held[..] == OSC[..n] {
-                self.osc = n == OSC.len();
+            let osc = n <= OSC.len() && self.held[..] == OSC[..n];
+            let bg = n <= BG.len() && self.held[..] == BG[..n];
+            if osc || bg {
+                self.osc = osc && n == OSC.len() || bg && n == BG.len();
                 continue;
             }
             let fits = if n <= REPORT.len() {
@@ -352,6 +442,11 @@ mod tests {
         let (mut out, _, packets) = s.feed(b"\x1b]x");
         out.extend(s.flush());
         assert_eq!((out, packets.len()), (b"\x1b]x".to_vec(), 0));
+        // The background colour comes out too, and is kept.
+        let (out, _, packets) = s.feed(b"x\x1b]11;rgb:1616/1717/1b1b\x1b\\y");
+        assert_eq!((out, packets.len()), (b"xy".to_vec(), 0));
+        assert_eq!(s.background, Some([0x16, 0x17, 0x1b]));
+        assert_eq!(rgb("rgb:f/80/ffff"), Some([255, 128, 255]));
         // A reply cut short goes, rather than reaching crossterm.
         let (out, _, _) = s.feed(b"\x1b]5522;type=read:status=DA");
         assert!(out.is_empty());

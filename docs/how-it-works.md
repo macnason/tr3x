@@ -53,7 +53,23 @@ machine it's paired with, and draws what T3 says into one Rex session.
 
 ## The panes
 
-- `t3rex chat` and `t3rex compose` each subscribe to the thread. The conversation pane reports
+- A thread's window is one pane, `t3rex chat`, so a phone looking at the session gets one
+  window per thread, not a window per pane. With the `reply` setting at `pane`, `t3rex chat`
+  draws only the conversation and `t3rex compose` draws Reply in a pane under it, on the
+  alternate screen. That pane moves the split above it (`session.resize_pane`) to fit what it
+  shows, once a device has sized both panes, within half the window.
+- The input sits on a fill: the screen's background a step lighter, or darker on a light
+  screen. Rex doesn't answer OSC 11, so the background is that of the Rex theme the app on this
+  Mac uses for the screen's scheme (`Workspace.darkThemeID`, `lightThemeID`, in the themes Rex
+  ships). A theme of your own has none, and the input sits between two rules instead. The conversation prints in a scroll region (DECSTBM)
+  over Reply's rows: what scrolls off its top goes into Rex's scrollback, and Reply stays at
+  the bottom. Reply growing pushes the conversation up into the scrollback; shrinking under a
+  conversation that filled its rows prints the thread again, so no gap is left.
+- Mouse reporting would take the wheel and drags from the scrollback and selection, so it's
+  on only while Reply has something to click: an approval's or a question's buttons, or the
+  slash menu. A turn of the wheel turns it off until the next key or the next request. Tab and
+  `/model` open the model picker, and Backspace takes a picture off.
+- The pane subscribes to the thread once. It reports
   the thread's status to Rex with OSC 7501, from the same status word T3's sidebar shows, so
   Rex's markers are T3's. `title` is the thread's title. While it waits on you, `msg` is what
   it waits on: `Run` and the command an approval gates, `Edit` and the file, or the question,
@@ -65,10 +81,12 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - Every input turns on the kitty keyboard protocol's first level (`CSI > 1 u`), and turns it off
   on every way out, a signal or a panic too. Without it Rex sends Shift+Enter as
   `CSI 27 ; 2 ; 13 ~`, which crossterm drops; with it Shift+Enter is `CSI 13 ; 2 u`.
-- Reply grows one row per input line past the first, up to 7 more or 35% of the window, by
-  moving the split with `session.resize_pane`, a quarter-second after the line count settles,
-  and goes back to the starting split once the input empties. Each resize reprints the
-  conversation, and the split is the session's, so every device sees it.
+- Reply grows one row per input line, up to 8, within half the pane.
+- A run of tool calls folds past the first three into one "more" line, but an HTML embed
+  always shows.
+- A window whose panes don't match the `reply` setting gets the right ones in place on sync's
+  next pass: the new panes split in beside the old ones, which close, so the window keeps its
+  spot.
 - Reply answers an approval with the same `respond` call T3's buttons make (`accept`,
   `acceptForSession`, `decline`), and a question's option with its value, as typing its number
   does.
@@ -164,10 +182,9 @@ of these brings it back.
 ## Provider glyphs
 
 Rex picks a window's sidebar glyph from the name its focused pane's program was started as. So
-t3rex starts both panes through a link named for the provider (`~/.local/state/t3rex/bin/claude`
+t3rex starts the pane through a link named for the provider (`~/.local/state/t3rex/bin/claude`
 → `t3rex`), without a login shell in between. A thread that moves to another provider takes the
-new glyph: the conversation starts again under the new name, and Reply does once its input is
-empty. Rex has no glyph for a project, and no way to set a custom one.
+new glyph: the pane starts again under the new name once nothing is typed in Reply. Rex has no glyph for a project, and no way to set a custom one.
 
 ## New threads
 
@@ -178,7 +195,7 @@ so the window keeps its place and focus. t3rex labels its own panes as it makes 
 `t3rex new` labels itself `t3:<env8>/<thread>`, with the first eight characters of the
 machine's environment id and the id the launch will use, before it launches through
 `orchestration.launchThread` on that machine's connection. Then it turns into `t3rex chat`
-(exec) with Reply split under it. Sync adopts the window once T3 reports the thread. Tags
+(exec), with Reply under the conversation. Sync adopts the window once T3 reports the thread. Tags
 longer than Rex's 128-character labels are `t3#` and a hash. Windows tagged before machines,
 `t3:<thread>`, are adopted as this Mac's.
 
@@ -310,8 +327,8 @@ To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest relea
 
 ## Other limits
 
-- Rex has no per-pane setting for its pane-header buttons (split, float, zoom, close), so the
-  Reply pane still shows them. The app has a global `Workspace.hiddenPaneButtons` preference,
+- Rex has no per-pane setting for its pane-header buttons (split, float, zoom, close), so a
+  thread's pane still shows them. The app has a global `Workspace.hiddenPaneButtons` preference,
   but `defaults write` with the button names didn't take effect in Rex 0.1.0 (1642) while it
   ran, and hiding them everywhere would also hide them in your other sessions. Fading is
   likewise only global; see [pane fading](#pane-fading).

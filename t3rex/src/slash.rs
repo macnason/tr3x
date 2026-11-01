@@ -429,6 +429,15 @@ impl Slash {
         self.open.is_some()
     }
 
+    /// The rows the menu draws in while it's open.
+    pub fn rows(&self) -> usize {
+        if self.is_open() {
+            self.menu.items.len().min(ROWS)
+        } else {
+            0
+        }
+    }
+
     /// Follows the input: opens on `/`, re-ranks as the word changes, closes past it.
     pub fn sync(
         &mut self,
@@ -857,7 +866,7 @@ mod tests {
         let mut s = Slash::default();
         let ed = typed("/");
         s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
-        let mut p = Painter;
+        let mut p = Painter::default();
         // Input on row 1 of 6: below, five rows.
         let out = s.draw(&mut p, (1, 1), 6, 0, 40);
         assert!(out.contains("\x1b[2;1H") && out.contains("\x1b[6;1H"));
