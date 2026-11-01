@@ -113,8 +113,14 @@ impl ThreadState {
                 let Some(payload) = event.get("payload").cloned() else {
                     return Applied::Event(event_type);
                 };
-                if event_type.starts_with("thread.") {
-                    self.projection.insert("thread".into(), payload);
+                if event_type == "thread.pull-request-link-updated" {
+                    // The payload is one PR link, not the thread.
+                    self.link_pull_request(payload);
+                } else if event_type.starts_with("thread.") {
+                    // Only a whole thread replaces it: a partial one would lose the id every send needs.
+                    if payload.get("id").and_then(Value::as_str).is_some() {
+                        self.projection.insert("thread".into(), payload);
+                    }
                 } else if event_type == "provider-session.detached" {
                     self.detach_session(&payload);
                 } else if let Some(key) = collection_for(&event_type) {
@@ -173,6 +179,25 @@ impl ThreadState {
             "sourceItemId": id.cloned().unwrap_or(Value::Null),
             "item": item,
         }));
+    }
+
+    fn link_pull_request(&mut self, link: Value) {
+        let Some(thread) = self
+            .projection
+            .get_mut("thread")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        let key = |pr: &Value| ["host", "repository", "number"].map(|field| pr.get(field).cloned());
+        let links = array_mut(thread, "pullRequests");
+        match links
+            .iter_mut()
+            .find(|existing| key(existing) == key(&link))
+        {
+            Some(existing) => *existing = link,
+            None => links.push(link),
+        }
     }
 
     pub fn thread(&self) -> &Value {
@@ -545,6 +570,41 @@ mod tests {
 
     fn event(sequence: u64, event_type: &str, payload: Value) -> Value {
         json!({"kind": "event", "sequence": sequence, "event": {"type": event_type, "payload": payload}})
+    }
+
+    #[test]
+    fn a_pull_request_link_keeps_the_thread() {
+        let mut state = ThreadState::from_snapshot(&snapshot()).unwrap();
+        let link = |state: &str| {
+            json!({"host": "github.com", "repository": "o/r", "number": 6,
+            "url": "https://github.com/o/r/pull/6", "source": "agent", "state": state})
+        };
+        state.apply(&event(11, "thread.pull-request-link-updated", link("open")));
+        state.apply(&event(
+            12,
+            "thread.pull-request-link-updated",
+            link("merged"),
+        ));
+        assert_eq!(state.thread_id(), "t1");
+        assert_eq!(state.thread()["title"], "Test");
+        assert_eq!(state.thread()["pullRequests"], json!([link("merged")]));
+
+        state.apply(&event(
+            13,
+            "thread.something-new",
+            json!({"threadId": "t1"}),
+        ));
+        assert_eq!(
+            state.thread_id(),
+            "t1",
+            "a partial thread event leaves the thread alone"
+        );
+        state.apply(&event(
+            14,
+            "thread.created",
+            json!({"id": "t1", "title": "Renamed"}),
+        ));
+        assert_eq!(state.thread()["title"], "Renamed");
     }
 
     #[test]
