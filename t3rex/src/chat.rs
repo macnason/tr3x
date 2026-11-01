@@ -765,8 +765,7 @@ impl Pane {
         } else if run_active {
             live.push(String::new());
             let since = state
-                .active_run()
-                .and_then(|r| r["startedAt"].as_str().or(r["requestedAt"].as_str()))
+                .activity_started_at()
                 .and_then(t3client::inbox::parse_iso)
                 .map(|at| duration(t3::now_ms() - at))
                 .unwrap_or_default();

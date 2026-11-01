@@ -232,6 +232,17 @@ impl ThreadState {
             .max_by_key(|r| ordinal(r))
     }
 
+    /// When the work in progress began, as T3's working timer counts it: the active run's
+    /// `workStartedAt`, else its `startedAt`, else its `requestedAt` (`activityStartedAt` in the
+    /// nightly's web client). A steer joins the running run and changes none of them, so the
+    /// timer runs on; `workStartedAt` can also predate the run, carried from the one before.
+    pub fn activity_started_at(&self) -> Option<&str> {
+        let run = self.active_run()?;
+        ["workStartedAt", "startedAt", "requestedAt"]
+            .iter()
+            .find_map(|k| run.get(*k).and_then(Value::as_str))
+    }
+
     pub fn latest_run(&self) -> Option<&Value> {
         self.list("runs").iter().max_by_key(|r| ordinal(r))
     }
@@ -606,6 +617,47 @@ mod tests {
         ));
         assert!(state.pending_requests().is_empty());
         assert!(state.active_run().is_none());
+    }
+
+    /// As this Mac's T3 reported a run that steers had joined: work began before the run did.
+    #[test]
+    fn work_starts_when_t3_says_it_did() {
+        let mut state = ThreadState::from_snapshot(&snapshot()).unwrap();
+        let run = |seq: u64, extra: Value| {
+            let mut run = json!({"id": "r2", "ordinal": 2, "status": "running",
+                "requestedAt": "2026-10-31T14:16:57.057Z"});
+            run.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            event(seq, "run.updated", run)
+        };
+        state.apply(&run(11, json!({})));
+        assert_eq!(
+            state.activity_started_at(),
+            Some("2026-10-31T14:16:57.057Z")
+        );
+        state.apply(&run(12, json!({"startedAt": "2026-10-31T14:31:28.413Z"})));
+        assert_eq!(
+            state.activity_started_at(),
+            Some("2026-10-31T14:31:28.413Z")
+        );
+        state.apply(&run(
+            13,
+            json!({"startedAt": "2026-10-31T14:31:28.413Z",
+            "workStartedAt": "2026-10-31T14:16:58.126Z"}),
+        ));
+        assert_eq!(
+            state.activity_started_at(),
+            Some("2026-10-31T14:16:58.126Z")
+        );
+        // Queued isn't working, so there's no timer.
+        state.apply(&event(
+            14,
+            "run.updated",
+            json!({"id": "r2", "ordinal": 2, "status": "queued",
+            "requestedAt": "2026-10-31T14:16:57.057Z"}),
+        ));
+        assert_eq!(state.activity_started_at(), None);
     }
 
     #[test]
