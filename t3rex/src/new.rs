@@ -3,7 +3,7 @@
 //! access and workspace chips. The project chip also adds a folder as a project, and with no
 //! projects yet the composer opens on that. Enter launches the thread through T3's
 //! `orchestration.launchThread`, and the window becomes that thread's: this pane turns into the
-//! conversation and the Reply pane opens under it.
+//! conversation, with Reply under it.
 //!
 //! With more than one machine to choose from, a machine chip comes first: each paired machine,
 //! and the ones on the tailnet that run T3 and aren't paired, which pair from there. Choosing
@@ -1138,32 +1138,6 @@ async fn set_label(label: &str) -> Result<()> {
     Rex::find().lua(&session, &script).await.map(drop)
 }
 
-/// The Reply pane under this one, for `thread`, run as `program`.
-async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) -> Result<()> {
-    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
-    else {
-        return Ok(());
-    };
-    let exe = program.to_string_lossy().into_owned();
-    let data = json!({"block": block, "argv": crate::rex::pane_argv(&exe, &["compose", thread]), "cwd": cwd});
-    let script = format!(
-        r#"local d = rex.json.decode({})
-local r, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
-  ratio = 0.86, focus = true,
-  layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Reply",
-    options = {{ shell = "none", login = false, command = d.argv, cwd = d.cwd, exit = {{ on_completion = false }} }} }} }} }}
-rex.session.disown_block{{}}
-if err then error(err, 0) end
--- The app evens out a new split when its Autobalance setting is on; set the ratio again after.
-rex.sleep(0.5)
-rex.session.resize_pane{{ before_block_id = d.block, after_block_id = r.block_ids[1],
-  direction = "vertical", ratio = 0.86 }}
-return {{}}"#,
-        lua_str(&data.to_string())
-    );
-    Rex::find().lua(&session, &script).await.map(drop)
-}
-
 /// Whether T3's server isn't there to answer, rather than refusing.
 fn unavailable(error: &anyhow::Error) -> bool {
     error
@@ -1314,7 +1288,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         welcome,
         cols: cols as usize,
         rows: rows as usize,
-        painter: Painter,
+        painter: Painter::default(),
         chip_spans: Vec::new(),
         chip_row: 0,
         chat_width: crate::width::current().0,
@@ -1474,12 +1448,9 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         .and_then(|p| p["workspaceRoot"].as_str())
         .filter(|_| ui.client.is_local())
         .map(str::to_string);
-    // Both panes run under the provider's name, so Rex's sidebar shows its glyph.
+    // The pane runs under the provider's name, so Rex's sidebar shows its glyph.
     let driver = icons::driver_of(Some(&ui.config), &ui.settings.instance).to_string();
     let program = icons::as_program(&icons::real_exe(), &driver);
-    if let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await {
-        eprintln!("t3rex: couldn't open the Reply pane: {e:#}");
-    }
     if let Some(dir) = &cwd {
         let _ = std::env::set_current_dir(dir);
     }

@@ -4,8 +4,10 @@
 //! description, conversation, review threads, checks and files, and merges, approves and
 //! comments from the keyboard.
 //!
-//! The drawer runs the thread's full height beside the conversation and Reply when the window
-//! has room for both, else floats over them, as on a phone. `q` in sup closes it.
+//! The drawer floats over the thread's pane: down its right side, full height, when the window
+//! has room for both, else over nearly all of it, as on a phone. A floating layer, not a split,
+//! so a phone looking at the same session never gets it as a window of its own. `q` in sup
+//! closes it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ const LABEL: &str = "Pull Request";
 /// The window width, in columns, that holds the conversation and the drawer side by side.
 const ROOM: u64 = 140;
 /// The conversation's share of the window beside the drawer.
-const RATIO: f64 = 0.55;
+const RATIO: f64 = 0.45;
 
 fn out(text: &str) {
     let mut stdout = std::io::stdout().lock();
@@ -71,15 +73,6 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
         let args = json!({"session_id": session, "block_id": drawer}).to_string();
         rex.call("block.close", &args).await?;
     }
-    // The tiled layer's top split, or its one block: the drawer goes beside all of it.
-    let root = window["layers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|l| l["kind"] == "tiled")
-        .map(|l| &l["layout"])
-        .and_then(|n| n["split"]["split_id"].as_str().or(n["block_id"].as_str()))
-        .context("that window has no panes")?;
     // The window's width: the pane's columns over its share of the window, as the layout has it
     // now. A pane's size follows a change of layout a moment later.
     let size = rex.block_method(&session, block, "size").await?;
@@ -97,7 +90,6 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
     }
     let data = json!({
         "argv": crate::rex::pane_argv(&exe, &args),
-        "root": root,
         "window": window["window_id"],
         "wide": wide,
         "ratio": RATIO,
@@ -107,14 +99,10 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
         r#"local d = rex.json.decode({})
 local layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = d.label,
   options = {{ shell = "none", login = false, command = d.argv }} }} }}
-local _, err
-if d.wide then
-  _, err = rex.session.new_split{{ anchor_id = d.root, direction = "horizontal", side = "after",
-    ratio = d.ratio, focus = true, layout = layout }}
-else
-  _, err = rex.session.new_layer{{ window_id = d.window, bounds = {{ 0.03, 0.03, 0.94, 0.94 }},
-    focus = true, layout = layout }}
-end
+local bounds = {{ 0.03, 0.03, 0.94, 0.94 }}
+if d.wide then bounds = {{ d.ratio, 0, 1 - d.ratio, 1 }} end
+local _, err = rex.session.new_layer{{ window_id = d.window, bounds = bounds, focus = true,
+  layout = layout }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
 return {{}}"#,

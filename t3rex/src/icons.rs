@@ -372,14 +372,39 @@ pub fn become_program(driver: &str) {
 
 /// Draws icons with kitty graphics. Each frame sends each picture again as a file path, which
 /// the terminal reads itself, the way the conversation pane draws pictures; `clear` removes
-/// the last frame's.
+/// the last frame's. In a pane that also shows the conversation's pictures, a `tagged` painter
+/// numbers its own, so `clear_own` removes only those.
 #[derive(Default)]
-pub struct Painter;
+pub struct Painter {
+    /// The first id of this painter's pictures, and the next one to give out.
+    ids: Option<(u32, u32)>,
+}
+
+/// Where a tagged painter's ids start: far above the conversation's, which count up from 1.
+const OWN_IDS: u32 = 0x7000_0000;
 
 impl Painter {
+    pub fn tagged() -> Painter {
+        Painter {
+            ids: Some((OWN_IDS, OWN_IDS)),
+        }
+    }
+
     /// Removes every picture this pane drew.
     pub fn clear() -> &'static str {
         "\x1b_Ga=d,d=A,q=2\x1b\\"
+    }
+
+    /// Removes the pictures a tagged painter drew since the last call; anything else stays.
+    pub fn clear_own(&mut self) -> String {
+        let Some((first, next)) = self.ids.as_mut() else {
+            return Painter::clear().to_string();
+        };
+        let text = (*first..*next)
+            .map(|id| format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"))
+            .collect();
+        *next = *first;
+        text
     }
 
     /// The icon at the cursor, two cells wide, leaving the cursor after it.
@@ -398,8 +423,15 @@ impl Painter {
             Icon::Picture(path) => {
                 let name = base64::engine::general_purpose::STANDARD
                     .encode(path.to_string_lossy().as_bytes());
+                let id = match self.ids.as_mut() {
+                    Some((_, next)) => {
+                        *next += 1;
+                        format!("i={},", *next - 1)
+                    }
+                    None => String::new(),
+                };
                 // f=100 PNG, t=f a file, c=2 r=1 two cells, C=1 leave the cursor, q=2 quiet.
-                format!("\x1b_Ga=T,f=100,t=f,c=2,r=1,C=1,q=2;{name}\x1b\\\x1b[2C")
+                format!("\x1b_Ga=T,{id}f=100,t=f,c=2,r=1,C=1,q=2;{name}\x1b\\\x1b[2C")
             }
         }
     }

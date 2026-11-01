@@ -105,9 +105,6 @@ enum Command {
         #[arg(long)]
         client: Option<String>,
     },
-    /// The reply pane of a thread's window.
-    #[command(hide = true)]
-    Compose { thread: String },
     /// Print a thread's transcript blocks, for working on the chat pane.
     #[command(hide = true)]
     Blocks { thread: String },
@@ -461,7 +458,6 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Sync { no_first, log } => sync::run(!no_first, log).await,
         Command::Chat { thread, passive } => chat::run(thread, passive).await,
-        Command::Compose { thread } => compose::run(thread).await,
         Command::Find { client } => find::run(client).await,
         Command::Reopen { client } => find::reopen_last(client).await,
         Command::New { welcome, env } => new::run(welcome, env).await,

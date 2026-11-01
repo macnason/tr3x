@@ -363,7 +363,7 @@ pub async fn run(client: Option<String>) -> Result<()> {
     let mut projects: HashMap<(String, String), String> = HashMap::new();
     let mut menu = Menu::default();
     (menu.fuzzy, menu.details_right, menu.hide_filter) = (true, true, true);
-    let mut painter = Painter;
+    let mut painter = Painter::default();
     let mut note: Option<(String, bool)> = None;
     let mut busy = false;
     let (done_tx, mut done) = mpsc::unbounded_channel::<Outcome>();
