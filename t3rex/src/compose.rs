@@ -334,6 +334,28 @@ impl Escape {
     }
 }
 
+/// What an Esc in Reply does, as in Claude Code and Codex: one stops a running thread and
+/// keeps what's typed; two close together clear what's typed and its pictures, and Cmd+Z brings
+/// the text back. An Esc that follows the two that cleared doesn't stop the run.
+#[derive(PartialEq, Debug)]
+enum Esc {
+    Stop,
+    Clear,
+    Note,
+    Nothing,
+}
+
+impl Esc {
+    fn of(again: bool, typed: bool, running: bool) -> Self {
+        match (again, typed, running) {
+            (true, true, _) => Self::Clear,
+            (false, _, true) => Self::Stop,
+            (false, true, false) => Self::Note,
+            _ => Self::Nothing,
+        }
+    }
+}
+
 /// What a click or a focused chip does.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
@@ -1083,25 +1105,23 @@ impl Composer {
         }
     }
 
-    /// Esc twice clears what's typed and its pictures; Cmd+Z brings the text back. On an empty
-    /// input one Esc stops the run, as in Claude Code and Codex, but not an Esc that follows
-    /// the two that cleared it.
     fn escape(&mut self, again: bool) {
-        if self.editor.text.is_empty() && self.images.is_empty() {
-            if !again
-                && self
-                    .state
-                    .as_ref()
-                    .is_some_and(|s| s.active_run().is_some())
-            {
-                self.command("stop");
+        let typed = !self.editor.text.is_empty() || !self.images.is_empty();
+        let running = self
+            .state
+            .as_ref()
+            .is_some_and(|s| s.active_run().is_some());
+        match Esc::of(again, typed, running) {
+            Esc::Stop => self.command("stop"),
+            Esc::Clear => {
+                self.editor.clear();
+                self.images.clear();
             }
-        } else if again {
-            self.editor.clear();
-            self.images.clear();
-        } else {
-            self.note(Escape::NOTE, false);
-            self.note_until = Some(tokio::time::Instant::now() + Escape::AGAIN);
+            Esc::Note => {
+                self.note(Escape::NOTE, false);
+                self.note_until = Some(tokio::time::Instant::now() + Escape::AGAIN);
+            }
+            Esc::Nothing => {}
         }
     }
 
@@ -1635,7 +1655,7 @@ pub async fn run(thread: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Editor, Escape, edit, wrap};
+    use super::{Editor, Esc, Escape, edit, wrap};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) -> bool {
@@ -1803,6 +1823,25 @@ mod tests {
         assert!(escape.again(&esc));
         escape.again(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(!escape.again(&esc), "a key in between starts over");
+    }
+
+    #[test]
+    fn one_esc_stops_the_run_and_two_clear() {
+        assert_eq!(
+            Esc::of(false, true, true),
+            Esc::Stop,
+            "with something typed too"
+        );
+        assert_eq!(Esc::of(false, false, true), Esc::Stop);
+        assert_eq!(Esc::of(true, true, true), Esc::Clear);
+        assert_eq!(
+            Esc::of(true, false, true),
+            Esc::Nothing,
+            "the third after a clear"
+        );
+        assert_eq!(Esc::of(false, true, false), Esc::Note);
+        assert_eq!(Esc::of(true, true, false), Esc::Clear);
+        assert_eq!(Esc::of(false, false, false), Esc::Nothing);
     }
 
     #[test]
