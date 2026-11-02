@@ -2,9 +2,10 @@
 //! setting at `pane`, either of them in a pane of its own (`Role`). The conversation is
 //! plain terminal output, so Rex's scrollback, find, selection and links work on it. Finished
 //! blocks print once and stay. The blocks of a running turn form a live tail at the bottom
-//! that redraws in place until they finish. It prints in a scroll region over Reply's rows, so
-//! what scrolls off its top goes into the scrollback and Reply stays put at the bottom, on a
-//! phone as on a Mac.
+//! that redraws in place until they finish. It prints in the rows over Reply's, which a
+//! scroll region holds. When it needs to scroll, it clears Reply's rows and scrolls the whole
+//! screen instead, because the terminal moves text, not pictures, when a region scrolls; then
+//! Reply draws again at the bottom, on a phone as on a Mac.
 //!
 //! Clicks reach the pane only while Reply has something to click, an approval's or a
 //! question's buttons or the slash menu: while they're on, the wheel and drags would reach the
@@ -713,7 +714,20 @@ impl Pane {
             return margins;
         }
         self.row -= k;
-        format!("\x1b[{old};1H{}{margins}", "\n".repeat(k))
+        // The whole screen scrolls, not the region: pictures stay put when a region scrolls.
+        self.cleared = true;
+        format!("{}{margins}", self.scroll_up(k))
+    }
+
+    /// Scrolls the whole screen up `k` rows, taking pictures with the text, and clears what
+    /// was Reply's. Within margins the terminal moves the text but not its pictures, so the
+    /// conversation never scrolls in its region; Reply draws again after.
+    fn scroll_up(&self, k: usize) -> String {
+        let mut text = format!("\x1b[r\x1b[{};1H{}", self.rows, "\n".repeat(k));
+        if self.region < self.rows {
+            text.push_str(&format!("\x1b[{};1H\x1b[J", self.region + 1));
+        }
+        text
     }
 
     fn new(
@@ -779,7 +793,6 @@ impl Pane {
         }
         let mut text = format!("\x1b[{};1H", self.row);
         let reflow = std::mem::take(&mut self.reflow);
-        self.cleared = false;
         // The first frame too, which frees pictures an earlier process left in this terminal.
         if !self.header || !matches || self.committed.len() > blocks.len() || reflow {
             text.push_str(self.media.free_all());
@@ -886,8 +899,29 @@ impl Pane {
             text.push_str("\r\n");
         }
         self.live_rows = live.len();
-        let lines = text[printed_from..].matches("\r\n").count();
-        self.row = (self.row + lines).min(self.region);
+        let body = text.split_off(printed_from);
+        let lines = body.matches("\r\n").count();
+        if self.row + lines <= self.region {
+            text.push_str(&body);
+            self.row += lines;
+            return text;
+        }
+        // Past the region's bottom: printed over the whole screen, with Reply's rows cleared
+        // first, so what scrolls takes its pictures along, then scrolled up off Reply's rows.
+        // Claude Code prints this way; Codex scrolls a region but never shows pictures.
+        text.push_str("\x1b[r");
+        if self.region < self.rows {
+            text.push_str(&format!("\x1b[{};1H\x1b[J", self.region + 1));
+        }
+        text.push_str(&format!("\x1b[{};1H", self.row));
+        text.push_str(&body);
+        let end = (self.row + lines).min(self.rows);
+        if end > self.region {
+            text.push_str(&self.scroll_up(end - self.region));
+        }
+        text.push_str(&format!("\x1b[1;{}r", self.region));
+        self.row = self.region;
+        self.cleared = true;
         text
     }
 
@@ -1271,6 +1305,7 @@ async fn event_loop(
         if role == Role::Inline {
             if reply || pane.cleared || !text.is_empty() && composer.parked.is_empty() {
                 text.push_str(&composer.draw(pane.region + 1, pane.cleared));
+                pane.cleared = false;
                 reply = false;
             } else if !text.is_empty() {
                 text.push_str(&composer.parked);
@@ -1531,8 +1566,13 @@ mod tests {
         // Full: the cursor sits on the region's last row. Two more rows for Reply scroll the
         // conversation up two, from the old bottom, before the margins move.
         let mut p = pane(20, 20, 2);
-        assert_eq!(p.set_region(18), "\x1b[20;1H\n\n\x1b[1;18r");
+        p.rows = 24;
+        assert_eq!(
+            p.set_region(18),
+            "\x1b[r\x1b[24;1H\n\n\x1b[19;1H\x1b[J\x1b[1;18r"
+        );
         assert_eq!(p.row, 18);
+        assert!(p.cleared);
         assert!(!p.reflow);
         // A short conversation has room: only the margins move.
         let mut p = pane(20, 5, 2);
