@@ -320,7 +320,8 @@ the open question; the app only links the in-process change notification for its
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `t3rex/t3-surface.json`. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
 | `scripts/dev-restart` | A sync of your own build, with its own state, for development. |
-| `docs/` | This file, screenshots (`screens/`) and frames drawn from Rex's screen data (`frames/`). |
+| `docs/` | This file, [usage](usage.md), the README's pictures (`assets/`) and frames drawn from Rex's screen data (`frames/`). |
+| `skills/t3rex/` | The skill that teaches coding agents to install, check and drive t3rex. |
 
 ## Development
 

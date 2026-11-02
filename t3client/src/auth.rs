@@ -177,7 +177,7 @@ pub fn client_label() -> String {
     format!("Rex on {}", device_name(&name))
 }
 
-/// "Mackenzie’s Mac mini" as "Mac mini": a computer name without its owner.
+/// "Alex’s Mac mini" as "Mac mini": a computer name without its owner.
 fn device_name(name: &str) -> &str {
     ["’s ", "'s "]
         .iter()
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn the_client_names_the_device_not_its_owner() {
-        assert_eq!(device_name("Mackenzie’s Mac mini"), "Mac mini");
+        assert_eq!(device_name("Alex’s Mac mini"), "Mac mini");
         assert_eq!(device_name("Kim's MacBook Air"), "MacBook Air");
         assert_eq!(device_name("studio"), "studio");
     }

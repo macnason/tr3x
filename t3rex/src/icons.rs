@@ -444,8 +444,8 @@ mod tests {
     #[test]
     fn monograms_match_t3() {
         assert_eq!(monogram("t3rex"), "T3");
-        assert_eq!(monogram("MacStack"), "MK");
-        assert_eq!(monogram("Up Bank web"), "UW");
+        assert_eq!(monogram("Notebook"), "NK");
+        assert_eq!(monogram("Acme storefront web"), "AW");
         assert_eq!(monogram("  "), "PR");
     }
 
