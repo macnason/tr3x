@@ -80,7 +80,6 @@ pub struct MachineShell<'a> {
 pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want> {
     let mut threads = Vec::new();
     let mut roots: HashMap<(&str, &str), &str> = HashMap::new();
-    let mut names: HashMap<(&str, &str), &str> = HashMap::new();
     let mut caps = Capabilities::default();
     let mut by_env: HashMap<&str, &MachineShell> = HashMap::new();
     for m in shells {
@@ -90,9 +89,6 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
         for p in &m.shell.projects {
             if let (Some(id), Some(root)) = (p["id"].as_str(), p["workspaceRoot"].as_str()) {
                 roots.insert((m.env, id), root);
-            }
-            if let (Some(id), Some(name)) = (p["id"].as_str(), p["title"].as_str()) {
-                names.insert((m.env, id), name);
             }
         }
         for t in &m.shell.threads {
@@ -113,16 +109,6 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             .filter(|dir| m.local && std::path::Path::new(dir).is_dir())
             .map(str::to_string);
         let title = thread["title"].as_str().unwrap_or("Untitled");
-        // The project leads, short, so the sidebar says where a thread is from. A subagent
-        // sits under its parent, which already says.
-        let project = thread["projectId"]
-            .as_str()
-            .and_then(|p| names.get(&(m.env, p)))
-            .filter(|_| !child);
-        let title = match project {
-            Some(p) => format!("{} · {title}", project_tag(p)),
-            None => title.to_string(),
-        };
         let title = match glyph(t3client::inbox::status_label(thread, now)) {
             Some(glyph) => format!("{glyph} {title}"),
             None => title.to_string(),
@@ -250,13 +236,6 @@ pub fn decorate(title: &str, badge: Option<&str>, offline: bool) -> String {
     }
     clean(title, 120 - suffix.chars().count()) + &suffix
 }
-
-/// A project's name at the front of a label: short enough to leave room for the title.
-pub fn project_tag(name: &str) -> String {
-    clean(name, PROJECT_MAX)
-}
-
-const PROJECT_MAX: usize = 12;
 
 /// `label` with the offline mark, or without it.
 fn marked(label: &str, offline: bool) -> String {
@@ -1631,8 +1610,6 @@ mod tests {
         );
         let long = decorate(&"x".repeat(300), Some("studio"), true);
         assert!(long.chars().count() <= 120 && long.ends_with("· studio (offline)"));
-        assert_eq!(project_tag("t3rex"), "t3rex");
-        assert_eq!(project_tag("a-very-long-project-name"), "a-very-long…");
         assert_eq!(marked("A (offline)", false), "A");
         assert_eq!(marked("A (offline)", true), "A (offline)");
     }
@@ -1842,7 +1819,6 @@ mod tests {
                 thread("a", json!({"createdAt": "2026-10-02T00:00:00.000Z"})),
                 thread("x", json!({"pendingRuntimeRequest": {"kind": "command"}})),
             ],
-            projects: vec![json!({"id": "p", "title": "dotfiles"})],
             ..ShellState::default()
         };
         let wants = wanted(
@@ -1858,11 +1834,11 @@ mod tests {
         assert!(keys.contains(&"h/a".to_string()) && keys.contains(&"o/a".to_string()));
         let label = |key: &str| wants.iter().find(|w| w.key() == key).unwrap().label.clone();
         assert_eq!(label("h/a"), "a");
-        assert_eq!(label("o/a"), "dotfiles · a · studio");
+        assert_eq!(label("o/a"), "a · studio");
         assert_eq!(
             label("o/x"),
-            "● dotfiles · x · studio",
-            "an approval's mark leads the label, then the project"
+            "● x · studio",
+            "an approval's mark leads the label"
         );
     }
 

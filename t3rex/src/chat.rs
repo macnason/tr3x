@@ -611,10 +611,11 @@ fn within(text: &str, max: usize) -> String {
     out
 }
 
-/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it. `msg` says what the
-/// thread is waiting on you for, when it is, else the status word; `title` names the thread.
-/// Both are cut to the protocol's limits: 2048 and 192 bytes.
-fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String {
+/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it under the window's label,
+/// which already names the thread. `msg` says what the thread is waiting on you for, when it
+/// is, else the status word and the project; `title` is the project, for when there's no
+/// word. Both are cut to the protocol's limits: 2048 and 192 bytes.
+fn status_sequence(word: Option<&str>, ask: Option<&str>, project: Option<&str>) -> String {
     let (state, extra) = match word {
         Some("Approval") => ("blocked", ":kind=permission"),
         Some("Input") => ("blocked", ":kind=question"),
@@ -625,19 +626,26 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String
     };
     let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut seq = format!("\x1b]7501;state={state}{extra}:app=t3code");
-    let title = within(title, 192);
+    let title = within(project.unwrap_or_default(), 192);
     if !title.is_empty() {
         seq.push_str(&format!(":title={}", b64(&title)));
     }
-    let msg = match (state, ask) {
-        ("blocked", Some(ask)) => within(ask, 2048),
-        _ => word.map(str::to_string).unwrap_or_default(),
+    let msg = match (state, ask, word, project) {
+        ("blocked", Some(ask), _, _) => within(ask, 2048),
+        (_, _, Some(word), Some(project)) => within(&format!("{word} · {project}"), 2048),
+        (_, _, word, _) => word.map(str::to_string).unwrap_or_default(),
     };
     if !msg.is_empty() {
         seq.push_str(&format!(":msg={}", b64(&msg)));
     }
     seq.push_str("\x1b\\");
     seq
+}
+
+/// The name of the project `thread` belongs to.
+fn project_name<'a>(shell: &'a ShellState, thread: &Value) -> Option<&'a str> {
+    let id = thread["projectId"].as_str()?;
+    shell.projects.iter().find(|p| p["id"] == id)?["title"].as_str()
 }
 
 /// What a pane says while its machine is out of reach: that it is, or that it needs pairing.
@@ -918,12 +926,17 @@ impl Pane {
         text
     }
 
-    fn set_status(&mut self, thread: Option<&Value>, state: Option<&ThreadState>) {
+    fn set_status(
+        &mut self,
+        shell: &ShellState,
+        thread: Option<&Value>,
+        state: Option<&ThreadState>,
+    ) {
         let Some(thread) = thread else { return };
         let word = t3client::inbox::status_label(thread, t3::now_ms());
-        let title = one_line(thread["title"].as_str().unwrap_or(""));
+        let project = project_name(shell, thread).map(one_line);
         let ask = state.and_then(crate::ask::line);
-        let seq = status_sequence(word, ask.as_deref(), &title);
+        let seq = status_sequence(word, ask.as_deref(), project.as_deref());
         if seq != self.status {
             out(&seq);
             self.status = seq;
@@ -978,9 +991,10 @@ pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     // Clear what the login printed, and ask for focus reports and bracketed paste. Paste
     // events too, where the filter can take the clipboard's replies.
     let clipboard = crate::scheme::clipboard();
-    // Reply alone keeps nothing to scroll back to, so it takes the alternate screen.
+    // Reply alone keeps nothing to scroll back to, so it takes the alternate screen. Its
+    // title is its job: the window's label above already names the thread and project.
     if role == Role::Reply {
-        out("\x1b[?1049h");
+        out("\x1b]2;Reply\x07\x1b[?1049h");
     }
     out("\x1b[H\x1b[2J\x1b[3J\x1b[?1004h\x1b[?2004h");
     if clipboard.is_some() {
@@ -1080,7 +1094,7 @@ async fn event_loop(
                 shell.apply(&item);
                 if role != Role::Reply {
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
-                    pane.set_status(thread, composer.state.as_ref());
+                    pane.set_status(&shell, thread, composer.state.as_ref());
                 }
             },
             Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
@@ -1238,12 +1252,8 @@ async fn event_loop(
         dirty |= pane.reflow;
         if dirty && let Some(s) = composer.state.as_ref() {
             let thread = t3client::inbox::find_thread(&shell, thread_id);
-            let project = thread
-                .and_then(|t| t["projectId"].as_str())
-                .and_then(|p| shell.projects.iter().find(|x| x["id"] == p))
-                .and_then(|p| p["title"].as_str());
-            pane.set_title(s, project);
-            pane.set_status(thread, Some(s));
+            pane.set_title(s, thread.and_then(|t| project_name(&shell, t)));
+            pane.set_status(&shell, thread, Some(s));
             text.push_str(&pane.draw(s, thread));
             dirty = false;
         }
@@ -1420,34 +1430,46 @@ mod tests {
     #[test]
     fn status_maps_to_rex_states() {
         assert!(
-            status_sequence(Some("Approval"), None, "t").contains("state=blocked:kind=permission")
+            status_sequence(Some("Approval"), None, Some("t"))
+                .contains("state=blocked:kind=permission")
         );
-        assert!(status_sequence(Some("Input"), None, "t").contains("state=blocked:kind=question"));
-        assert!(status_sequence(Some("Working"), None, "t").contains("state=working"));
-        assert!(status_sequence(Some("Done"), None, "t").contains("state=done"));
-        assert!(status_sequence(None, None, "t").contains("state=idle"));
+        assert!(
+            status_sequence(Some("Input"), None, Some("t")).contains("state=blocked:kind=question")
+        );
+        assert!(status_sequence(Some("Working"), None, Some("t")).contains("state=working"));
+        assert!(status_sequence(Some("Done"), None, Some("t")).contains("state=done"));
+        assert!(status_sequence(None, None, Some("t")).contains("state=idle"));
     }
 
     #[test]
     fn status_says_what_is_asked_within_the_limits() {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
-        let seq = status_sequence(Some("Approval"), Some("Run pnpm test?"), "Fix the build");
+        let seq = status_sequence(Some("Approval"), Some("Run pnpm test?"), Some("t3rex"));
         assert_eq!(
             seq,
             format!(
                 "\x1b]7501;state=blocked:kind=permission:app=t3code:title={}:msg={}\x1b\\",
-                b64("Fix the build"),
+                b64("t3rex"),
                 b64("Run pnpm test?")
             )
         );
-        // Not blocked: the status word, whatever was asked before.
+        // Not blocked: the status word and the project, whatever was asked before.
         assert!(
-            status_sequence(Some("Working"), Some("x"), "t")
-                .ends_with(&format!(":msg={}\x1b\\", b64("Working")))
+            status_sequence(Some("Working"), Some("x"), Some("t3rex"))
+                .ends_with(&format!(":msg={}\x1b\\", b64("Working · t3rex")))
+        );
+        // Idle: the project alone, as the title; no project, the word alone.
+        assert!(
+            status_sequence(None, None, Some("t3rex"))
+                .ends_with(&format!(":title={}\x1b\\", b64("t3rex")))
+        );
+        assert!(
+            status_sequence(Some("Done"), None, None)
+                .ends_with(&format!(":app=t3code:msg={}\x1b\\", b64("Done")))
         );
         // Over the limits: cut on a character, never mid-way through one.
         let long = "é".repeat(2000);
-        let seq = status_sequence(Some("Input"), Some(&long), &long);
+        let seq = status_sequence(Some("Input"), Some(&long), Some(&long));
         let field = |key: &str| {
             let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
             let end = seq[at..].find([':', '\x1b']).unwrap() + at;
