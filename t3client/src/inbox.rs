@@ -633,6 +633,12 @@ pub fn status_label(thread: &Value, now: i64) -> Option<&'static str> {
     status_word(thread, now).map(Word::label)
 }
 
+/// The latest run finished and the thread is at rest: the next move is the user's, seen or not.
+/// False before the first run, and for a run that was stopped or failed.
+pub fn finished(thread: &Value) -> bool {
+    activity(thread).is_none() && latest_run(thread).is_some_and(|run| run.completed)
+}
+
 /// What T3's sidebar would ask of the user for this thread: `user_input` for a question,
 /// another request kind for an approval, or None.
 pub fn pending_kind(thread: &Value) -> Option<&str> {
@@ -746,6 +752,23 @@ mod tests {
             thread(id),
             json!({"snoozedUntil": "2026-10-08T13:00:00.000Z", "snoozedAt": "2026-10-08T11:00:00.000Z"}),
         )
+    }
+
+    #[test]
+    fn finished_means_the_last_run_completed_and_nothing_is_going_on() {
+        let run = |status: &str| with(thread("t"), json!({"latestRunId": "r", "status": status}));
+        assert!(!super::finished(&thread("t")));
+        assert!(super::finished(&run("completed")));
+        // Idle with a run is Waiting: background work will wake the agent.
+        assert!(!super::finished(&run("idle")));
+        assert!(!super::finished(&run("running")));
+        assert!(!super::finished(&run("interrupted")));
+        assert!(!super::finished(&run("failed")));
+        let asks = with(
+            run("completed"),
+            json!({"pendingRuntimeRequest": {"kind": "user_input"}}),
+        );
+        assert!(!super::finished(&asks));
     }
 
     #[test]
