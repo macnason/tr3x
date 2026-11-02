@@ -164,10 +164,11 @@ async fn run(key: &str, create: bool) -> Result<()> {
     out(&format!(
         "\r\n {BOLD}{LABEL}{RESET}\r\n {DIM}{branch}{RESET}\r\n\r\n"
     ));
-    let open = status["pr"]["url"]
-        .as_str()
-        .filter(|_| status["pr"]["state"] == "open");
-    let url = match (open, create) {
+    // The PR linked to the thread, open or not; else the branch's.
+    let known = linked(found)
+        .and_then(|pr| pr["url"].as_str())
+        .or(status["pr"]["url"].as_str());
+    let url = match (known, create) {
         (Some(url), false) => url.to_string(),
         (_, false) => {
             out(&format!(
@@ -342,6 +343,20 @@ async fn confirm() -> bool {
     yes
 }
 
+/// The pull request a thread is linked to: an open one, else the one linked last.
+fn linked(thread: &Value) -> Option<&Value> {
+    let prs = thread["pullRequests"].as_array()?;
+    prs.iter()
+        .filter(|pr| pr["snapshot"]["state"] == "open")
+        .chain(prs.iter())
+        .max_by_key(|pr| {
+            (
+                pr["snapshot"]["state"] == "open",
+                pr["linkedAt"].as_str().unwrap_or_default(),
+            )
+        })
+}
+
 /// Holds the pane open on what it says until a key, or a minute.
 async fn wait_key() {
     let _ = crossterm::terminal::enable_raw_mode();
@@ -360,6 +375,29 @@ async fn wait_key() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_open_pull_request_else_the_last_linked() {
+        let pr = |n: u64, state: &str, at: &str| json!({"number": n, "linkedAt": at, "snapshot": {"state": state}});
+        let thread = json!({"pullRequests": [
+            pr(1, "merged", "2026-11-01T00:00:00Z"),
+            pr(2, "open", "2026-10-01T00:00:00Z"),
+            pr(3, "closed", "2026-11-02T00:00:00Z"),
+        ]});
+        assert_eq!(
+            linked(&thread).map(|pr| pr["number"].clone()),
+            Some(json!(2))
+        );
+        let thread = json!({"pullRequests": [
+            pr(1, "merged", "2026-11-01T00:00:00Z"),
+            pr(3, "merged", "2026-11-02T00:00:00Z"),
+        ]});
+        assert_eq!(
+            linked(&thread).map(|pr| pr["number"].clone()),
+            Some(json!(3))
+        );
+        assert!(linked(&json!({})).is_none());
+    }
 
     #[test]
     fn share_of_a_pane_in_a_split() {
