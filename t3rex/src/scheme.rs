@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio::sync::{mpsc, watch};
 
+use crate::term::out;
+
 const UNKNOWN: u8 = 0;
 const DARK: u8 = 1;
 const LIGHT: u8 = 2;
@@ -179,13 +181,6 @@ pub fn stop() {
         libc::tcsetattr(0, libc::TCSANOW, &saved);
         libc::close(real);
     }
-}
-
-fn out(text: &str) {
-    use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
 }
 
 unsafe fn start() -> std::io::Result<()> {

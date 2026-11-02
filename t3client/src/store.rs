@@ -170,6 +170,12 @@ struct Credentials {
     machines: BTreeMap<String, Credential>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often this test's thread has read the credentials file.
+    pub(crate) static CREDENTIAL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// t3rex's machine files in one state directory.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -216,6 +222,8 @@ impl Store {
     }
 
     fn credentials(&self) -> Credentials {
+        #[cfg(test)]
+        CREDENTIAL_READS.with(|n| n.set(n.get() + 1));
         std::fs::read(self.credentials_path())
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -224,6 +232,15 @@ impl Store {
 
     pub fn credential(&self, id: &str) -> Option<Credential> {
         self.credentials().machines.remove(id)
+    }
+
+    /// How many of the machines `ids` hold a token, from one read of the credentials file.
+    /// Tokens for machines not in `ids` don't count.
+    pub fn count_credentials<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> usize {
+        let all = self.credentials();
+        ids.into_iter()
+            .filter(|id| all.machines.contains_key(*id))
+            .count()
     }
 
     /// Saves `credential` for machine `id`. Callers hold the pairing lock.
@@ -358,5 +375,37 @@ mod tests {
         assert!(!format!("{credential:?}").contains("secret"));
         assert!(store.remove_credential("env-a").unwrap());
         assert_eq!(store.credential("env-a"), None);
+    }
+
+    #[tokio::test]
+    async fn paired_machines_are_counted_from_one_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let ids = ["a", "b", "c"];
+        // No file, then a file that isn't one: nobody is paired, and nothing breaks.
+        assert_eq!(store.count_credentials(ids), 0);
+        std::fs::write(store.credentials_path(), b"{not json").unwrap();
+        assert_eq!(store.count_credentials(ids), 0);
+        assert_eq!(store.count_credentials([]), 0);
+
+        let _lock = store.lock().await.unwrap();
+        let credential = |token: &str| Credential {
+            token: token.into(),
+            scopes: Vec::new(),
+            issued_at: 1,
+            expires_at: 2,
+        };
+        for id in ["a", "c", "not-in-the-hub"] {
+            store.save_credential(id, credential(id)).unwrap();
+        }
+        CREDENTIAL_READS.with(|n| n.set(0));
+        // A token for a machine that isn't asked about doesn't count.
+        assert_eq!(store.count_credentials(ids), 2);
+        assert_eq!(CREDENTIAL_READS.with(std::cell::Cell::get), 1);
+        // Not remembered: the next count sees a machine forgotten, and one paired.
+        store.remove_credential("a").unwrap();
+        store.save_credential("b", credential("b")).unwrap();
+        assert_eq!(store.count_credentials(ids), 2);
+        assert_eq!(store.count_credentials(["a"]), 0);
     }
 }

@@ -29,7 +29,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - State lives in `~/.local/state/t3rex/state.json`: the session id, the window of each thread,
   keyed `<environment>/<thread>`, and threads hidden by a closed window. t3rex never touches a
   session or window it didn't make. A state file from before machines moves to this Mac's
-  environment as sync starts.
+  environment as sync starts. Sync writes it only when something changed; a failed write is
+  tried again on the next pass.
 
 ## Machines
 
@@ -329,7 +330,7 @@ cargo clippy --release --all-targets
 T3REX_STATE_DIR=/tmp/t3rex-dev scripts/dev-restart   # a sync with its own state, not the installed one
 ```
 
-`dev-restart` names its session **t3x-dev** (`T3REX_SESSION_LABEL`) and starts its panes with
+`dev-restart` stops at a failed build, before it closes or deletes anything. It names its session **t3x-dev** (`T3REX_SESSION_LABEL`) and starts its panes with
 `--passive` (`T3REX_PASSIVE`), so they never mark a thread visited beside an installed sync.
 Pair machines into its state with `T3REX_STATE_DIR=… t3rex pair`. `t3rex rpc --env studio
 <method> '<json>'` calls one machine.

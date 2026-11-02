@@ -11,18 +11,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use t3client::env::WatchEvent;
-use t3client::hub::{Hub, ThreadRef};
+use t3client::env::{Env, WatchEvent};
+use t3client::hub::{Forwarder, Hub, ThreadRef};
 use t3client::inbox::{Capabilities, Inbox, Place};
 use t3client::projection::ShellState;
 
 use crate::machines::Sessions;
 use crate::rex::{Rex, lua_str};
-use crate::state::{Group, Next, State, Window};
+use crate::state::{Disk, Group, Next, State, Window};
 use crate::t3;
 
 pub const SESSION_LABEL: &str = "T3 Code";
@@ -757,6 +758,8 @@ pub struct Syncer {
     pub rex: Rex,
     pub exe: PathBuf,
     pub state: State,
+    /// The state file, written only when `state` differs from what it holds.
+    pub disk: Disk,
     /// Put the merged session, or this Mac's, first in Rex's list when it's made.
     pub first: bool,
     /// The `rex do` scripts that turn a New Tab in each session into a new thread, by session.
@@ -779,6 +782,11 @@ pub struct SessionSpec {
 }
 
 impl Syncer {
+    /// Makes the state file hold `state`, writing only if it doesn't already.
+    pub fn persist(&mut self) -> Result<()> {
+        self.disk.save(&self.state).map(drop)
+    }
+
     /// The group's session, made if it is gone.
     async fn session(&mut self, spec: &SessionSpec) -> Result<String> {
         let sessions = self.rex.sessions().await?;
@@ -796,7 +804,7 @@ impl Syncer {
             session_id: Some(id.clone()),
             ..Group::default()
         };
-        self.state.save()?;
+        self.persist()?;
         if self.first
             && spec.first
             && let Err(e) = self.rex.move_session(&id, 1).await
@@ -843,7 +851,7 @@ impl Syncer {
         let Some(group) = self.state.groups.remove(key) else {
             return Ok(());
         };
-        self.state.save()?;
+        self.persist()?;
         if let Some(id) = group.session_id {
             self.watchers.remove(&id);
             let args = json!({ "session_id": id }).to_string();
@@ -899,7 +907,7 @@ impl Syncer {
         plan.rebuild = reshape(windows, group, wants, own_pane);
         plan.rebuild.retain(|r| !closing.contains(&r.window));
         if plan.is_empty() {
-            self.state.save()?;
+            self.persist()?;
             return Ok(false);
         }
         let result = self
@@ -923,7 +931,7 @@ impl Syncer {
         for error in result["errors"].as_array().into_iter().flatten() {
             eprintln!("t3rex: rex: {error}");
         }
-        self.state.save()?;
+        self.persist()?;
         Ok(true)
     }
 }
@@ -944,6 +952,9 @@ struct Track {
     configured: bool,
     /// When to subscribe again after T3 refused the subscription.
     retry_at: Option<Instant>,
+    /// The machine's shell subscription. The track owns it: forgetting the machine, or sync
+    /// ending, drops the track and with it the subscription.
+    forwarder: Option<Forwarder>,
 }
 
 impl Track {
@@ -1100,6 +1111,36 @@ fn machines_stamp(hub: &Hub) -> Option<std::time::SystemTime> {
         .ok()
 }
 
+type Shells = tokio::sync::mpsc::UnboundedSender<(String, WatchEvent)>;
+
+/// Gives each of `envs` not followed yet a track and a shell subscription, and lets go of the
+/// tracks of machines no longer among them, subscriptions with them. A machine that's only out
+/// of reach stays among `envs` and keeps reconnecting on its own. Returns the names of the
+/// machines newly followed.
+fn follow_machines(
+    tracks: &mut BTreeMap<String, Track>,
+    envs: &[Arc<Env>],
+    tx: &Shells,
+    now: Instant,
+) -> Vec<String> {
+    let mut followed = Vec::new();
+    for env in envs {
+        if !tracks.contains_key(env.id()) {
+            followed.push(env.name().to_string());
+            tracks.insert(
+                env.id().to_string(),
+                Track {
+                    down_since: Some(now),
+                    forwarder: Some(Hub::forward(env.clone(), tx.clone())),
+                    ..Track::default()
+                },
+            );
+        }
+    }
+    tracks.retain(|id, _| envs.iter().any(|e| e.id() == id));
+    followed
+}
+
 /// Every machine's shell, reconciling the session after each burst of changes and every few
 /// seconds, which picks up snoozes that end, windows closed in Rex and machines that go quiet.
 /// Each machine connects and reconnects on its own. Returns only when it fails.
@@ -1115,34 +1156,29 @@ async fn follow(
             "T3 Code isn't set up on this Mac, and Rex isn't paired with another machine"
         );
     }
-    let mut state = State::load();
+    let found = State::load();
+    let mut state = found.clone();
     if !home.is_empty() {
         state.migrate(&home);
-        state.save()?;
     }
     let mut syncer = Syncer {
         rex: Rex::find(),
         exe: crate::icons::real_exe(),
         state,
+        disk: Disk::new(found),
         first,
         watchers: HashMap::new(),
         configs: HashMap::new(),
         closed: Vec::new(),
     };
+    if !home.is_empty() {
+        syncer.persist()?;
+    }
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     let (config_tx, mut configs) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
     let mut tracks: BTreeMap<String, Track> = BTreeMap::new();
     let started = Instant::now();
-    for env in hub.envs() {
-        Hub::forward(env.clone(), tx.clone());
-        tracks.insert(
-            env.id().to_string(),
-            Track {
-                down_since: Some(started),
-                ..Track::default()
-            },
-        );
-    }
+    follow_machines(&mut tracks, hub.envs(), &tx, started);
     let mut stamp = machines_stamp(&hub);
     let mut inbox = Inbox::default();
     let mut dirty = false;
@@ -1220,20 +1256,9 @@ async fn follow(
         if machines_stamp(&hub) != stamp {
             stamp = machines_stamp(&hub);
             hub = t3::hub();
-            for env in hub.envs() {
-                if !tracks.contains_key(env.id()) {
-                    eprintln!("t3rex: following {}", env.name());
-                    Hub::forward(env.clone(), tx.clone());
-                    tracks.insert(
-                        env.id().to_string(),
-                        Track {
-                            down_since: Some(now),
-                            ..Track::default()
-                        },
-                    );
-                }
+            for name in follow_machines(&mut tracks, hub.envs(), &tx, now) {
+                eprintln!("t3rex: following {name}");
             }
-            tracks.retain(|id, _| hub.envs().iter().any(|e| e.id() == id));
         }
         for env in hub.envs() {
             let Some(track) = tracks.get_mut(env.id()) else {
@@ -1241,7 +1266,8 @@ async fn follow(
             };
             if track.retry_at.is_some_and(|at| at <= now) {
                 track.retry_at = None;
-                Hub::forward(env.clone(), tx.clone());
+                // The refused subscription is over; this replaces it.
+                track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
             }
             if track.shell.synchronized && !track.configured {
                 track.configured = true;
@@ -1400,7 +1426,7 @@ async fn follow(
         });
         if next != syncer.state.next {
             syncer.state.next = next;
-            syncer.state.save()?;
+            syncer.persist()?;
         }
         // A plain settle, never stopping a run: a thread that started again since stays hidden
         // until it changes.
@@ -1867,5 +1893,278 @@ mod tests {
         assert_eq!(label("  fix\tthe\nthing "), "fix the thing");
         assert_eq!(label(""), "Untitled");
         assert_eq!(label(&"x".repeat(300)).chars().count(), 120);
+    }
+
+    /// A fake T3 that holds every connection open and counts them, whole and still open.
+    struct Fake {
+        origin: String,
+        total: Arc<std::sync::atomic::AtomicUsize>,
+        live: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Fake {
+        /// Answers nothing: a machine that is subscribing but hasn't been heard from. With
+        /// `hang_up`, closes each connection as soon as it opens: a machine that's out of reach.
+        async fn start(hang_up: bool) -> Fake {
+            use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+            use tokio::io::AsyncReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let (total, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (t, l) = (total.clone(), live.clone());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    t.fetch_add(1, SeqCst);
+                    if hang_up {
+                        continue;
+                    }
+                    l.fetch_add(1, SeqCst);
+                    let l = l.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+                        l.fetch_sub(1, SeqCst);
+                    });
+                }
+            });
+            Fake {
+                origin,
+                total,
+                live,
+            }
+        }
+
+        fn total(&self) -> usize {
+            self.total.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Waits until `count` connections are open, and fails if that doesn't happen.
+        async fn live(&self, count: usize) {
+            for _ in 0..100 {
+                if self.live.load(std::sync::atomic::Ordering::SeqCst) == count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!(
+                "{} open connections, wanted {count}",
+                self.live.load(std::sync::atomic::Ordering::SeqCst)
+            );
+        }
+    }
+
+    fn env_at(id: &str, origin: &str) -> Arc<Env> {
+        use t3client::store::{Machine, Store, Via};
+        let machine = Machine {
+            id: id.into(),
+            label: id.into(),
+            alias: None,
+            origins: vec![origin.into()],
+            ssh: None,
+            via: Via::Link,
+            version: String::new(),
+        };
+        Arc::new(Env::new(Store::new(std::env::temp_dir()), machine))
+    }
+
+    /// Each machine gets one subscription for as long as it's followed. Forgetting it ends that
+    /// one alone, pairing it again makes one new one rather than a second beside the old, and a
+    /// machine that is merely out of reach keeps reconnecting on its own.
+    #[tokio::test]
+    async fn a_followed_machine_has_one_subscription_until_it_is_forgotten() {
+        let (a, b, c) = (
+            Fake::start(false).await,
+            Fake::start(false).await,
+            Fake::start(true).await,
+        );
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let mut tracks = BTreeMap::new();
+        let (env_a, env_b, env_c) = (
+            env_at("a", &a.origin),
+            env_at("b", &b.origin),
+            env_at("c", &c.origin),
+        );
+
+        let followed = follow_machines(
+            &mut tracks,
+            &[env_a.clone(), env_b.clone(), env_c.clone()],
+            &tx,
+            Instant::now(),
+        );
+        assert_eq!(followed, ["a", "b", "c"]);
+        a.live(1).await;
+        b.live(1).await;
+        // Out of reach: it hangs up on each try, and sync tries again.
+        for _ in 0..100 {
+            if c.total() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(c.total() >= 2, "{} tries", c.total());
+
+        // Nothing changed: nobody subscribes twice.
+        let envs = [env_a.clone(), env_b, env_c.clone()];
+        assert!(follow_machines(&mut tracks, &envs, &tx, Instant::now()).is_empty());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!((a.total(), b.total()), (1, 1));
+
+        // b is forgotten: its subscription goes, the others stay.
+        let envs = [env_a.clone(), env_c.clone()];
+        assert!(follow_machines(&mut tracks, &envs, &tx, Instant::now()).is_empty());
+        assert_eq!(tracks.keys().collect::<Vec<_>>(), ["a", "c"]);
+        b.live(0).await;
+        a.live(1).await;
+
+        // b is paired again: one subscription, though the old one's machine had the same id.
+        let envs = [env_a, env_at("b", &b.origin), env_c];
+        assert_eq!(
+            follow_machines(&mut tracks, &envs, &tx, Instant::now()),
+            ["b"]
+        );
+        b.live(1).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            (b.total(), b.live.load(std::sync::atomic::Ordering::SeqCst)),
+            (2, 1)
+        );
+        assert_eq!(a.total(), 1);
+
+        // Sync ends: every subscription with it.
+        drop(tracks);
+        a.live(0).await;
+        b.live(0).await;
+    }
+
+    /// A Rex that answers `ls` and `session inspect` from files and records what it was asked.
+    struct FakeRex {
+        dir: tempfile::TempDir,
+    }
+
+    impl FakeRex {
+        fn new(windows: Value) -> FakeRex {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("rex");
+            std::fs::write(
+                &bin,
+                "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$*\" >> \"$d/calls\"\n\
+                 case \"$2\" in\n ls) cat \"$d/ls.json\";;\n session) cat \"$d/inspect.json\";;\n \
+                 do) cat > /dev/null;;\nesac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let rex = FakeRex { dir };
+            std::fs::write(
+                rex.dir.path().join("ls.json"),
+                json!({"sessions": [{"session_id": "s1", "label": "T3 Code"}]}).to_string(),
+            )
+            .unwrap();
+            rex.show(windows);
+            rex
+        }
+
+        /// What `session inspect` shows from now on.
+        fn show(&self, windows: Value) {
+            let view = json!({"session_id": "s1", "windows": windows});
+            std::fs::write(self.dir.path().join("inspect.json"), view.to_string()).unwrap();
+        }
+
+        fn bin(&self) -> Rex {
+            Rex {
+                bin: self.dir.path().join("rex"),
+            }
+        }
+
+        /// The window of `tag`: its conversation, and Reply in a pane of its own if that's the
+        /// setting, so t3rex has nothing to reshape.
+        fn window(id: &str, tag: &str) -> Value {
+            let mut blocks = vec![json!({"block_id": "b1", "label": format!("t3:{tag}")})];
+            if crate::reply::own_pane() {
+                blocks.push(json!({"block_id": "b2", "label": "Reply"}));
+            }
+            json!({"window_id": id, "label": "A", "layers": [{"blocks": blocks}]})
+        }
+    }
+
+    /// Reconciles session `s1` once, wanting thread `e/a`.
+    async fn reconcile_once(syncer: &mut Syncer) -> bool {
+        let a = want("e/a", "A");
+        let known: HashSet<String> = [a.key()].into();
+        let spec = SessionSpec {
+            key: String::new(),
+            label: "T3 Code".into(),
+            env: None,
+            first: false,
+        };
+        syncer
+            .reconcile(&spec, &[a], &known, &["e".to_string()], "e", &|_| {
+                Health::READY
+            })
+            .await
+            .unwrap()
+    }
+
+    fn saved_windows(file: &std::path::Path) -> Vec<String> {
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        on_disk["groups"][""]["windows"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A pass that has nothing to ask Rex for leaves the file alone, but not when it still
+    /// changed what t3rex knows: a window it takes back, or one the user closed.
+    #[tokio::test]
+    async fn a_pass_with_nothing_to_do_writes_only_what_it_learned() {
+        let rex = FakeRex::new(json!([]));
+        let file = rex.dir.path().join("state.json");
+        let mut state = State {
+            version: 2,
+            ..State::default()
+        };
+        state.groups.insert(
+            String::new(),
+            Group {
+                session_id: Some("s1".into()),
+                ..Group::default()
+            },
+        );
+        let mut syncer = Syncer {
+            rex: rex.bin(),
+            exe: PathBuf::from("t3rex"),
+            disk: Disk::at(file.clone(), State::default()),
+            state,
+            first: false,
+            watchers: HashMap::new(),
+            configs: HashMap::new(),
+            closed: Vec::new(),
+        };
+        syncer.persist().unwrap();
+        assert!(saved_windows(&file).is_empty());
+
+        // Rex shows a window for the thread that the state doesn't have. The plan is empty, and
+        // the window is taken back and saved all the same.
+        rex.show(json!([FakeRex::window("w9", "e/a")]));
+        assert!(!reconcile_once(&mut syncer).await);
+        assert_eq!(saved_windows(&file), ["e/a"]);
+
+        // The same again: no change, no write.
+        std::fs::write(&file, "untouched").unwrap();
+        assert!(!reconcile_once(&mut syncer).await);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "untouched");
+
+        // The user closes the window: nothing to ask Rex for, and the thread is remembered as
+        // dismissed.
+        rex.show(json!([FakeRex::window("w1", "e/other")]));
+        assert!(!reconcile_once(&mut syncer).await);
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["groups"][""]["dismissed"]["e/a"], "u1");
+        assert_eq!(syncer.closed.len(), 1);
     }
 }

@@ -9,7 +9,6 @@
 //! so a phone looking at the same session never gets it as a window of its own. `q` in sup
 //! closes it.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -21,6 +20,7 @@ use serde_json::{Value, json};
 use crate::chat::{BOLD, DIM, GREEN, RED, RESET};
 use crate::rex::{Rex, lua_str};
 use crate::t3;
+use crate::term::out;
 
 /// The drawer's block label, which finds it again.
 const LABEL: &str = "Pull Request";
@@ -28,12 +28,6 @@ const LABEL: &str = "Pull Request";
 const ROOM: u64 = 140;
 /// The conversation's share of the window beside the drawer.
 const RATIO: f64 = 0.45;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
 
 /// Opens the drawer for `thread` in the window holding `block`, or goes to the one already
 /// open there. `create` makes the pull request first, replacing an open drawer.

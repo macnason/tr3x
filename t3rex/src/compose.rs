@@ -13,7 +13,6 @@
 //! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
 //! over the input; its ✕, or Backspace at the start of the input, takes it off.
 
-use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -34,13 +33,8 @@ use crate::picker::{self, Chip, Settings};
 use crate::picture::{self, Tray};
 use crate::slash::{self, Slash};
 use crate::t3::{self, Lifecycle};
+use crate::term::out;
 use crate::width::ChatWidth;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
 
 #[derive(Default)]
 pub(crate) struct Editor {
@@ -576,14 +570,14 @@ impl Composer {
         Some((chips.collect(), self.usage(self.column.1)))
     }
 
-    /// This thread as the picker and its draft name it.
-    fn draft_key(&self) -> String {
+    /// This thread as the picker, its draft, Open and PR name it: `environment/thread`.
+    fn thread_key(&self) -> String {
         format!("{}/{}", self.client.id(), self.thread_id)
     }
 
     /// Reads the draft the picker may have left. True when it changed.
     pub(crate) fn reload_draft(&mut self) -> bool {
-        let draft = crate::draft::load(&self.draft_key());
+        let draft = crate::draft::load(&self.thread_key());
         let changed = draft != self.draft;
         self.draft = draft;
         changed
@@ -615,7 +609,7 @@ impl Composer {
         if choice.effort.is_some() {
             settings.effort = choice.effort;
         }
-        let key = self.draft_key();
+        let key = self.thread_key();
         let draft = crate::draft::Draft::of(&settings);
         if settings == current {
             crate::draft::clear(&key);
@@ -633,7 +627,7 @@ impl Composer {
         let Ok(session) = std::env::var("REX_SESSION") else {
             return self.note("Open this in Rex to choose a model", true);
         };
-        let thread = format!("{}/{}", self.client.id(), self.thread_id);
+        let thread = self.thread_key();
         self.spawn(async move {
             crate::pick::float(&session, &thread, field).await?;
             Ok(String::new())
@@ -1048,7 +1042,7 @@ impl Composer {
         let steer = matches!(mode, IfBusy::Steer);
         // A model picked while the thread worked rides on the next message that starts a turn.
         // Steering stays on the running turn's model, so the draft waits.
-        let key = self.draft_key();
+        let key = self.thread_key();
         let draft = self.draft.clone().filter(|_| !(busy && steer));
         let plan = match (&draft, self.config.as_ref()) {
             (Some(d), Some(config)) => match d.plan(config, state.thread()) {
@@ -1184,7 +1178,7 @@ impl Composer {
             "open" => {
                 let link =
                     crate::link::thread(self.config.as_ref(), self.client.id(), &self.thread_id);
-                let key = format!("{}/{}", self.client.id(), self.thread_id);
+                let key = self.thread_key();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     let done = if !crate::link::only_here().await {
@@ -1199,7 +1193,7 @@ impl Composer {
                 });
             }
             "pr" if matches!(arg, "" | "create") => {
-                let key = format!("{}/{}", self.client.id(), self.thread_id);
+                let key = self.thread_key();
                 let create = arg == "create";
                 match std::env::var("REX_BLOCK") {
                     Ok(block) => self.spawn(async move {

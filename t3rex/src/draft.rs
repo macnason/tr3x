@@ -76,3 +76,50 @@ pub fn save(thread: &str, draft: &Draft) -> anyhow::Result<()> {
 pub fn clear(thread: &str) {
     let _ = std::fs::remove_file(path(thread));
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// What the picker holds while a thread works, Reply reads back and shows and sends.
+    #[test]
+    fn a_held_choice_comes_back_as_the_next_messages_settings() {
+        let effort = |options: Value| json!({"optionDescriptors": [{"id": "effort", "type": "select", "options": options}]});
+        let config = json!({"providers": [{"instanceId": "c", "enabled": true, "models": [
+            {"slug": "x", "name": "X", "capabilities": effort(json!([{"id": "low"}, {"id": "high"}]))},
+            {"slug": "y", "name": "Y", "capabilities": effort(json!([{"id": "low"}, {"id": "max"}]))}]}]});
+        let running = Settings {
+            instance: "c".into(),
+            model: "x".into(),
+            effort: Some("high".into()),
+            mode: "auto".into(),
+        };
+        // Picked in the picker: a model, then one of its efforts.
+        let mut next = running.clone();
+        next.set_model(&config, "c/y");
+        next.effort = Some("max".into());
+        let held = Draft::of(&next);
+        assert_eq!(held.model, "c/y");
+        let held: Draft = serde_json::from_slice(&serde_json::to_vec(&held).unwrap()).unwrap();
+
+        let mut shown = running.clone();
+        held.over(&config, &mut shown);
+        assert_eq!(
+            shown,
+            Settings {
+                model: "y".into(),
+                effort: Some("max".into()),
+                ..running.clone()
+            }
+        );
+
+        // A model alone keeps no effort the new model can't run.
+        let mut only_model = running.clone();
+        only_model.set_model(&config, "c/y");
+        let mut shown = running;
+        Draft::of(&only_model).over(&config, &mut shown);
+        assert_eq!((shown.model.as_str(), shown.effort), ("y", None));
+    }
+}

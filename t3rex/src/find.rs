@@ -13,7 +13,6 @@
 //! `orchestration.getArchivedShellSnapshot`.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,12 +32,7 @@ use crate::picker::{Item, Menu, MenuKey};
 use crate::rex::Rex;
 use crate::state::State;
 use crate::t3::{self, Lifecycle};
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 /// Where a thread is, as the finder groups them, in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

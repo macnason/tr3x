@@ -16,7 +16,6 @@
 //! sync takes the window as the thread's as soon as T3 reports the thread.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,25 +36,20 @@ use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
 use crate::compose::{Editor, Escape, edit, wrap};
 use crate::icons::{self, Icon, Painter};
 use crate::paste::{self, Got, Image};
+use crate::pick;
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
 use crate::picture::{self, Tray};
 use crate::rex::{Rex, lua_str};
 use crate::slash::{self, Slash};
 use crate::t3;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Field {
     Machine,
     Project,
-    Model,
-    Effort,
-    Access,
+    /// Model, effort or access: the same three a running thread's picker offers.
+    Setting(pick::Field),
     Workspace,
     Branch,
 }
@@ -282,11 +276,11 @@ impl NewThread {
         if self.machines.len() > 1 || !self.candidates.is_empty() {
             out.push(Field::Machine);
         }
-        out.extend([Field::Project, Field::Model]);
+        out.extend([Field::Project, Field::Setting(pick::Field::Model)]);
         if !picker::effort_items(&self.config, &self.settings).is_empty() {
-            out.push(Field::Effort);
+            out.push(Field::Setting(pick::Field::Effort));
         }
-        out.push(Field::Access);
+        out.push(Field::Setting(pick::Field::Access));
         if self.is_repo() {
             out.push(Field::Workspace);
             if self.worktree {
@@ -314,15 +308,7 @@ impl NewThread {
                         .to_string(),
                 )
             }
-            Field::Model => (
-                self.logos.get(&self.settings.instance).cloned(),
-                self.settings.model_label(&self.config),
-            ),
-            Field::Effort => (
-                None,
-                self.settings.effort_label(&self.config).unwrap_or_default(),
-            ),
-            Field::Access => (None, self.settings.mode_label()),
+            Field::Setting(f) => return self.settings.chip(f, &self.config, &self.logos),
             Field::Workspace => (
                 None,
                 if self.worktree {
@@ -387,21 +373,7 @@ impl NewThread {
                     .collect(),
                 Some(self.project.clone()),
             ),
-            Field::Model => (
-                picker::model_items(&self.config, &self.logos),
-                Some(format!(
-                    "{}/{}",
-                    self.settings.instance, self.settings.model
-                )),
-            ),
-            Field::Effort => (
-                picker::effort_items(&self.config, &self.settings),
-                picker::effort_now(&self.config, &self.settings),
-            ),
-            Field::Access => (
-                picker::mode_items(&self.config, &self.settings),
-                Some(self.settings.mode.clone()),
-            ),
+            Field::Setting(f) => self.settings.menu(f, &self.config, &self.logos),
             Field::Workspace => (
                 vec![
                     Item::new("local", "Local"),
@@ -440,9 +412,7 @@ impl NewThread {
             },
             Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
-            Field::Model => self.settings.set_model(&self.config, &id),
-            Field::Effort => self.settings.effort = Some(id),
-            Field::Access => self.settings.mode = id,
+            Field::Setting(f) => self.settings.choose(f, &self.config, id),
             Field::Workspace => self.worktree = id == "worktree",
             Field::Branch => self.base = Some(id),
         }

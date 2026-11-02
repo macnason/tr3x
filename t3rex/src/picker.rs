@@ -2,12 +2,15 @@
 //! ones under T3's composer, and the menu a chip opens, filtered by typing. Both draw into
 //! plain lines; icons come from `icons`.
 
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use t3client::models;
 
 use crate::chat::{BOLD, DIM, RESET, fit};
 use crate::icons::{Icon, Painter};
+use crate::pick::Field;
 
 pub const INVERSE: &str = "\x1b[7m";
 
@@ -400,7 +403,7 @@ impl Settings {
 
     pub fn effort_label(&self, config: &Value) -> Option<String> {
         let d = self.effort_descriptor(config)?;
-        let id = self.effort.clone().or_else(|| default_option(d))?;
+        let id = self.effort_now(config)?;
         Some(
             d["options"]
                 .as_array()
@@ -472,6 +475,57 @@ impl Settings {
             .collect()
     }
 
+    /// The current effort's id, for marking it in the menu.
+    fn effort_now(&self, config: &Value) -> Option<String> {
+        self.effort
+            .clone()
+            .or_else(|| default_option(self.effort_descriptor(config)?))
+    }
+
+    /// A field's chip: the model carries its provider's logo.
+    pub fn chip(&self, field: Field, config: &Value, logos: &HashMap<String, Icon>) -> Chip {
+        match field {
+            Field::Model => Chip {
+                icon: logos.get(&self.instance).cloned(),
+                label: self.model_label(config),
+            },
+            Field::Effort => Chip {
+                icon: None,
+                label: self.effort_label(config).unwrap_or_default(),
+            },
+            Field::Access => Chip {
+                icon: None,
+                label: self.mode_label(),
+            },
+        }
+    }
+
+    /// A field's menu items, and the id of the one marked as current.
+    pub fn menu(
+        &self,
+        field: Field,
+        config: &Value,
+        logos: &HashMap<String, Icon>,
+    ) -> (Vec<Item>, Option<String>) {
+        match field {
+            Field::Model => (
+                model_items(config, logos),
+                Some(format!("{}/{}", self.instance, self.model)),
+            ),
+            Field::Effort => (effort_items(config, self), self.effort_now(config)),
+            Field::Access => (mode_items(config, self), Some(self.mode.clone())),
+        }
+    }
+
+    /// Applies the id picked from `field`'s menu.
+    pub fn choose(&mut self, field: Field, config: &Value, id: String) {
+        match field {
+            Field::Model => self.set_model(config, &id),
+            Field::Effort => self.effort = Some(id),
+            Field::Access => self.mode = id,
+        }
+    }
+
     /// What `models::plan` and `models::plan_new_thread` take.
     pub fn choice(&self) -> models::Choice {
         models::Choice {
@@ -494,7 +548,7 @@ fn default_option(descriptor: &Value) -> Option<String> {
 }
 
 /// Every model of every enabled provider, under the provider's name, with its logo.
-pub fn model_items(config: &Value, logos: &std::collections::HashMap<String, Icon>) -> Vec<Item> {
+fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
     let mut items = Vec::new();
     for provider in models::providers(config)
         .iter()
@@ -537,20 +591,12 @@ pub fn effort_items(config: &Value, settings: &Settings) -> Vec<Item> {
         .collect()
 }
 
-pub fn mode_items(config: &Value, settings: &Settings) -> Vec<Item> {
+fn mode_items(config: &Value, settings: &Settings) -> Vec<Item> {
     settings
         .modes(config)
         .into_iter()
         .map(|(id, label)| Item::new(id, label))
         .collect()
-}
-
-/// The current effort's id, for marking it in the menu.
-pub fn effort_now(config: &Value, settings: &Settings) -> Option<String> {
-    settings
-        .effort
-        .clone()
-        .or_else(|| default_option(settings.effort_descriptor(config)?))
 }
 
 #[cfg(test)]
@@ -661,5 +707,158 @@ mod tests {
         assert_eq!(s.effort, None);
         assert_eq!(s.effort_label(&config).as_deref(), Some("medium"));
         assert_eq!(s.choice().model.as_deref(), Some("c/y"));
+    }
+
+    /// Claude has two models with their own efforts; Codex has one with none, and only two of
+    /// the runtime modes.
+    fn two_providers() -> Value {
+        let effort = |options: Value| json!({"optionDescriptors": [{"id": "effort", "type": "select", "options": options}]});
+        json!({"providers": [
+            {"instanceId": "claude", "displayName": "Claude", "enabled": true, "models": [
+                {"slug": "opus", "name": "Opus", "capabilities": effort(json!([
+                    {"id": "low", "label": "Low"},
+                    {"id": "high", "label": "High", "isDefault": true}]))},
+                {"slug": "haiku", "name": "Haiku", "capabilities": effort(json!([
+                    {"id": "low", "label": "Low"}, {"id": "medium", "label": "Medium"}]))}]},
+            {"instanceId": "off", "displayName": "Off", "enabled": false, "models": [
+                {"slug": "hidden", "name": "Hidden"}]},
+            {"instanceId": "codex", "displayName": "Codex", "enabled": true,
+             "supportedRuntimeModes": ["approval-required", "full-access"], "models": [
+                {"slug": "gpt", "name": "GPT"}]}]})
+    }
+
+    fn settings(instance: &str, model: &str, effort: Option<&str>, mode: &str) -> Settings {
+        Settings {
+            instance: instance.into(),
+            model: model.into(),
+            effort: effort.map(str::to_string),
+            mode: mode.into(),
+        }
+    }
+
+    fn ids(items: &[Item]) -> Vec<&str> {
+        items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn each_field_lists_its_items_and_marks_the_current_one() {
+        let config = two_providers();
+        let logos: HashMap<String, Icon> =
+            [("claude".to_string(), Icon::Text("C".into(), 2))].into();
+        let s = settings("claude", "opus", None, "full-access");
+
+        // Every enabled provider's models, under its name, with its logo; in T3's order.
+        let (items, current) = s.menu(Field::Model, &config, &logos);
+        assert_eq!(ids(&items), ["claude/opus", "claude/haiku", "codex/gpt"]);
+        assert_eq!(current.as_deref(), Some("claude/opus"));
+        assert_eq!(items[1].label, "Haiku");
+        assert_eq!(items[1].section.as_deref(), Some("Claude"));
+        assert_eq!(items[2].section.as_deref(), Some("Codex"));
+        assert!(items[0].icon.is_some() && items[2].icon.is_none());
+
+        // No effort chosen yet: the model's default is the one marked.
+        let (items, current) = s.menu(Field::Effort, &config, &logos);
+        assert_eq!(ids(&items), ["low", "high"]);
+        assert_eq!(items[1].label, "High");
+        assert_eq!(current.as_deref(), Some("high"));
+        let chosen = settings("claude", "opus", Some("low"), "full-access");
+        assert_eq!(
+            chosen.menu(Field::Effort, &config, &logos).1.as_deref(),
+            Some("low")
+        );
+
+        // A model with no effort has an empty list, which hides the field.
+        let codex = settings("codex", "gpt", None, "full-access");
+        assert!(codex.menu(Field::Effort, &config, &logos).0.is_empty());
+        assert!(effort_items(&config, &codex).is_empty());
+        assert_eq!(codex.chip(Field::Effort, &config, &logos).label, "");
+
+        // Access: the modes the provider supports, in T3's order, the current one marked.
+        let (items, current) = s.menu(Field::Access, &config, &logos);
+        assert_eq!(
+            ids(&items),
+            [
+                "approval-required",
+                "auto-accept-edits",
+                "auto",
+                "full-access"
+            ]
+        );
+        assert_eq!(current.as_deref(), Some("full-access"));
+        let (items, _) = codex.menu(Field::Access, &config, &logos);
+        assert_eq!(ids(&items), ["approval-required", "full-access"]);
+        assert_eq!(items[0].label, "Supervised");
+    }
+
+    #[test]
+    fn chips_say_what_the_menus_mark() {
+        let config = two_providers();
+        let logos: HashMap<String, Icon> =
+            [("claude".to_string(), Icon::Text("C".into(), 2))].into();
+        let s = settings("claude", "opus", None, "approval-required");
+        let model = s.chip(Field::Model, &config, &logos);
+        assert_eq!((model.label.as_str(), model.icon.is_some()), ("Opus", true));
+        let effort = s.chip(Field::Effort, &config, &logos);
+        assert_eq!(
+            (effort.label.as_str(), effort.icon.is_none()),
+            ("High", true)
+        );
+        assert_eq!(s.chip(Field::Access, &config, &logos).label, "Supervised");
+        // A model T3 no longer lists shows as its slug, and has no effort to show.
+        let gone = settings("claude", "retired", None, "full-access");
+        assert_eq!(gone.chip(Field::Model, &config, &logos).label, "retired");
+        assert_eq!(gone.effort_label(&config), None);
+    }
+
+    #[test]
+    fn choosing_changes_only_what_the_field_holds() {
+        let config = two_providers();
+        let mut s = settings("claude", "opus", Some("low"), "auto");
+        s.choose(Field::Effort, &config, "high".into());
+        assert_eq!(s, settings("claude", "opus", Some("high"), "auto"));
+        s.choose(Field::Access, &config, "approval-required".into());
+        assert_eq!(s.mode, "approval-required");
+
+        // A model that offers the effort keeps it; one that doesn't drops it.
+        s.choose(Field::Model, &config, "claude/haiku".into());
+        assert_eq!((s.model.as_str(), s.effort.as_deref()), ("haiku", None));
+        s.effort = Some("medium".into());
+        s.choose(Field::Model, &config, "claude/opus".into());
+        assert_eq!(s.effort, None);
+        // Access the new provider can't run is corrected to one it can.
+        s.mode = "auto".into();
+        s.choose(Field::Model, &config, "codex/gpt".into());
+        assert_eq!(
+            (s.instance.as_str(), s.mode.as_str()),
+            ("codex", "approval-required")
+        );
+        // An id that isn't `instance/slug` changes nothing.
+        let before = s.clone();
+        s.choose(Field::Model, &config, "nonsense".into());
+        assert_eq!(s, before);
+    }
+
+    /// Logos arrive after the menu opened. Swapping the items in leaves the filter, and the
+    /// row the cursor is on, where they were.
+    #[test]
+    fn logos_arriving_leave_the_menu_where_it_was() {
+        let config = two_providers();
+        let s = settings("claude", "opus", None, "full-access");
+        let (items, current) = s.menu(Field::Model, &config, &HashMap::new());
+        let mut menu = Menu::new(items, current.as_deref());
+        for c in "hai".chars() {
+            menu.key(key(KeyCode::Char(c)));
+        }
+        let shown = menu.shown();
+        let selected = menu.selected;
+        let logos: HashMap<String, Icon> =
+            [("claude".to_string(), Icon::Text("C".into(), 2))].into();
+        menu.items = s.menu(Field::Model, &config, &logos).0;
+        assert_eq!(menu.filter, "hai");
+        assert_eq!((menu.shown(), menu.selected), (shown, selected));
+        assert!(menu.items.iter().any(|i| i.icon.is_some()));
+        assert!(
+            matches!(menu.key(key(KeyCode::Enter)), MenuKey::Chose(id) if id == "claude/haiku")
+        );
     }
 }

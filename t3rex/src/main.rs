@@ -29,6 +29,7 @@ mod state;
 mod surface;
 mod sync;
 mod t3;
+mod term;
 mod usage;
 mod width;
 

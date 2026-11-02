@@ -16,7 +16,6 @@
 //! T3's sidebar shows, names itself with OSC 2, and reports the thread's folder with OSC 7, so
 //! a split opened beside it starts there.
 
-use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -38,6 +37,7 @@ use crate::media::{self, Embed, Media};
 use crate::paste::{self, Got};
 use crate::render::{self, visible_width};
 use crate::t3;
+use crate::term::out;
 use crate::width::Follow;
 
 pub const RESET: &str = "\x1b[0m";
@@ -92,12 +92,6 @@ struct Pane {
     /// The usage-limit line the last frame drew, which time moves on: `tomorrow 9am` becomes
     /// `9am` at midnight, and `resumes` becomes `resuming` at the reset.
     limit: String,
-}
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
 }
 
 /// The local time zone's offset, read once from `date`, so timestamps need no time zone crate.
