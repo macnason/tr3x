@@ -5,6 +5,7 @@ mod actions;
 mod ask;
 mod chat;
 mod compose;
+mod draft;
 mod fade;
 mod find;
 mod icons;

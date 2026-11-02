@@ -1094,6 +1094,8 @@ async fn event_loop(
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
+    // Every eighth tick, about a second: a model the picker held for the next message.
+    let mut ticks = 0u32;
     let mut visited_for = String::new();
     let mut dirty = false;
     // Reply draws again only when something it shows may have changed.
@@ -1232,6 +1234,11 @@ async fn event_loop(
                 }
                 if pane.chat_width.changed() {
                     pane.reflow = true;
+                    dirty = true;
+                }
+                ticks = ticks.wrapping_add(1);
+                if ticks.is_multiple_of(8) && composer.reload_draft() {
+                    reply = true;
                     dirty = true;
                 }
             }

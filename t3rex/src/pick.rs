@@ -1,7 +1,8 @@
 //! The model picker: a floating layer over a thread's window, opened from Reply with
 //! /model, /effort or /mode alone, or Change Model… in the palette. It lists every enabled provider's models under the
 //! provider's logo, then the model's efforts, and the access modes. A choice applies to the
-//! thread's next message at once, as T3's composer chips do, and the Reply header follows.
+//! thread at once, as T3's composer chips do, and the Reply header follows. While a run works,
+//! a model or effort waits in a draft for the next message instead.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,6 +14,7 @@ use serde_json::json;
 use t3client::models;
 
 use crate::chat::{RED, RESET, fit};
+use crate::draft::{self, Draft};
 use crate::icons::Painter;
 use crate::picker::{self, Chip, Menu, MenuKey, Settings};
 use crate::rex::{Rex, lua_str};
@@ -54,6 +56,7 @@ return {{}}"#,
 }
 
 pub async fn run(thread: String, first: Field) -> Result<()> {
+    let key = thread.clone();
     let (client, thread) = t3::thread(&thread)?;
     let thread_id = thread.thread;
     let _scheme = crate::scheme::listen();
@@ -61,6 +64,9 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
     let mut logos: HashMap<String, crate::icons::Icon> = HashMap::new();
     let mut settings = Settings::of_thread(&config, state.thread());
+    if let Some(draft) = draft::load(&key) {
+        draft.over(&config, &mut settings);
+    }
     let (tx, mut loaded) = tokio::sync::mpsc::unbounded_channel();
     {
         let providers = models::providers(&config).to_vec();
@@ -191,20 +197,29 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
                 Field::Effort => next.effort = Some(id),
                 Field::Access => next.mode = id,
             }
-            match models::plan(&config, state.thread(), &next.choice()) {
-                Ok(plan) => match client.apply_settings(&state, &plan).await {
-                    Ok(_) => {
-                        settings = next;
-                        // After a model, its efforts; after anything else, done.
-                        if field == Field::Model && fields(&settings).contains(&Field::Effort) {
-                            field = Field::Effort;
-                            menu = open(field, &settings, &logos);
-                        } else {
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => note = Some(format!("{e:#}")),
+            // While the thread works, a model or effort waits for the next message, as in T3.
+            let held = field != Field::Access && state.active_run().is_some();
+            let applied = match held {
+                true => draft::save(&key, &Draft::of(&next)).map(|_| None),
+                false => match models::plan(&config, state.thread(), &next.choice()) {
+                    Ok(plan) => client.apply_settings(&state, &plan).await,
+                    Err(e) => Err(e),
                 },
+            };
+            match applied {
+                Ok(_) => {
+                    if !held {
+                        draft::clear(&key);
+                    }
+                    settings = next;
+                    // After a model, its efforts; after anything else, done.
+                    if field == Field::Model && fields(&settings).contains(&Field::Effort) {
+                        field = Field::Effort;
+                        menu = open(field, &settings, &logos);
+                    } else {
+                        return Ok(());
+                    }
+                }
                 Err(e) => note = Some(format!("{e:#}")),
             }
         }

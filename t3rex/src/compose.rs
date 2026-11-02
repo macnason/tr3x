@@ -20,7 +20,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use t3client::env::{Env, IfBusy};
-use t3client::models::{self, Choice};
+use t3client::models::{self, Choice, Plan};
 use t3client::projection::ThreadState;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
@@ -397,6 +397,8 @@ pub(crate) struct Composer {
     pub(crate) note_until: Option<tokio::time::Instant>,
     /// The thread's link, under the input until the next key.
     link: Option<String>,
+    /// A model picked while the thread worked, for the next message.
+    draft: Option<crate::draft::Draft>,
     /// The pane's size, and the conversation's column in it: its left edge and its width.
     pub(crate) cols: usize,
     pub(crate) rows: usize,
@@ -510,7 +512,10 @@ impl Composer {
         let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
             return Vec::new();
         };
-        let settings = Settings::of_thread(config, state.thread());
+        let mut settings = Settings::of_thread(config, state.thread());
+        if let Some(draft) = &self.draft {
+            draft.over(config, &mut settings);
+        }
         let icon = self.logos.get(&settings.instance).cloned();
         // The logo and the ` ▾` take five columns.
         let room = width.saturating_sub(if icon.is_some() { 5 } else { 2 });
@@ -521,6 +526,58 @@ impl Composer {
             },
             Field::Model,
         )]
+    }
+
+    /// This thread as the picker and its draft name it.
+    fn draft_key(&self) -> String {
+        format!("{}/{}", self.client.id(), self.thread_id)
+    }
+
+    /// Reads the draft the picker may have left. True when it changed.
+    pub(crate) fn reload_draft(&mut self) -> bool {
+        let draft = crate::draft::load(&self.draft_key());
+        let changed = draft != self.draft;
+        self.draft = draft;
+        changed
+    }
+
+    /// `/model` or `/effort` while the thread works: kept for the next message, as the picker
+    /// keeps it.
+    fn hold(&mut self, config: &Value, thread: &Value, mut choice: Choice) {
+        let mut settings = Settings::of_thread(config, thread);
+        if let Some(draft) = &self.draft {
+            draft.over(config, &mut settings);
+        }
+        if choice.model.is_none() {
+            choice.model = Some(format!("{}/{}", settings.instance, settings.model));
+        }
+        let selection = match models::plan(config, thread, &choice) {
+            Ok(plan) => plan.model_selection,
+            Err(e) => return self.note(format!("{e:#}"), true),
+        };
+        let current = Settings::of_thread(config, thread);
+        let (instance, model) = match &selection {
+            Some(s) => (
+                s["instanceId"].as_str().unwrap_or_default(),
+                s["model"].as_str().unwrap_or_default(),
+            ),
+            None => (current.instance.as_str(), current.model.as_str()),
+        };
+        settings.set_model(config, &format!("{instance}/{model}"));
+        if choice.effort.is_some() {
+            settings.effort = choice.effort;
+        }
+        let key = self.draft_key();
+        let draft = crate::draft::Draft::of(&settings);
+        if settings == current {
+            crate::draft::clear(&key);
+            self.draft = None;
+        } else if let Err(e) = crate::draft::save(&key, &draft) {
+            return self.note(format!("{e:#}"), true);
+        } else {
+            self.draft = Some(draft);
+        }
+        self.note("Applies to your next message", false);
     }
 
     /// Opens the model picker over the window, on `field`.
@@ -931,17 +988,34 @@ impl Composer {
         let Some(state) = self.state.clone() else {
             return;
         };
+        let busy = state.active_run().is_some();
+        let steer = matches!(mode, IfBusy::Steer);
+        // A model picked while the thread worked rides on the next message that starts a turn.
+        // Steering stays on the running turn's model, so the draft waits.
+        let key = self.draft_key();
+        let draft = self.draft.clone().filter(|_| !(busy && steer));
+        let plan = match (&draft, self.config.as_ref()) {
+            (Some(d), Some(config)) => match d.plan(config, state.thread()) {
+                Ok(plan) => plan,
+                Err(e) => return self.note(format!("{e:#}"), true),
+            },
+            _ => Plan::default(),
+        };
         let message = self.editor.take();
         let images = self.images.take();
         let uploads: Vec<Value> = images.iter().map(Image::upload).collect();
         let client = self.client.clone();
-        let busy = state.active_run().is_some();
-        let steer = matches!(mode, IfBusy::Steer);
         let tx = self.tx.clone();
         tokio::spawn(async move {
             // A sent message shows in the conversation, which comes back to the bottom for it. A
             // queued one doesn't until its turn, so only that gets a note.
-            let done = match client.send_message(&state, &message, mode, &uploads).await {
+            let sent = client
+                .send_message_with(&state, &message, mode, &plan, &uploads)
+                .await;
+            if sent.is_ok() && draft.is_some() {
+                crate::draft::clear(&key);
+            }
+            let done = match sent {
                 Ok(_) if busy && !steer => Done::Note("Queued".into(), false),
                 Ok(_) => return,
                 Err(e) => {
@@ -1100,6 +1174,9 @@ impl Composer {
                             other => other.to_string(),
                         })
                     }
+                }
+                if name != "mode" && state.active_run().is_some() {
+                    return self.hold(&config, state.thread(), choice);
                 }
                 match models::plan(&config, state.thread(), &choice) {
                     Ok(plan) => self.spawn(async move {
@@ -1462,7 +1539,7 @@ impl Composer {
         }
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let slash = Slash::new(client.clone());
-        let composer = Composer {
+        let mut composer = Composer {
             thread_id,
             client,
             offline: None,
@@ -1473,6 +1550,7 @@ impl Composer {
             note: None,
             note_until: None,
             link: None,
+            draft: None,
             cols: cols as usize,
             rows: rows as usize,
             column: (0, cols as usize),
@@ -1494,6 +1572,7 @@ impl Composer {
             wanted: 0,
             fill: String::new(),
         };
+        composer.reload_draft();
         (composer, done)
     }
 
