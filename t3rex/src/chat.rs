@@ -612,10 +612,17 @@ fn within(text: &str, max: usize) -> String {
 }
 
 /// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it under the window's label,
-/// which already names the thread. `msg` says what the thread is waiting on you for, when it
-/// is, else the status word and the project; `title` is the project, for when there's no
-/// word. Both are cut to the protocol's limits: 2048 and 192 bytes.
-fn status_sequence(word: Option<&str>, ask: Option<&str>, project: Option<&str>) -> String {
+/// which already names the thread. `msg` is that line: what the thread is waiting on you for,
+/// when it is, else the project and the status word, or the project alone when idle. `title`
+/// is the project. `shown` is the word the line says, which can differ from `word`, the one
+/// the state comes from: a finished run you've already seen still says Done, at rest. Both
+/// are cut to the protocol's limits: 2048 and 192 bytes.
+fn status_sequence(
+    word: Option<&str>,
+    shown: Option<&str>,
+    ask: Option<&str>,
+    project: Option<&str>,
+) -> String {
     let (state, extra) = match word {
         Some("Approval") => ("blocked", ":kind=permission"),
         Some("Input") => ("blocked", ":kind=question"),
@@ -630,10 +637,11 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, project: Option<&str>)
     if !title.is_empty() {
         seq.push_str(&format!(":title={}", b64(&title)));
     }
-    let msg = match (state, ask, word, project) {
+    let msg = match (state, ask, shown, project) {
         ("blocked", Some(ask), _, _) => within(ask, 2048),
-        (_, _, Some(word), Some(project)) => within(&format!("{word} · {project}"), 2048),
-        (_, _, word, _) => word.map(str::to_string).unwrap_or_default(),
+        (_, _, Some(word), Some(project)) => within(&format!("{project} · {word}"), 2048),
+        (_, _, Some(word), None) => word.to_string(),
+        (_, _, None, project) => within(project.unwrap_or_default(), 2048),
     };
     if !msg.is_empty() {
         seq.push_str(&format!(":msg={}", b64(&msg)));
@@ -934,9 +942,10 @@ impl Pane {
     ) {
         let Some(thread) = thread else { return };
         let word = t3client::inbox::status_label(thread, t3::now_ms());
+        let shown = word.or(t3client::inbox::finished(thread).then_some("Done"));
         let project = project_name(shell, thread).map(one_line);
         let ask = state.and_then(crate::ask::line);
-        let seq = status_sequence(word, ask.as_deref(), project.as_deref());
+        let seq = status_sequence(word, shown, ask.as_deref(), project.as_deref());
         if seq != self.status {
             out(&seq);
             self.status = seq;
@@ -1430,21 +1439,32 @@ mod tests {
     #[test]
     fn status_maps_to_rex_states() {
         assert!(
-            status_sequence(Some("Approval"), None, Some("t"))
+            status_sequence(Some("Approval"), Some("Approval"), None, Some("t"))
                 .contains("state=blocked:kind=permission")
         );
         assert!(
-            status_sequence(Some("Input"), None, Some("t")).contains("state=blocked:kind=question")
+            status_sequence(Some("Input"), Some("Input"), None, Some("t"))
+                .contains("state=blocked:kind=question")
         );
-        assert!(status_sequence(Some("Working"), None, Some("t")).contains("state=working"));
-        assert!(status_sequence(Some("Done"), None, Some("t")).contains("state=done"));
-        assert!(status_sequence(None, None, Some("t")).contains("state=idle"));
+        assert!(
+            status_sequence(Some("Working"), Some("Working"), None, Some("t"))
+                .contains("state=working")
+        );
+        assert!(
+            status_sequence(Some("Done"), Some("Done"), None, Some("t")).contains("state=done")
+        );
+        assert!(status_sequence(None, None, None, Some("t")).contains("state=idle"));
     }
 
     #[test]
     fn status_says_what_is_asked_within_the_limits() {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
-        let seq = status_sequence(Some("Approval"), Some("Run pnpm test?"), Some("t3rex"));
+        let seq = status_sequence(
+            Some("Approval"),
+            Some("Approval"),
+            Some("Run pnpm test?"),
+            Some("t3rex"),
+        );
         assert_eq!(
             seq,
             format!(
@@ -1453,23 +1473,40 @@ mod tests {
                 b64("Run pnpm test?")
             )
         );
-        // Not blocked: the status word and the project, whatever was asked before.
+        // Not blocked: the project and the status word, whatever was asked before.
         assert!(
-            status_sequence(Some("Working"), Some("x"), Some("t3rex"))
-                .ends_with(&format!(":msg={}\x1b\\", b64("Working · t3rex")))
+            status_sequence(Some("Working"), Some("Working"), Some("x"), Some("t3rex"))
+                .ends_with(&format!(":msg={}\x1b\\", b64("t3rex · Working")))
         );
-        // Idle: the project alone, as the title; no project, the word alone.
-        assert!(
-            status_sequence(None, None, Some("t3rex"))
-                .ends_with(&format!(":title={}\x1b\\", b64("t3rex")))
+        // Idle: the project alone, on the line under the label; no project, the word alone.
+        assert_eq!(
+            status_sequence(None, None, None, Some("t3rex")),
+            format!(
+                "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex")
+            )
+        );
+        assert_eq!(
+            status_sequence(None, None, None, None),
+            "\x1b]7501;state=idle:app=t3code\x1b\\"
+        );
+        // A finished run you've seen: Done on the line, at rest in Rex.
+        assert_eq!(
+            status_sequence(None, Some("Done"), None, Some("t3rex")),
+            format!(
+                "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex · Done")
+            )
         );
         assert!(
-            status_sequence(Some("Done"), None, None)
+            status_sequence(Some("Done"), Some("Done"), None, None)
                 .ends_with(&format!(":app=t3code:msg={}\x1b\\", b64("Done")))
         );
         // Over the limits: cut on a character, never mid-way through one.
         let long = "é".repeat(2000);
-        let seq = status_sequence(Some("Input"), Some(&long), Some(&long));
+        let seq = status_sequence(Some("Input"), Some("Input"), Some(&long), Some(&long));
         let field = |key: &str| {
             let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
             let end = seq[at..].find([':', '\x1b']).unwrap() + at;
