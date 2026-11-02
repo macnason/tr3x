@@ -25,6 +25,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use serde_json::Value;
 use t3client::env::WatchEvent;
+use t3client::inbox::Limit;
 use t3client::projection::{ShellState, ThreadState};
 use t3client::transcript::{self, Block, BlockKind};
 
@@ -88,6 +89,9 @@ struct Pane {
     snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     /// What the pane says while the thread's machine is out of reach.
     offline: Option<String>,
+    /// The usage-limit line the last frame drew, which time moves on: `tomorrow 9am` becomes
+    /// `9am` at midnight, and `resumes` becomes `resuming` at the reset.
+    limit: String,
 }
 
 fn out(text: &str) {
@@ -127,6 +131,76 @@ fn clock(iso: &str, offset_minutes: i64) -> Option<String> {
         _ => (h - 12, "PM"),
     };
     Some(format!("{h12}:{m:02} {half}"))
+}
+
+/// A moment in local time, as Find Thread and the conversation word it: `3pm` or `3:30pm`
+/// today, `tomorrow 9am`, `Tue 9am` within the week, else `12 Nov`. Before today,
+/// `yesterday 3pm`, else the date.
+pub fn when(at: i64, now: i64, offset_minutes: i64) -> String {
+    let local = |ms: i64| ms + offset_minutes * 60_000;
+    let day = 86_400_000;
+    let days = local(at).div_euclid(day) - local(now).div_euclid(day);
+    let minutes = local(at).rem_euclid(day) / 60_000;
+    let (h, m) = (minutes / 60, minutes % 60);
+    let hour = match h % 12 {
+        0 => 12,
+        h => h,
+    };
+    let half = if h < 12 { "am" } else { "pm" };
+    let clock = if m == 0 {
+        format!("{hour}{half}")
+    } else {
+        format!("{hour}:{m:02}{half}")
+    };
+    // 1970-01-01 was a Thursday.
+    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+        [local(at).div_euclid(day).rem_euclid(7) as usize];
+    match days {
+        0 => clock,
+        1 => format!("tomorrow {clock}"),
+        -1 => format!("yesterday {clock}"),
+        2..=6 => format!("{weekday} {clock}"),
+        _ => {
+            let date = t3::iso(local(at));
+            let month = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ][date[5..7].parse::<usize>().unwrap_or(1) - 1];
+            format!("{} {month}", date[8..10].trim_start_matches('0'))
+        }
+    }
+}
+
+/// What a usage limit leaves the thread waiting for, after its status word: `resets 3pm`, or
+/// `resumes 3pm` when T3 will send it on then, `resuming` once that time has passed, and
+/// `reset 3pm` after a reset nothing resumed. Empty when the provider didn't say when.
+fn limit_wait(limit: &Limit, now: i64, offset_minutes: i64) -> String {
+    let Some(at) = limit.resets_at else {
+        return String::new();
+    };
+    let time = when(at, now, offset_minutes);
+    match (at > now, limit.resumes) {
+        (true, true) => format!("resumes {time}"),
+        (true, false) => format!("resets {time}"),
+        (false, true) => "resuming".to_string(),
+        (false, false) => format!("reset {time}"),
+    }
+}
+
+/// The conversation's last line for a thread stopped on a usage limit, as T3's notice says it:
+/// `Usage limit reached · resets 3pm`, with `· resumes then` when auto-resume is on.
+fn limit_line(limit: &Limit, now: i64, offset_minutes: i64) -> String {
+    let mut line = "Usage limit reached".to_string();
+    match limit.resets_at {
+        Some(at) if at > now => {
+            line.push_str(&format!(" · resets {}", when(at, now, offset_minutes)));
+            if limit.resumes {
+                line.push_str(" · resumes then");
+            }
+        }
+        Some(_) => line.push_str(&format!(" · {}", limit_wait(limit, now, offset_minutes))),
+        None => {}
+    }
+    line
 }
 
 /// `1m 12s`, `45s` or `2h 3m`.
@@ -758,6 +832,7 @@ impl Pane {
             link,
             snapshots,
             offline: None,
+            limit: String::new(),
         }
     }
 
@@ -769,6 +844,7 @@ impl Pane {
     /// The thread's blocks: what's new and finished for good, then the live tail.
     fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
         let blocks = transcript::blocks(state);
+        self.limit = self.limit_now(shell_thread);
         self.animating = state.active_run().is_some() || blocks.iter().any(is_running);
         let run_active = state.active_run().is_some();
         // A history that no longer starts with what was printed, after a reconnect, prints
@@ -925,7 +1001,25 @@ impl Pane {
         text
     }
 
+    /// The usage limit the thread stopped on, as its last line says it now, or empty.
+    fn limit_now(&self, shell_thread: Option<&Value>) -> String {
+        shell_thread
+            .and_then(t3client::inbox::limit)
+            .map(|limit| limit_line(&limit, t3::now_ms(), self.offset_minutes))
+            .unwrap_or_default()
+    }
+
+    /// The finished turn's last line: when it finished and how long it took, or that it
+    /// failed or stopped. A turn stopped on a usage limit says when the limit resets, and
+    /// whether T3 resumes the thread then.
     fn footer(&self, state: &ThreadState) -> Option<String> {
+        if !self.limit.is_empty() {
+            return Some(format!(
+                "{}{YELLOW}◷{RESET} {DIM}{}{RESET}",
+                " ".repeat(self.column().0),
+                fit(&self.limit, self.column().1.saturating_sub(2))
+            ));
+        }
         let run = state.latest_run()?;
         let done = run["completedAt"].as_str()?;
         let started = run["startedAt"].as_str().or(run["requestedAt"].as_str())?;
@@ -975,8 +1069,17 @@ impl Pane {
         state: Option<&ThreadState>,
     ) {
         let Some(thread) = thread else { return };
-        let word = t3client::inbox::status_label(thread, t3::now_ms());
-        let shown = word.or(t3client::inbox::finished(thread).then_some("Done"));
+        let now = t3::now_ms();
+        let word = t3client::inbox::status_label(thread, now);
+        // A usage limit says what it waits for: `Limited · resumes 3pm`.
+        let limited = t3client::inbox::limit(thread)
+            .map(|limit| limit_wait(&limit, now, self.offset_minutes))
+            .filter(|wait| !wait.is_empty())
+            .map(|wait| format!("Limited · {wait}"));
+        let shown = limited
+            .as_deref()
+            .or(word)
+            .or(t3client::inbox::finished(thread).then_some("Done"));
         let project = project_name(shell, thread).map(one_line);
         let ask = state.and_then(crate::ask::line);
         let seq = status_sequence(word, shown, ask.as_deref(), project.as_deref());
@@ -1146,13 +1249,22 @@ async fn event_loop(
                 fit.finished(ok);
             },
             event = done.recv() => if let Some(event) = event {
+                // The config comes again with each change, so the thread prints again only
+                // for a new link.
+                let config = matches!(event, crate::compose::Done::Config(_));
+                let shown = composer.config_shown();
                 if let crate::compose::Done::Config(found) = &event {
-                    pane.link = crate::link::thread(Some(found), client.id(), thread_id);
-                    pane.reflow = true;
-                    dirty = true;
+                    let link = crate::link::thread(Some(found), client.id(), thread_id);
+                    if link != pane.link {
+                        pane.link = link;
+                        pane.reflow = true;
+                        dirty = true;
+                    }
                 }
                 composer.done(event);
-                reply = true;
+                // A config that changes nothing Reply shows draws nothing: T3 sends one each
+                // time a provider's status is checked.
+                reply |= !config || shown.is_none() || composer.config_shown() != shown;
             },
             event = input.next() => {
                 reply = true;
@@ -1240,6 +1352,16 @@ async fn event_loop(
                 if ticks.is_multiple_of(8) && composer.reload_draft() {
                     reply = true;
                     dirty = true;
+                }
+                // A usage limit's times read differently as the clock moves on.
+                if ticks.is_multiple_of(8) && role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    if pane.limit_now(thread) != pane.limit {
+                        dirty = true;
+                    }
+                }
+                if ticks.is_multiple_of(8) && role != Role::Conversation && composer.usage_moved() {
+                    reply = true;
                 }
             }
         }
@@ -1606,6 +1728,131 @@ mod tests {
             "\x1b[19;1H\x1b[2K\x1b[20;1H\x1b[2K\x1b[1;20r"
         );
         assert!(!p.reflow);
+    }
+
+    #[test]
+    fn moments_read_in_local_time() {
+        let h = 3_600_000;
+        // 2026-10-31T00:00:00Z, a Saturday, at UTC.
+        let now = t3client::inbox::parse_iso("2026-10-31T00:00:00.000Z").unwrap();
+        assert_eq!(when(now + 15 * h, now, 0), "3pm");
+        assert_eq!(when(now + 15 * h + 30 * 60_000, now, 0), "3:30pm");
+        assert_eq!(when(now + 33 * h, now, 0), "tomorrow 9am");
+        assert_eq!(when(now + 3 * 24 * h, now, 0), "Tue 12am");
+        assert_eq!(when(now + 12 * 24 * h + 9 * h, now, 0), "12 Nov");
+        assert_eq!(when(now - 9 * h, now, 0), "yesterday 3pm");
+        assert_eq!(when(now - 3 * 24 * h, now, 0), "28 Oct");
+        // Ten hours ahead, 3pm UTC is 1am the next day.
+        assert_eq!(when(now + 15 * h, now, 600), "tomorrow 1am");
+    }
+
+    #[test]
+    fn a_usage_limit_says_when_it_resets_and_whether_it_resumes() {
+        let h = 3_600_000;
+        let now = t3client::inbox::parse_iso("2026-10-31T00:00:00.000Z").unwrap();
+        let limit = |resets_at: Option<i64>, resumes: bool| Limit { resets_at, resumes };
+        let later = Some(now + 15 * h);
+        assert_eq!(
+            limit_line(&limit(later, true), now, 0),
+            "Usage limit reached · resets 3pm · resumes then"
+        );
+        assert_eq!(limit_wait(&limit(later, true), now, 0), "resumes 3pm");
+        assert_eq!(
+            limit_line(&limit(later, false), now, 0),
+            "Usage limit reached · resets 3pm"
+        );
+        assert_eq!(limit_wait(&limit(later, false), now, 0), "resets 3pm");
+        // The reset has come: T3 is about to send it on, or it's your move.
+        let passed = Some(now - h);
+        assert_eq!(
+            limit_line(&limit(passed, true), now, 0),
+            "Usage limit reached · resuming"
+        );
+        assert_eq!(
+            limit_line(&limit(passed, false), now, 0),
+            "Usage limit reached · reset yesterday 11pm"
+        );
+        // The provider didn't say when.
+        assert_eq!(
+            limit_line(&limit(None, false), now, 0),
+            "Usage limit reached"
+        );
+        assert_eq!(limit_wait(&limit(None, false), now, 0), "");
+    }
+
+    #[test]
+    fn a_limited_thread_says_what_it_waits_for_under_its_label() {
+        let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+        assert_eq!(
+            status_sequence(
+                Some("Limited"),
+                Some("Limited · resumes 3pm"),
+                None,
+                Some("t3rex")
+            ),
+            format!(
+                "\x1b]7501;state=error:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex · Limited · resumes 3pm")
+            )
+        );
+    }
+
+    /// A thread whose only run stopped on a usage limit, and the shell's word on it.
+    fn limited(recovery: Value, resets_at: i64) -> (ThreadState, Value) {
+        let state = ThreadState::from_snapshot(&serde_json::json!({
+            "kind": "snapshot",
+            "snapshotSequence": 3,
+            "projection": {
+                "thread": {"id": "t1", "title": "Ship it"},
+                "runs": [{"id": "r1", "ordinal": 1, "status": "failed", "userMessageId": "m1",
+                    "startedAt": "2026-10-31T00:00:00.000Z", "completedAt": "2026-10-31T00:01:00.000Z"}],
+                "runtimeRequests": [],
+                "turnItems": [],
+                "visibleTurnItems": []
+            }
+        }))
+        .unwrap();
+        let reset = t3::iso(resets_at);
+        let mut recovery = recovery;
+        if recovery.is_object() {
+            recovery["resetAt"] = Value::String(reset.clone());
+        }
+        let shell = serde_json::json!({
+            "id": "t1", "latestRunId": "r1", "status": "failed", "lastErrorClass": "usage_limit",
+            "usageLimitResetAt": reset, "limitRecovery": recovery,
+            "pendingRuntimeRequest": null, "archivedAt": null, "settledOverride": null,
+        });
+        (state, shell)
+    }
+
+    #[test]
+    fn the_conversation_ends_on_the_limit_not_failed() {
+        let resets = t3::now_ms() + 2 * 3_600_000;
+        let armed = serde_json::json!({"runId": "r1", "autoResume": true});
+        let (state, shell) = limited(armed, resets);
+        let mut p = pane(20, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, Some(&shell));
+        let time = when(resets, t3::now_ms(), p.offset_minutes);
+        assert!(
+            drawn.contains(&format!(
+                "Usage limit reached · resets {time} · resumes then"
+            )),
+            "{drawn:?}"
+        );
+        assert!(!drawn.contains("Failed"), "{drawn:?}");
+        // Without auto-resume, only when it resets.
+        let (state, shell) = limited(Value::Null, resets);
+        let drawn = p.draw(&state, Some(&shell));
+        assert!(drawn.contains(&format!("Usage limit reached · resets {time}")));
+        assert!(!drawn.contains("resumes"));
+        // Another failure keeps its own line.
+        let mut other = shell.clone();
+        other["lastErrorClass"] = Value::String("provider_error".into());
+        let drawn = p.draw(&state, Some(&other));
+        assert!(drawn.contains("Failed") && !drawn.contains("Usage limit"));
+        assert!(p.limit.is_empty());
     }
 
     #[test]

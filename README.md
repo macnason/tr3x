@@ -24,6 +24,9 @@ goes for every machine you run T3 on, without the T3 app.
   means what it means in T3, and a waiting tab says what it's waiting on: the command, the file
   or the question. The tab's glyph is the thread's provider, and its label starts with what T3
   is waiting on you for: `●` an approval, `?` a question, `✕` failed, `✓` done and unread.
+- **Usage limits.** A thread stopped on its provider's usage limit says so, in the
+  conversation and under its tab: when the limit resets, and that T3 picks it up then if
+  auto-resume is on. Reply shows what the model's provider has left, `Session 62% left`.
 - **Any screen.** Rex's Mac and iPhone apps can watch the same session from another device.
   **Fit to This Device** sizes it to the one you're on, the thread's title opens it in T3 there,
   and pictures follow that screen's light or dark.
@@ -79,7 +82,7 @@ the tab says so and carries on once it is.
 | | |
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project, model, effort, access, and Local or New worktree and its base branch. **Add folder…** in the project chip adds a project: type a path, Tab completes it. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The tab becomes the thread's. |
-| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread steers it or queues behind it, as T3's Follow-up behavior setting says; ⌘Enter does the other for one message, as in T3. Shift+Enter, Alt+Enter or Ctrl+J for a new line; Reply grows with the text, up to 8 lines or 35% of the window, and shrinks back once sent. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
+| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access, and beside it what that provider has left of its usage limits, yellow at 20% and red at 10%. A message to a running thread steers it or queues behind it, as T3's Follow-up behavior setting says; ⌘Enter does the other for one message, as in T3. Shift+Enter, Alt+Enter or Ctrl+J for a new line; Reply grows with the text, up to 8 lines or 35% of the window, and shrinks back once sent. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
 | Typing keys | As in Claude Code and Codex: Esc twice clears the input and its pictures, and ⌘Z brings the text back; Esc on an empty input stops a running thread; ↑ at the start brings back what you sent before, ↓ goes forward again and back to what you'd typed. As in any Mac text field: ↑ ↓ and ⌘← ⌘→ by the rows on screen, ⌥← ⌥→ by word, ⌥↑ ⌥↓ by paragraph, ⌘↑ ⌘↓ to the start and end; ⌘⌫ ⌥⌫ ⌘⌦ ⌥⌦ delete to the row's start, a word, to the row's end, the next word; ⌘Z ⌘⇧Z undo and redo; ⌃A ⌃E ⌃B ⌃F ⌃P ⌃N ⌃D ⌃H ⌃K ⌃Y ⌃T ⌃O, with ⌃U and ⌃W as in a shell. The same keys work in New Thread and Rename. |
 | Pictures | Paste a picture or screenshot (⌘V), or drop an image file, into Reply. It shows as a chip above the input and goes with the next message; click its ✕, or Backspace at the start of the input, to take it off. Pictures you send show in the conversation. |
 | Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |

@@ -1,7 +1,8 @@
 //! Reply: the bottom rows of a thread's pane, under the conversation. One input, and the
 //! thread's pending approval or question when there is one, and under them the chip that
-//! names the model, effort and access the next message goes out with. The conversation pane
-//! (`chat`) runs it, and keeps the conversation scrolling above it.
+//! names the model, effort and access the next message goes out with, and what that model's
+//! provider has left of its usage limits (`usage`). The conversation pane (`chat`) runs it,
+//! and keeps the conversation scrolling above it.
 //!
 //! Enter sends. To a running turn it steers or queues, as T3's Follow-up behavior says, and
 //! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
@@ -19,9 +20,9 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use t3client::env::{Env, IfBusy};
+use t3client::env::{Env, IfBusy, WatchEvent};
 use t3client::models::{self, Choice, Plan};
-use t3client::projection::ThreadState;
+use t3client::projection::{Applied, ThreadState, apply_config};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthChar;
 
@@ -432,6 +433,10 @@ pub(crate) struct Composer {
     fill: String,
     /// The last frame drawn, less the cursor.
     drawn: String,
+    /// The usage beside the chip in the last frame drawn, which time moves on.
+    usage_drawn: Option<String>,
+    /// The local time zone's offset, for when a used-up limit resets.
+    offset_minutes: i64,
 }
 
 /// Reply's rows before they're placed: each row, the clickable spans on each by row index,
@@ -441,6 +446,8 @@ struct Laid {
     hits: Vec<(usize, (usize, usize), Hit)>,
     input: (usize, usize),
     cursor: (usize, usize),
+    /// The usage beside the chip.
+    usage: Option<String>,
 }
 
 impl Composer {
@@ -526,6 +533,47 @@ impl Composer {
             },
             Field::Model,
         )]
+    }
+
+    /// What the chip's provider has left of its usage limits, beside the chip, when it fits in
+    /// `width` columns with the chip whole.
+    fn usage(&self, width: usize) -> Option<String> {
+        let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
+            return None;
+        };
+        let mut settings = Settings::of_thread(config, state.thread());
+        if let Some(draft) = &self.draft {
+            draft.over(config, &mut settings);
+        }
+        let windows = crate::usage::windows(config, &settings.instance);
+        if windows.is_empty() {
+            return None;
+        }
+        // The chip as the chips would draw it, with its logo and ` ▾`, and two columns apart.
+        let chip = unicode_width::UnicodeWidthStr::width(settings.summary(config, 1000).as_str())
+            + if self.logos.contains_key(&settings.instance) {
+                5
+            } else {
+                2
+            };
+        let room = width.checked_sub(chip + 2)?;
+        crate::usage::line(&windows, t3::now_ms(), self.offset_minutes, room)
+    }
+
+    /// The usage beside the chip reads differently now than when Reply last drew, as a reset
+    /// comes and goes.
+    pub(crate) fn usage_moved(&self) -> bool {
+        self.usage(self.column.1) != self.usage_drawn
+    }
+
+    /// What Reply shows from the machine's config: the chip and the usage beside it, and the
+    /// slash menu while it's open. A config that changes none of them needs no redraw.
+    pub(crate) fn config_shown(&self) -> Option<(Vec<String>, Option<String>)> {
+        if self.slash.is_open() {
+            return None;
+        }
+        let chips = self.chips(self.column.1).into_iter().map(|(c, _)| c.label);
+        Some((chips.collect(), self.usage(self.column.1)))
     }
 
     /// This thread as the picker and its draft name it.
@@ -664,6 +712,7 @@ impl Composer {
             ));
         }
         let chips = self.chips(column);
+        let mut usage = None;
         let chip_row = if chips.is_empty() {
             None
         } else {
@@ -674,7 +723,12 @@ impl Composer {
                     label: c.label.clone(),
                 })
                 .collect();
-            let (line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
+            let (mut line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
+            usage = self.usage(column);
+            if let Some(usage) = &usage {
+                line.push_str("  ");
+                line.push_str(usage);
+            }
             below.push(line);
             Some((spans, chips))
         };
@@ -731,6 +785,7 @@ impl Composer {
             hits,
             input: (first_input, shown),
             cursor,
+            usage,
         }
     }
 
@@ -754,6 +809,7 @@ impl Composer {
         let clear = self.painter.clear_own();
         let mut text = String::new();
         let laid = self.layout();
+        self.usage_drawn = laid.usage.clone();
         let (left, column) = self.column;
         let width = column.saturating_sub(PROMPT).max(10);
         for (i, row) in laid.rows.iter().enumerate() {
@@ -1515,28 +1571,58 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
     (lines, at)
 }
 
+/// Sends the machine's config to Reply, then the providers' logos, then the config again each
+/// time it changes: a provider's usage limits move as it's used. The first comes from
+/// `server.getConfig`, as before the subscription, so Reply has it on a T3 whose subscription
+/// never opens.
+async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
+    let config = loop {
+        if let Ok(config) = client.server_config().await {
+            break config;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    };
+    let providers = models::providers(&config).to_vec();
+    if tx.send(Done::Config(config.clone())).is_err() {
+        return;
+    }
+    let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
+    follow(client.watch_config(), Some(config), &tx).await;
+}
+
+/// Follows T3's config subscription, `events`, from `config`: the whole config to Reply after
+/// each item that changes it, until the subscription stops or Reply goes.
+async fn follow(
+    mut events: mpsc::UnboundedReceiver<WatchEvent>,
+    mut config: Option<Value>,
+    tx: &mpsc::UnboundedSender<Done>,
+) {
+    while let Some(event) = events.recv().await {
+        match event {
+            WatchEvent::Item(item) => {
+                if matches!(apply_config(&mut config, &item), Applied::Ignored) {
+                    continue;
+                }
+                let Some(now) = config.clone() else { continue };
+                if tx.send(Done::Config(now)).is_err() {
+                    return;
+                }
+            }
+            WatchEvent::Reconnecting { .. } => {}
+            WatchEvent::Failed(_) => return,
+        }
+    }
+}
+
 impl Composer {
     /// Reply for `thread_id`, and where its background work reports back. It asks for the
-    /// machine's config and the providers' logos straight away.
+    /// machine's config and the providers' logos straight away, and follows the config.
     pub(crate) fn new(
         client: Arc<Env>,
         thread_id: String,
     ) -> (Composer, mpsc::UnboundedReceiver<Done>) {
         let (tx, done) = mpsc::unbounded_channel();
-        {
-            let (client, tx) = (client.clone(), tx.clone());
-            tokio::spawn(async move {
-                loop {
-                    if let Ok(config) = client.server_config().await {
-                        let providers = models::providers(&config).to_vec();
-                        let _ = tx.send(Done::Config(config));
-                        let _ = tx.send(Done::Logos(crate::new::logos(&providers).await));
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            });
-        }
+        tokio::spawn(follow_config(client.clone(), tx.clone()));
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let slash = Slash::new(client.clone());
         let mut composer = Composer {
@@ -1571,6 +1657,8 @@ impl Composer {
             share: MOST_SHARE,
             wanted: 0,
             fill: String::new(),
+            usage_drawn: None,
+            offset_minutes: crate::chat::local_offset_minutes(),
         };
         composer.reload_draft();
         (composer, done)
@@ -1633,8 +1721,22 @@ impl Composer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Editor, Escape, edit, wrap};
+    use super::{Done, Editor, Escape, edit, follow, wrap};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serde_json::{Value, json};
+    use t3client::env::WatchEvent;
+    use tokio::sync::mpsc;
+
+    /// The configs Reply was sent, in order, less the logos.
+    fn configs(rx: &mut mpsc::UnboundedReceiver<Done>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(done) = rx.try_recv() {
+            if let Done::Config(config) = done {
+                out.push(config);
+            }
+        }
+        out
+    }
 
     fn press(ed: &mut Editor, code: KeyCode, mods: KeyModifiers) -> bool {
         edit(ed, KeyEvent::new(code, mods))
@@ -1644,6 +1746,122 @@ mod tests {
         for c in text.chars() {
             press(ed, KeyCode::Char(c), KeyModifiers::NONE);
         }
+    }
+
+    #[tokio::test]
+    async fn reply_follows_the_config_as_usage_moves() {
+        let (events_tx, events) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let usage = |used: u32| {
+            json!([{"instanceId": "claudeAgent", "usageLimits": {"checkedAt": "2026-10-31T00:00:00.000Z",
+                "windows": [{"id": "five_hour", "kind": "session", "label": "Session", "usedPercent": used}]}}])
+        };
+        let first = json!({"providers": usage(10), "directEndpoints": []});
+        let item = |value: Value| WatchEvent::Item(value);
+        // A change applies to the config `getConfig` gave, before the stream's snapshot.
+        events_tx
+            .send(item(json!({"version": 1, "type": "providerStatuses", "payload": {"providers": usage(20)}})))
+            .unwrap();
+        events_tx
+            .send(item(json!({"version": 1, "type": "snapshot", "config": {"providers": usage(40), "directEndpoints": []}})))
+            .unwrap();
+        events_tx
+            .send(WatchEvent::Reconnecting {
+                reason: "dropped".into(),
+                retry_in: std::time::Duration::from_secs(1),
+            })
+            .unwrap();
+        events_tx
+            .send(item(json!({"version": 1, "type": "providerStatuses", "payload": {"providers": usage(85)}})))
+            .unwrap();
+        // An event Reply didn't ask for changes nothing, and sends nothing.
+        events_tx
+            .send(item(
+                json!({"version": 1, "type": "environmentThemesUpdated", "payload": {}}),
+            ))
+            .unwrap();
+        events_tx.send(WatchEvent::Failed("gone".into())).unwrap();
+        follow(events, Some(first), &tx).await;
+        let sent = configs(&mut rx);
+        let with = |used: u32| json!({"providers": usage(used), "directEndpoints": []});
+        assert_eq!(sent, vec![with(20), with(40), with(85)]);
+        let windows = crate::usage::windows(&sent[2], "claudeAgent");
+        assert_eq!(windows[0].left, 15);
+    }
+
+    /// Reply for a thread on Codex, on a machine nothing answers at.
+    fn reply_on_codex() -> super::Composer {
+        let machine = t3client::store::Machine {
+            id: "offline".into(),
+            label: "Test".into(),
+            alias: None,
+            origins: vec!["http://127.0.0.1:9".into()],
+            ssh: None,
+            via: t3client::store::Via::Link,
+            version: String::new(),
+        };
+        let env = t3client::env::Env::new(t3client::store::Store::new("/nonexistent"), machine);
+        let (mut reply, _done) = super::Composer::new(std::sync::Arc::new(env), "t1".into());
+        reply.state = t3client::projection::ThreadState::from_snapshot(&json!({
+            "kind": "snapshot", "snapshotSequence": 1,
+            "projection": {
+                "thread": {"id": "t1", "title": "T", "modelSelection": {"instanceId": "codex", "model": "gpt"}},
+                "runs": [], "runtimeRequests": [], "turnItems": [], "visibleTurnItems": []
+            }
+        }));
+        (reply.cols, reply.rows, reply.column) = (120, 30, (0, 120));
+        reply
+    }
+
+    fn codex(session_used: u32) -> Value {
+        json!({"providers": [{"instanceId": "codex", "driver": "codex", "enabled": true,
+            "models": [{"slug": "gpt", "name": "GPT"}],
+            "usageLimits": {"checkedAt": "2026-10-31T00:00:00.000Z",
+                "windows": [{"id": "primary", "kind": "session", "label": "Session", "usedPercent": session_used}]}}]})
+    }
+
+    #[tokio::test]
+    async fn the_usage_beside_the_chip_redraws_when_it_reads_differently() {
+        let mut reply = reply_on_codex();
+        reply.config = Some(codex(24));
+        let drawn = reply.draw(28, true);
+        assert!(drawn.contains("Session 76% left"), "{drawn:?}");
+        assert!(!reply.usage_moved());
+        assert_eq!(
+            reply.config_shown().map(|(_, usage)| usage.is_some()),
+            Some(true)
+        );
+        // Sizing Reply lays it out without drawing it, so the change still shows as one.
+        reply.config = Some(codex(95));
+        reply.height();
+        assert!(reply.usage_moved());
+        assert!(reply.draw(28, false).contains("Session 5% left"));
+        assert!(!reply.usage_moved());
+    }
+
+    #[tokio::test]
+    async fn a_config_that_changes_nothing_shown_draws_nothing() {
+        let mut reply = reply_on_codex();
+        reply.config = Some(codex(24));
+        let shown = reply.config_shown();
+        // T3 checked the provider again: a new time, the same numbers.
+        let mut again = codex(24);
+        again["providers"][0]["usageLimits"]["checkedAt"] = json!("2026-10-31T00:05:00.000Z");
+        reply.config = Some(again);
+        assert_eq!(reply.config_shown(), shown);
+        reply.config = Some(codex(30));
+        assert_ne!(reply.config_shown(), shown);
+    }
+
+    #[tokio::test]
+    async fn a_subscription_that_ends_leaves_the_config_reply_has() {
+        let (events_tx, events) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        events_tx
+            .send(WatchEvent::Failed("unknown method".into()))
+            .unwrap();
+        follow(events, Some(json!({"providers": []})), &tx).await;
+        assert!(configs(&mut rx).is_empty());
     }
 
     #[test]

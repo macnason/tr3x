@@ -74,6 +74,17 @@ machine it's paired with, and draws what T3 says into one Rex session.
   Rex's markers are T3's. `title` is the thread's title. While it waits on you, `msg` is what
   it waits on: `Run` and the command an approval gates, `Edit` and the file, or the question,
   cut to the protocol's 2048 bytes.
+- A thread stopped on a usage limit (the shell's `lastErrorClass` is `usage_limit`) ends on
+  `Usage limit reached · resets 3pm`, from `usageLimitResetAt`, in place of Failed. With
+  `· resumes then` when `limitRecovery` has auto-resume on for that run and that reset, which
+  is what T3's own Resume at reset and its Auto-resume setting do. The line under the label
+  reads `t3rex · Limited · resumes 3pm` or `· resets 3pm`. Both move on with the clock:
+  `tomorrow 9am` becomes `9am`, and `resumes` becomes `resuming` at the reset, until T3 sends
+  the thread on.
+- Reply follows the machine's config subscription (`subscribeServerConfig`), so the usage
+  beside its chip stays current: each of the provider's `usageLimits` windows as the share
+  left, as T3's thread details show them, or only the tightest when they don't all fit beside
+  the chip whole. A used-up window says when it resets.
 - A window's label starts with a mark for T3's status word: `●` Approval, `?` Input, `✕`
   Failed or Limited, `✓` Done or Woke. Working, Goal and Waiting have none, since Rex's spinner
   shows them. Labels are plain text, so the mark has no colour. Sync relabels only when the

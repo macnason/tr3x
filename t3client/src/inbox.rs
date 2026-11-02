@@ -639,6 +639,37 @@ pub fn finished(thread: &Value) -> bool {
     activity(thread).is_none() && latest_run(thread).is_some_and(|run| run.completed)
 }
 
+/// A thread stopped on its provider's usage limit, which T3's sidebar calls Limited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit {
+    /// When the limit resets, in milliseconds. None when the provider didn't say.
+    pub resets_at: Option<i64>,
+    /// T3 will send the thread on at the reset: auto-resume is on for this run and this reset.
+    pub resumes: bool,
+}
+
+/// The usage limit the thread stopped on, when it reads Limited. `usageLimitResetAt` is when
+/// the limit resets. Auto-resume counts only when `limitRecovery` names the latest run and the
+/// same reset, as T3's notice checks, and the thread is neither settled nor archived, which
+/// T3's `UsageLimitRecoveryWorker` skips.
+pub fn limit(thread: &Value) -> Option<Limit> {
+    if activity(thread) != Some(Word::Limited) {
+        return None;
+    }
+    let recovery = &thread["limitRecovery"];
+    let resumes = recovery["autoResume"] == true
+        && !thread["latestRunId"].is_null()
+        && recovery["runId"] == thread["latestRunId"]
+        && !thread["usageLimitResetAt"].is_null()
+        && recovery["resetAt"] == thread["usageLimitResetAt"]
+        && thread["settledOverride"] != "settled"
+        && thread["archivedAt"].is_null();
+    Some(Limit {
+        resets_at: instant(&thread["usageLimitResetAt"]),
+        resumes,
+    })
+}
+
 /// What T3's sidebar would ask of the user for this thread: `user_input` for a question,
 /// another request kind for an approval, or None.
 pub fn pending_kind(thread: &Value) -> Option<&str> {
@@ -752,6 +783,94 @@ mod tests {
             thread(id),
             json!({"snoozedUntil": "2026-10-08T13:00:00.000Z", "snoozedAt": "2026-10-08T11:00:00.000Z"}),
         )
+    }
+
+    /// Stopped on a usage limit that resets at 15:00, as T3's shell reports it.
+    fn limited(recovery: Value) -> Value {
+        with(
+            thread("t"),
+            json!({
+                "latestRunId": "r2",
+                "status": "failed",
+                "lastErrorClass": "usage_limit",
+                "usageLimitResetAt": "2026-10-08T15:00:00.000Z",
+                "limitRecovery": recovery,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_limit_says_when_it_resets_and_whether_t3_resumes_then() {
+        let resets_at = Some(ms("2026-10-08T15:00:00.000Z"));
+        let armed =
+            json!({"runId": "r2", "resetAt": "2026-10-08T15:00:00.000Z", "autoResume": true});
+        assert_eq!(
+            limit(&limited(armed.clone())),
+            Some(Limit {
+                resets_at,
+                resumes: true
+            })
+        );
+        let off = Some(Limit {
+            resets_at,
+            resumes: false,
+        });
+        assert_eq!(limit(&limited(Value::Null)), off);
+        assert_eq!(limit(&without(limited(Value::Null), "limitRecovery")), off);
+        // Turned off, or armed for an earlier run or another reset: not this limit's.
+        let mut stale = armed.clone();
+        stale["autoResume"] = json!(false);
+        assert_eq!(limit(&limited(stale)), off);
+        let mut stale = armed.clone();
+        stale["runId"] = json!("r1");
+        assert_eq!(limit(&limited(stale)), off);
+        let mut stale = armed.clone();
+        stale["resetAt"] = json!("2026-10-08T14:00:00.000Z");
+        assert_eq!(limit(&limited(stale)), off);
+        // T3 doesn't resume a settled or archived thread.
+        let settled = with(
+            limited(armed.clone()),
+            json!({"settledOverride": "settled"}),
+        );
+        assert_eq!(limit(&settled), off);
+        let archived = with(
+            limited(armed.clone()),
+            json!({"archivedAt": "2026-10-08T12:00:00.000Z"}),
+        );
+        assert_eq!(limit(&archived), off);
+        // A provider that didn't say when: no time, and nothing to resume at.
+        let unknown = with(limited(armed.clone()), json!({"usageLimitResetAt": null}));
+        assert_eq!(
+            limit(&unknown),
+            Some(Limit {
+                resets_at: None,
+                resumes: false
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_thread_that_reads_limited_has_a_limit() {
+        assert_eq!(limit(&thread("t")), None);
+        let failed = with(
+            limited(Value::Null),
+            json!({"lastErrorClass": "provider_error"}),
+        );
+        assert_eq!(status_label(&failed, now()), Some("Failed"));
+        assert_eq!(limit(&failed), None);
+        // Resumed: the new run is under way, whatever the shell still says about the last one.
+        let resumed = with(
+            limited(Value::Null),
+            json!({"activityRunStatus": "running"}),
+        );
+        assert_eq!(limit(&resumed), None);
+        // A request for the user comes first, as on the card.
+        let asks = with(
+            limited(Value::Null),
+            json!({"pendingRuntimeRequest": {"kind": "user_input"}}),
+        );
+        assert_eq!(limit(&asks), None);
+        assert_eq!(status_label(&limited(Value::Null), now()), Some("Limited"));
     }
 
     #[test]
