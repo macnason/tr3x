@@ -2,28 +2,33 @@
 
 Your [T3 Code](https://github.com/pingdotgg/t3code) threads, as tabs in [Rex](https://www.superlogical.com/rex).
 
+<p align="center">
+  <video src="docs/assets/tr3x.mp4" poster="docs/assets/tr3x-poster.jpg" width="480" controls muted loop playsinline></video>
+</p>
+
 T3 runs the agents. Rex is where you read and reply. Each open thread is a tab in one Rex
 session, **T3 Code**, sorted the way T3's sidebar sorts them: whatever needs you on top. That
 goes for every machine you run T3 on, without the T3 app. tr3x runs no agent of its own: every
 message, approval and setting goes to T3.
 
-![Rex in dark mode with the T3 Code session: a thread that needs you at the top, threads working on Claude, Codex and Gemini, another machine's threads under it, and an agent's HTML preview inline in the conversation](docs/assets/hero.png)
+![The T3 Code session in Rex: a thread that needs you at the top, threads working on Claude, Codex and Gemini, another machine's threads under them, and an agent's HTML preview inline](docs/assets/hero.png)
 
 ## Install
 
-Needs [Rex](https://www.superlogical.com/rex) (Rex Beta on a Mac), on a Mac or Linux, and T3 Code
-running with at least one project. HTML previews use Chrome or Chromium when it's installed.
-Pull requests open in [sup](https://github.com/superultrainc/sup); the drawer offers to add it.
+Needs a Mac or Linux machine, [Rex](https://www.superlogical.com/rex) (Rex Beta on a Mac), and T3
+Code running with at least one project. HTML previews use Chrome or Chromium if it's installed.
+Pull requests open in [sup](https://github.com/superultrainc/sup), which the drawer offers to add.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | sh
 ```
 
-That opens Rex and T3 if they aren't running, downloads the latest release and checks its
-SHA-256, installs `~/.local/bin/tr3x`, adds its actions and keys to Rex's config, and switches
-Rex to **T3 Code**. Rex starts tr3x's sync as its config loads, so it runs whenever Rex does.
-Rex pairs with this Mac's T3 on its own. Other machines on your tailnet that run T3 are found
-and offered: one confirm where SSH reaches them, else one command to run there.
+On a Mac that opens Rex and T3 Code if they aren't running; on Linux it starts Rex's server as
+a service. It downloads the latest release and checks its SHA-256, installs `~/.local/bin/tr3x`,
+adds its actions and keys to Rex's config, and switches Rex to **T3 Code**. Rex starts tr3x's
+sync as its config loads, so it runs whenever Rex does. This machine's T3 is paired on its own.
+Other machines on your tailnet that run T3 are found and offered: one confirm where SSH reaches
+them, else one command to run there.
 
 From a clone, `install.sh` builds with cargo instead:
 
@@ -55,19 +60,16 @@ With no open threads you get a **New Thread** tab with the keys that matter. Wit
 in T3 yet, it opens on a folder to add as one. If T3 Code isn't running, the tab says so and
 carries on once it is.
 
-T3 Code runs this Mac's agents, so they stop when it quits (⌘Q, an update, a restart). Closing
-its window doesn't quit it. To keep agents going with the app quit, run T3 on a machine that
-stays on (`t3 service install` there) and pair it: threads you start on it keep running.
-
-**A machine that stays on.** Run the installer on a Linux box or a Mac you leave running, with
-T3 as a service (`t3 service install`). It keeps Rex's server running there as a service and
-syncs next to T3, so the session and its agents don't depend on any one screen. It prints the
-command that adds the machine as a host in Rex on your other devices (`rex hosts add NAME
-https://<machine>-rex.<tailnet>.ts.net`). The first time, approve the new device it asks for in
-your Tailscale account; the address is yours alone. The host shows in Rex's sidebar once it's
-ticked in **Filter Hosts** and has a session open, which tr3x's **T3 Code** is. Those devices need only Rex: the
-panes run on the host. On Linux the Reply input sits between two rules instead of on a fill,
-since there's no Rex app to read a theme from.
+**A machine that stays on.** Agents run on the machine their T3 runs on, and stop when it quits
+(⌘Q, an update, a restart; closing its window doesn't quit it). To keep them going, run T3 as a
+service (`t3 service install`) on a Linux box or a Mac you leave on, and run the installer
+there. It keeps Rex's server running as a service and syncs next to T3, so the session doesn't
+depend on any one screen. It prints the command that adds the machine as a host in Rex on your
+other devices (`rex hosts add NAME https://<machine>-rex.<tailnet>.ts.net`); the first time,
+approve the new device it asks for in your Tailscale account. Tick the host in **Filter Hosts**
+to see its session. Those devices need only Rex: the panes run on the host. On Linux, Reply sits
+between two rules rather than on a fill, since there's no Rex app to read a theme from.
+[Choosing the host](docs/hosting.md) has the rest.
 
 **Another machine.** Run `tr3x pair`. It finds the machines on your tailnet that run T3 and
 pairs each one: from here where `ssh` reaches it, else with one command to run there.
@@ -105,8 +107,6 @@ palette on the phone, and the tabs take its size.
 - **Up to date on its own.** tr3x installs its updates in the background, and each tab picks
   the new version up once nothing's typed in it. When T3 has an update on one of your machines,
   Reply says so, and `/update` installs it there, through T3, even if you never open T3 Code.
-- **Close to settle.** Closing a tab settles the thread. A thread that's still working only
-  hides until it changes, so nothing gets stopped by accident.
 
 ## Let your agent drive it
 
@@ -124,7 +124,7 @@ to "set up tr3x", or "why isn't my new thread showing in Rex?".
 ## Docs
 
 - [Using tr3x](docs/usage.md): every key, command and setting, chat width, and known limits.
-- [Choosing the host](docs/hosting.md): which machine runs Rex and sync, attaching clients,
+- [Choosing the host](docs/hosting.md): which machine runs Rex and sync, attaching clients, and
   moving the host.
 - [How it works](docs/how-it-works.md): sync, machines, pairing, the panes, and install in
   detail.
