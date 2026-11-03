@@ -2,9 +2,12 @@ name: release
 
 # A tag like v0.2.0 builds a universal macOS binary and Linux binaries and attaches them to
 # that tag's release, where install.sh downloads the latest from.
+# Run by hand, it only builds and keeps the files as a run artifact, so a release can be tried
+# before it's tagged.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -30,13 +33,21 @@ jobs:
           codesign --force --sign - "dist/$NAME/t3rex"
           lipo -info "dist/$NAME/t3rex"
           # The updater refuses a binary that doesn't say its release's version.
-          test "$("dist/$NAME/t3rex" --version)" = "t3rex ${GITHUB_REF_NAME#v}" \
+          want=${GITHUB_REF_NAME#v}
+          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' t3rex/Cargo.toml | head -1)
+          test "$("dist/$NAME/t3rex" --version)" = "t3rex $want" \
             || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           cat "dist/$NAME.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: ${{ env.NAME }}
+          path: dist/*.tar.gz*
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -65,13 +76,21 @@ jobs:
           mkdir -p "dist/$NAME"
           cp target/release/t3rex "dist/$NAME/t3rex"
           # The updater refuses a binary that doesn't say its release's version.
-          test "$("dist/$NAME/t3rex" --version)" = "t3rex ${GITHUB_REF_NAME#v}" \
+          want=${GITHUB_REF_NAME#v}
+          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' t3rex/Cargo.toml | head -1)
+          test "$("dist/$NAME/t3rex" --version)" = "t3rex $want" \
             || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           cat "dist/$NAME.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: ${{ env.NAME }}
+          path: dist/*.tar.gz*
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
