@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/macnason/t3rex"
+publish = false
 description = "Rex as the interface to T3 Code: one Rex window per T3 thread."
 
 [dependencies]
