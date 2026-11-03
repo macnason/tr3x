@@ -3,7 +3,7 @@
 Your [T3 Code](https://github.com/pingdotgg/t3code) threads, as tabs in [Rex](https://www.superlogical.com/rex).
 
 <p align="center">
-  <video src="docs/assets/tr3x.mp4" poster="docs/assets/tr3x-poster.jpg" width="480" controls muted loop playsinline></video>
+  <a href="docs/assets/tr3x.mp4"><img src="docs/assets/tr3x-poster.jpg" width="480" alt="Watch the film: tr3x in 23 seconds"></a>
 </p>
 
 T3 runs the agents. Rex is where you read and reply. Each open thread is a tab in one Rex
