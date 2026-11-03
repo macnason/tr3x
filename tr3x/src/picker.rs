@@ -277,7 +277,13 @@ pub fn chips(
     open: Option<usize>,
     left: usize,
 ) -> (String, Vec<(usize, usize)>) {
-    chips_grouped(painter, chips, focused, open, left, &[])
+    draw(painter, chips, focused, open, left, &[], true)
+}
+
+/// Chips without their ` ▾`, for a line that doesn't take clicks, as Reply's doesn't unless
+/// it has buttons to answer: they say what's set, and Tab or `/model` changes it.
+pub fn labels(painter: &mut Painter, chips: &[Chip], left: usize) -> (String, Vec<(usize, usize)>) {
+    draw(painter, chips, None, None, left, &[], false)
 }
 
 pub fn chips_grouped(
@@ -287,6 +293,18 @@ pub fn chips_grouped(
     open: Option<usize>,
     left: usize,
     grouped: &[usize],
+) -> (String, Vec<(usize, usize)>) {
+    draw(painter, chips, focused, open, left, grouped, true)
+}
+
+fn draw(
+    painter: &mut Painter,
+    chips: &[Chip],
+    focused: Option<usize>,
+    open: Option<usize>,
+    left: usize,
+    grouped: &[usize],
+    caret: bool,
 ) -> (String, Vec<(usize, usize)>) {
     let mut line = String::new();
     let mut spans = Vec::new();
@@ -302,7 +320,7 @@ pub fn chips_grouped(
             }
         }
         let start = col;
-        let label = if grouped.contains(&(i + 1)) || grouped.contains(&i) {
+        let label = if !caret || grouped.contains(&(i + 1)) || grouped.contains(&i) {
             chip.label.clone()
         } else {
             format!("{} ▾", chip.label)
@@ -864,6 +882,21 @@ mod tests {
         let (items, _) = codex.menu(Field::Access, &config, &logos);
         assert_eq!(ids(&items), ["approval-required", "full-access"]);
         assert_eq!(items[0].label, "Supervised");
+    }
+
+    #[test]
+    fn labels_drop_the_caret_that_chips_draw() {
+        let mut painter = Painter::default();
+        let chip = || Chip {
+            icon: None,
+            label: "Opus · High".into(),
+        };
+        let (line, spans) = chips(&mut painter, &[chip()], None, None, 0);
+        assert!(line.contains("Opus · High ▾"));
+        assert_eq!(spans, [(1, 13)]);
+        let (line, spans) = labels(&mut painter, &[chip()], 0);
+        assert!(line.contains("Opus · High") && !line.contains('▾'));
+        assert_eq!(spans, [(1, 11)]);
     }
 
     #[test]

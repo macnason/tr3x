@@ -523,8 +523,8 @@ impl Composer {
             draft.over(config, &mut settings);
         }
         let icon = self.logos.get(&settings.instance).cloned();
-        // The logo and the ` ▾` take five columns.
-        let room = width.saturating_sub(if icon.is_some() { 5 } else { 2 });
+        // The logo takes three columns.
+        let room = width.saturating_sub(if icon.is_some() { 3 } else { 0 });
         vec![(
             Chip {
                 icon,
@@ -548,12 +548,12 @@ impl Composer {
             .into_iter()
             .filter(|window| window.left <= 20)
             .collect();
-        // The chip as the chips would draw it, with its logo and ` ▾`, and two columns apart.
+        // The chip as Reply draws it, with its logo, and two columns apart.
         let chip = unicode_width::UnicodeWidthStr::width(settings.summary(config, 1000).as_str())
             + if self.logos.contains_key(&settings.instance) {
-                5
+                3
             } else {
-                2
+                0
             };
         let room = width.checked_sub(chip + 2)?;
         // A provider that isn't ready says so in place of its limits, wherever it runs.
@@ -736,7 +736,7 @@ impl Composer {
                     label: c.label.clone(),
                 })
                 .collect();
-            let (mut line, spans) = picker::chips(&mut self.painter, &only, None, None, left);
+            let (mut line, spans) = picker::labels(&mut self.painter, &only, left);
             usage = self.usage(column);
             if let Some(usage) = &usage {
                 line.push_str("  ");
