@@ -84,9 +84,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
   `tomorrow 9am` becomes `9am`, and `resumes` becomes `resuming` at the reset, until T3 sends
   the thread on.
 - Reply follows the machine's config subscription (`subscribeServerConfig`), so the usage
-  beside its chip stays current: each of the provider's `usageLimits` windows as the share
-  left, as T3's thread details show them, or only the tightest when they don't all fit beside
-  the chip whole. A used-up window says when it resets.
+  beside its chip stays current: provider `usageLimits` windows appear at 20% remaining or
+  less, or only the tightest when they don't all fit beside the chip whole. A used-up window says when it resets.
 - A window's label starts with a mark for T3's status word: `●` Approval, `?` Input, `✕`
   Failed or Limited, `✓` Done or Woke. Working, Goal and Waiting have none, since Rex's spinner
   shows them. Labels are plain text, so the mark has no colour. Sync relabels only when the

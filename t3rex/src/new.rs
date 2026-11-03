@@ -271,12 +271,12 @@ impl NewThread {
     }
 
     fn fields(&self) -> Vec<Field> {
-        let mut out = Vec::new();
+        let mut out = vec![Field::Project];
         // Only with a choice to make: one machine and nothing to pair reads as it always has.
         if self.machines.len() > 1 || !self.candidates.is_empty() {
             out.push(Field::Machine);
         }
-        out.extend([Field::Project, Field::Setting(pick::Field::Model)]);
+        out.push(Field::Setting(pick::Field::Model));
         if !picker::effort_items(&self.config, &self.settings).is_empty() {
             out.push(Field::Setting(pick::Field::Effort));
         }
@@ -292,7 +292,10 @@ impl NewThread {
 
     fn chip(&self, field: Field) -> Chip {
         let (icon, label) = match field {
-            Field::Machine => (None, self.client.name().to_string()),
+            Field::Machine => (
+                Some(Icon::Text("▣".into(), 8)),
+                self.client.name().to_string(),
+            ),
             Field::Project => {
                 let p = self.project_value();
                 (
@@ -739,7 +742,15 @@ return {{}}"#,
         } else {
             open
         };
-        let (row, spans) = picker::chips(&mut self.painter, &chips, self.focus, open, left);
+        let grouped: Vec<usize> = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                matches!(f, Field::Setting(pick::Field::Effort | pick::Field::Access)).then_some(i)
+            })
+            .collect();
+        let (row, spans) =
+            picker::chips_grouped(&mut self.painter, &chips, self.focus, open, left, &grouped);
         self.chip_row = lines.len() as u16;
         lines.push(format!("{pad}{row}"));
         self.chip_spans = spans;
