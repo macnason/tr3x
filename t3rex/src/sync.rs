@@ -1111,7 +1111,7 @@ fn machines_stamp(hub: &Hub) -> Option<std::time::SystemTime> {
         .ok()
 }
 
-type Shells = tokio::sync::mpsc::UnboundedSender<(String, WatchEvent)>;
+type Shells = tokio::sync::mpsc::Sender<(String, WatchEvent)>;
 
 /// Gives each of `envs` not followed yet a track and a shell subscription, and lets go of the
 /// tracks of machines no longer among them, subscriptions with them. A machine that's only out
@@ -1174,7 +1174,7 @@ async fn follow(
     if !home.is_empty() {
         syncer.persist()?;
     }
-    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut events) = tokio::sync::mpsc::channel(32);
     let (config_tx, mut configs) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
     let mut tracks: BTreeMap<String, Track> = BTreeMap::new();
     let started = Instant::now();
@@ -1184,6 +1184,8 @@ async fn follow(
     let mut dirty = false;
     let mut last: Vec<Want> = Vec::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut next_reconcile = tokio::time::Instant::now();
     loop {
         let take = |env: String, event: WatchEvent, tracks: &mut BTreeMap<String, Track>| {
             let Some(track) = tracks.get_mut(&env) else {
@@ -1235,15 +1237,20 @@ async fn follow(
             }
             _ = tick.tick() => dirty = true,
             _ = wake.recv() => dirty = true,
+            _ = tokio::time::sleep_until(next_reconcile), if dirty => {},
         }
         // Drain a burst before acting, so a snapshot's items reconcile once.
-        while let Ok((env, event)) = events.try_recv() {
+        for _ in 0..32 {
+            let Ok((env, event)) = events.try_recv() else {
+                break;
+            };
             take(env, event, &mut tracks);
         }
-        if !dirty {
+        if !dirty || tokio::time::Instant::now() < next_reconcile {
             continue;
         }
         dirty = false;
+        next_reconcile = tokio::time::Instant::now() + Duration::from_millis(100);
         let now = Instant::now();
         // Find Thread brought these back: a window closed while they worked no longer hides them.
         for key in take_restores() {
@@ -1980,7 +1987,7 @@ mod tests {
             Fake::start(false).await,
             Fake::start(true).await,
         );
-        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _events) = tokio::sync::mpsc::channel(32);
         let mut tracks = BTreeMap::new();
         let (env_a, env_b, env_c) = (
             env_at("a", &a.origin),

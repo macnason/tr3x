@@ -24,13 +24,37 @@ pub struct Rendered {
 }
 
 /// Render `text` as GitHub-flavoured markdown for a terminal `width` columns wide.
+#[cfg(test)]
 pub fn markdown(text: &str, width: usize) -> Rendered {
+    markdown_resolved(text, width, str::to_string)
+}
+
+pub fn markdown_with_links(text: &str, width: usize, links: &crate::link::FileLinks) -> Rendered {
+    markdown_resolved(text, width, |url| links.resolve(url))
+}
+
+fn markdown_resolved(text: &str, width: usize, resolve: impl Fn(&str) -> String) -> Rendered {
     let width = width.max(MIN_WIDTH);
     let opts = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES;
-    let events: Vec<Event> = TextMergeStream::new(Parser::new_ext(text, opts)).collect();
+    let events: Vec<Event> = TextMergeStream::new(Parser::new_ext(text, opts))
+        .map(|event| match event {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => Event::Start(Tag::Link {
+                link_type,
+                dest_url: resolve(&dest_url).into(),
+                title,
+                id,
+            }),
+            other => other,
+        })
+        .collect();
     let blocks = Builder::new(events).run();
     let cx = Ctx {
         base: Style::default(),
@@ -1720,6 +1744,20 @@ Final line.
         assert_eq!(p, vec!["☐ open", "☑ done"]);
         assert!(ls[1].starts_with("\x1b[32m☑"));
         assert!(!ls[1].contains("\x1b[9m"));
+    }
+
+    #[test]
+    fn unresolved_file_links_stay_plain_and_web_links_stay_clickable() {
+        let links = crate::link::FileLinks::default();
+        let result = markdown_with_links(
+            "[report](docs/a.md:12) [web](https://example.com)",
+            80,
+            &links,
+        );
+        let joined = result.lines.join("\n");
+        assert!(joined.contains("report"));
+        assert!(!joined.contains(";;docs/a.md"));
+        assert!(joined.contains(";;https://example.com"));
     }
 
     #[test]

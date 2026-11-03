@@ -40,6 +40,8 @@ const ABANDONED: &str = "t3rex dropped every handle on the connection";
 /// last handle drops, the `Ack` and `Interrupt` frames still queued before it too. A peer that
 /// stopped reading never takes them, and the socket drops without them.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
+const WRITE_LIMIT: Duration = Duration::from_secs(30);
+const WRITE_MIN_RATE: usize = 32 * 1024;
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// No frame at all for this long means the socket is dead even if TCP has not noticed.
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
@@ -256,9 +258,9 @@ impl RpcClient {
     }
 
     pub async fn connect_url(url: &str) -> Result<RpcClient> {
-        // `false` leaves Nagle's algorithm on, as `connect_async` does.
+        // Small commands and Acks should not wait for Nagle coalescing.
         let connecting =
-            tokio_tungstenite::connect_async_with_config(url, Some(socket_config()), false);
+            tokio_tungstenite::connect_async_with_config(url, Some(socket_config()), true);
         let (socket, _) = connecting
             .await
             .map_err(|e| RpcError::Disconnected(format!("could not open the WebSocket: {e}")))?;
@@ -288,13 +290,9 @@ impl RpcClient {
             // A frame the task took from the queue when `close` or the last handle dropping
             // stopped it, before the sink took the frame. None of it went out.
             let mut unsent: Option<Value> = None;
-            let stop = loop {
-                // `close`, or the last handle dropping, may have come while the task was busy,
-                // or before it first ran.
-                if let Some(stop) = reader_closing.stop() {
-                    break stop;
-                }
-                tokio::select! {
+            let reading = async {
+                loop {
+                    tokio::select! {
                     frame = source.next() => {
                         last_frame = Instant::now();
                         let decoded = match frame {
@@ -325,54 +323,61 @@ impl RpcClient {
                             handle_message(message, &reader_pending, &ack).await;
                         }
                     }
-                    Some(message) = outgoing_rx.recv() => {
-                        if message["_tag"] == "Interrupt" {
-                            forget_bounded(&reader_pending, &message).await;
-                        }
-                        // The task keeps the frame until the sink takes it. If the task stops
-                        // first, the frame goes where the ones still queued go, after the loop.
-                        let text = Message::Text(message.to_string().into());
-                        tokio::select! {
-                            biased;
-                            stop = reader_closing.stopping() => {
-                                unsent = Some(message);
-                                break stop;
+                        _ = ping.tick() => {
+                            if last_frame.elapsed() > SILENCE_LIMIT {
+                                break Stop::Lost(format!("no frame from T3 for {} seconds", SILENCE_LIMIT.as_secs()));
                             }
-                            fed = sink.feed(text) => {
-                                if let Err(e) = fed {
-                                    break Stop::Lost(e.to_string());
-                                }
+                            if ack.send(json!({"_tag": "Ping"})).is_err() {
+                                break Stop::Lost("writer ended".into());
                             }
                         }
-                        // The frame has started to go out, and the task never sends it again.
-                        // A write T3 doesn't read can wait forever, so `close` and the last
-                        // handle dropping cut it short.
-                        tokio::select! {
-                            biased;
-                            stop = reader_closing.stopping() => break stop,
-                            flushed = sink.flush() => {
-                                if let Err(e) = flushed {
-                                    break Stop::Lost(e.to_string());
-                                }
-                            }
-                        }
+                        stop = reader_closing.stopping() => break stop,
                     }
-                    _ = ping.tick() => {
-                        if last_frame.elapsed() > SILENCE_LIMIT {
-                            break Stop::Lost(format!("no frame from T3 for {} seconds", SILENCE_LIMIT.as_secs()));
-                        }
-                        tokio::select! {
-                            biased;
-                            stop = reader_closing.stopping() => break stop,
-                            sent = sink.send(Message::Text(json!({"_tag": "Ping"}).to_string().into())) => {
-                                if sent.is_err() {
-                                    break Stop::Lost("ping failed".to_string());
-                                }
-                            }
-                        }
-                    }
-                    stop = reader_closing.stopping() => break stop,
                 }
+            };
+            let writing = async {
+                loop {
+                    if let Some(stop) = reader_closing.stop() {
+                        break stop;
+                    }
+                    let message = tokio::select! {
+                        Some(message) = outgoing_rx.recv() => message,
+                        stop = reader_closing.stopping() => break stop,
+                    };
+                    unsent = Some(message);
+                    let message = unsent.as_ref().expect("just took a frame");
+                    if message["_tag"] == "Interrupt" {
+                        forget_bounded(&reader_pending, message).await;
+                    }
+                    let text = Message::Text(message.to_string().into());
+                    // Slow links get time in proportion to the frame: 30 s plus 32 KiB/s of payload.
+                    let deadline = tokio::time::Instant::now()
+                        + WRITE_LIMIT
+                        + Duration::from_secs((text.len() / WRITE_MIN_RATE) as u64);
+                    tokio::select! {
+                        biased;
+                        stop = reader_closing.stopping() => break stop,
+                        fed = tokio::time::timeout_at(deadline, sink.feed(text)) => match fed {
+                            Ok(Ok(())) => { unsent.take(); }
+                            Ok(Err(e)) => break Stop::Lost(e.to_string()),
+                            Err(_) => break Stop::Lost("WebSocket write stalled for 30 seconds".into()),
+                        }
+                    }
+                    // Once handed to the sink a mutation is never replayed, even if flushing fails.
+                    tokio::select! {
+                        biased;
+                        stop = reader_closing.stopping() => break stop,
+                        flushed = tokio::time::timeout_at(deadline, sink.flush()) => match flushed {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => break Stop::Lost(e.to_string()),
+                            Err(_) => break Stop::Lost("WebSocket write stalled for 30 seconds".into()),
+                        }
+                    }
+                }
+            };
+            let stop = tokio::select! {
+                stop = reading => stop,
+                stop = writing => stop,
             };
             let (error, abandoned) = match stop {
                 Stop::Closed => (RpcError::Disconnected(CLOSED.to_string()), false),
@@ -1130,6 +1135,37 @@ mod tests {
                 return frame;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_blocked_write_does_not_stop_incoming_stream_items() {
+        let (rpc, task, server) = piped().await;
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut stream = rpc.stream("example.stream", json!({})).await.unwrap();
+        let id = next_frame(&mut server).await["id"].clone();
+        let payload = json!({"data": "x".repeat(WRITE)});
+        rpc.request("blocked", "terminal.write", payload).unwrap();
+        // Observe a partial request on the finite pipe, then stop draining it.
+        let mut byte = [0];
+        within(server.get_mut().read_exact(&mut byte))
+            .await
+            .unwrap();
+        server
+            .send(Message::Text(
+                json!({
+                    "_tag": "Chunk", "requestId": id, "values": ["still reading"]
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            within(stream.next()).await.unwrap().unwrap(),
+            json!("still reading")
+        );
+        rpc.close();
+        within(task).await.unwrap();
     }
 
     /// The task takes a stream's Interrupt from the queue and waits for the map of requests,

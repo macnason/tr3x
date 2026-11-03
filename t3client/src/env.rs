@@ -19,7 +19,7 @@ use crate::error::{code_of, err, err_exit, exit};
 use crate::http::Api;
 use crate::models::Plan;
 use crate::projection::{ShellState, ThreadState};
-use crate::rpc::{RpcClient, RpcError};
+use crate::rpc::{RpcClient, RpcError, StreamLimits};
 use crate::store::{Machine, Store, Via};
 
 pub(crate) const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -146,7 +146,14 @@ impl Env {
     /// The first address that answers as this machine, on the protocol t3rex speaks.
     pub async fn route(&self) -> Result<Descriptor> {
         let mut last = None;
-        for origin in self.origins() {
+        let mut origins = self.origins();
+        if let Some(last) = self.descriptor()
+            && let Some(index) = origins.iter().position(|origin| origin == &last.origin)
+        {
+            let first = origins.remove(index);
+            origins.insert(0, first);
+        }
+        for origin in origins {
             match descriptor::fetch(&origin).await {
                 Ok(found) => {
                     if let Err(e) = found.require_environment(&self.machine.id) {
@@ -668,7 +675,7 @@ impl Env {
         self: &Arc<Self>,
         thread_id: &str,
         after_sequence: Option<u64>,
-    ) -> mpsc::UnboundedReceiver<WatchEvent> {
+    ) -> mpsc::Receiver<WatchEvent> {
         let client = self.clone();
         let payload = json!({"threadId": thread_id, "requestCompletionMarker": true, "acceptBoundedSnapshot": true});
         spawn_watch(
@@ -685,7 +692,7 @@ impl Env {
     pub fn watch_shell(
         self: &Arc<Self>,
         after_sequence: Option<u64>,
-    ) -> mpsc::UnboundedReceiver<WatchEvent> {
+    ) -> mpsc::Receiver<WatchEvent> {
         let client = self.clone();
         spawn_watch(
             move || {
@@ -699,7 +706,7 @@ impl Env {
     }
 
     /// Streams the server's configuration, as `spawn_config_watch` describes.
-    pub fn watch_config(self: &Arc<Self>) -> mpsc::UnboundedReceiver<WatchEvent> {
+    pub fn watch_config(self: &Arc<Self>) -> mpsc::Receiver<WatchEvent> {
         let client = self.clone();
         spawn_config_watch(move || {
             let client = client.clone();
@@ -769,7 +776,7 @@ pub fn spawn_watch<F>(
     tag: &'static str,
     payload: Value,
     after_sequence: Option<u64>,
-) -> mpsc::UnboundedReceiver<WatchEvent>
+) -> mpsc::Receiver<WatchEvent>
 where
     F: Fn() -> Pin<Box<dyn Future<Output = Result<RpcClient>> + Send>> + Send + Sync + 'static,
 {
@@ -785,7 +792,7 @@ where
 /// subscription opens with a snapshot of the whole configuration and goes on with changes to
 /// parts of it. The stream has no cursor, so a resubscribe asks for nothing but a new snapshot.
 /// The payload is empty, which leaves out the theme and usage-limit events t3rex doesn't read.
-pub fn spawn_config_watch<F>(connect: F) -> mpsc::UnboundedReceiver<WatchEvent>
+pub fn spawn_config_watch<F>(connect: F) -> mpsc::Receiver<WatchEvent>
 where
     F: Fn() -> Pin<Box<dyn Future<Output = Result<RpcClient>> + Send>> + Send + Sync + 'static,
 {
@@ -802,8 +809,10 @@ fn watch(
     tag: &'static str,
     payload: Value,
     resume: Resume,
-) -> mpsc::UnboundedReceiver<WatchEvent> {
-    let (events, receiver) = mpsc::unbounded_channel();
+) -> mpsc::Receiver<WatchEvent> {
+    // One forwarded value plus one unaccepted RPC chunk. Each is bounded by the
+    // 64 MiB protocol message limit; moving values avoids cloning large snapshots.
+    let (events, receiver) = mpsc::channel(1);
     tokio::spawn(async move {
         let mut last_sequence = match resume {
             Resume::AfterSequence(sequence) => sequence,
@@ -823,7 +832,8 @@ fn watch(
                     if let Some(sequence) = last_sequence {
                         request["afterSequence"] = json!(sequence);
                     }
-                    match rpc.stream(tag, request).await {
+                    let limits = StreamLimits::new(1, 64 << 20).expect("nonzero watch limits");
+                    match rpc.bounded_stream(tag, request, limits).await {
                         Err(e) => e.to_string(),
                         Ok(mut stream) => loop {
                             let next = tokio::select! {
@@ -832,23 +842,29 @@ fn watch(
                                 _ = events.closed() => return,
                             };
                             match next {
-                                Some(Ok(item)) => {
-                                    if resume.healthy(&item) {
-                                        backoff = Duration::from_millis(250);
+                                Some(Ok(mut chunk)) => {
+                                    // Keep the chunk unacked until every value has entered bounded
+                                    // downstream state. Backpressure never holds the RPC reader.
+                                    for item in chunk.take_values() {
+                                        if resume.healthy(&item) {
+                                            backoff = Duration::from_millis(250);
+                                        }
+                                        let sequence = delivered_sequence(&item);
+                                        if events.send(WatchEvent::Item(item)).await.is_err() {
+                                            return;
+                                        }
+                                        if let Resume::AfterSequence(_) = resume
+                                            && let Some(sequence) = sequence
+                                        {
+                                            last_sequence = Some(
+                                                last_sequence.map_or(sequence, |l| l.max(sequence)),
+                                            );
+                                        }
                                     }
-                                    if let Resume::AfterSequence(_) = resume
-                                        && let Some(sequence) = delivered_sequence(&item)
-                                    {
-                                        last_sequence = Some(
-                                            last_sequence.map_or(sequence, |l| l.max(sequence)),
-                                        );
-                                    }
-                                    if events.send(WatchEvent::Item(item)).is_err() {
-                                        return;
-                                    }
+                                    chunk.accept();
                                 }
                                 Some(Err(RpcError::Failed { message, .. })) => {
-                                    let _ = events.send(WatchEvent::Failed(message));
+                                    let _ = events.send(WatchEvent::Failed(message)).await;
                                     return;
                                 }
                                 Some(Err(e)) => break e.to_string(),
@@ -859,17 +875,17 @@ fn watch(
                     }
                 }
             };
+            let jitter_ms = uuid::Uuid::new_v4().as_u128() % (backoff.as_millis() / 4 + 1);
+            let retry_in = backoff + Duration::from_millis(jitter_ms as u64);
             if events
-                .send(WatchEvent::Reconnecting {
-                    reason,
-                    retry_in: backoff,
-                })
+                .send(WatchEvent::Reconnecting { reason, retry_in })
+                .await
                 .is_err()
             {
                 return;
             }
             tokio::select! {
-                _ = tokio::time::sleep(backoff) => {}
+                _ = tokio::time::sleep(retry_in) => {}
                 _ = events.closed() => return,
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -936,7 +952,7 @@ pub(crate) mod tests {
     use crate::projection::{Applied, apply_config};
 
     pub(crate) type Socket = WebSocketStream<TcpStream>;
-    type Events = mpsc::UnboundedReceiver<WatchEvent>;
+    type Events = mpsc::Receiver<WatchEvent>;
 
     const SHELL: &str = "orchestration.subscribeShell";
     const THREAD: &str = "orchestration.subscribeThread";
@@ -1074,7 +1090,9 @@ pub(crate) mod tests {
         match next_event(events).await {
             WatchEvent::Reconnecting { reason, retry_in } => {
                 assert!(reason.starts_with("T3 connection lost"), "{reason}");
-                assert_eq!(retry_in, Duration::from_millis(250));
+                assert!(
+                    (Duration::from_millis(250)..=Duration::from_millis(312)).contains(&retry_in)
+                );
             }
             other => panic!("expected a reconnect, got {other:?}"),
         }
@@ -1111,6 +1129,58 @@ pub(crate) mod tests {
             .iter()
             .map(|provider| provider["instanceId"].as_str().unwrap())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_slow_watch_consumer_delays_ack_without_losing_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = client_at(&format!("http://{}", listener.local_addr().unwrap()));
+        let (checked, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut tickets = 0;
+            let (_, mut socket) = open(&listener, &mut tickets).await;
+            let request = recv(&mut socket).await;
+            assert_eq!(request["tag"], SHELL);
+            let id = &request["id"];
+            let values = json!([
+                renamed(1, "t", "one"),
+                renamed(2, "t", "two"),
+                renamed(3, "t", "three")
+            ]);
+            socket
+                .send(Message::Text(
+                    json!({"_tag": "Chunk", "requestId": id, "values": values})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), socket.next())
+                    .await
+                    .is_err()
+            );
+            checked.send(()).unwrap();
+            assert_eq!(
+                recv(&mut socket).await,
+                json!({"_tag": "Ack", "requestId": id})
+            );
+            assert_eq!(recv(&mut socket).await, interrupt(id));
+        });
+        let mut events = client.watch_shell(None);
+        waiting.await.unwrap();
+        let received = items(&mut events, 3).await;
+        assert_eq!(
+            received
+                .iter()
+                .map(|item| item["sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        // Let the watcher accept the fully forwarded chunk before cancellation.
+        tokio::task::yield_now().await;
+        drop(events);
+        server.await.unwrap();
     }
 
     /// The three watches a pane runs for an open thread share the connection `Client::rpc`
@@ -1191,34 +1261,38 @@ pub(crate) mod tests {
         let mut thread_events = client.watch_thread("t1", None);
         let mut config_events = client.watch_config();
 
+        // Drain independent streams concurrently: a slow consumer now backpressures its
+        // own Ack, rather than forcing the watcher to retain an unbounded backlog.
+        let (shell_first, thread_first, config_first) = tokio::join!(
+            items(&mut shell_events, 3),
+            items(&mut thread_events, 3),
+            items(&mut config_events, 1)
+        );
+        tokio::join!(
+            reconnecting(&mut shell_events),
+            reconnecting(&mut thread_events),
+            reconnecting(&mut config_events)
+        );
+        let (shell_again, thread_again, config_again) = tokio::join!(
+            items(&mut shell_events, 3),
+            items(&mut thread_events, 3),
+            items(&mut config_events, 1)
+        );
         let rename = Applied::Event("thread.updated".into());
         let mut shell = ShellState::default();
-        let mut apply_shell = |items: Vec<Value>| -> Vec<Applied> {
-            items.iter().map(|item| shell.apply(item)).collect()
-        };
-        let applied = apply_shell(items(&mut shell_events, 3).await);
-        assert_eq!(applied, [Snapshot, Synchronized, rename.clone()]);
-        reconnecting(&mut shell_events).await;
-        let applied = apply_shell(items(&mut shell_events, 3).await);
-        assert_eq!(applied, [Duplicate, rename.clone(), Synchronized]);
-
+        let first: Vec<_> = shell_first.iter().map(|item| shell.apply(item)).collect();
+        assert_eq!(first, [Snapshot, Synchronized, rename.clone()]);
+        let again: Vec<_> = shell_again.iter().map(|item| shell.apply(item)).collect();
+        assert_eq!(again, [Duplicate, rename.clone(), Synchronized]);
         let delta = Applied::Event("turn-item.updated".into());
         let mut thread = ThreadState::default();
-        let mut apply_thread = |items: Vec<Value>| -> Vec<Applied> {
-            items.iter().map(|item| thread.apply(item)).collect()
-        };
-        let applied = apply_thread(items(&mut thread_events, 3).await);
-        assert_eq!(applied, [Snapshot, delta.clone(), Synchronized]);
-        reconnecting(&mut thread_events).await;
-        let applied = apply_thread(items(&mut thread_events, 3).await);
-        assert_eq!(applied, [Duplicate, delta.clone(), Synchronized]);
-
+        let first: Vec<_> = thread_first.iter().map(|item| thread.apply(item)).collect();
+        assert_eq!(first, [Snapshot, delta.clone(), Synchronized]);
+        let again: Vec<_> = thread_again.iter().map(|item| thread.apply(item)).collect();
+        assert_eq!(again, [Duplicate, delta.clone(), Synchronized]);
         let mut held = None;
-        let first = items(&mut config_events, 1).await;
-        assert_eq!(apply_config(&mut held, &first[0]), Snapshot);
-        reconnecting(&mut config_events).await;
-        let again = items(&mut config_events, 1).await;
-        assert_eq!(apply_config(&mut held, &again[0]), Snapshot);
+        assert_eq!(apply_config(&mut held, &config_first[0]), Snapshot);
+        assert_eq!(apply_config(&mut held, &config_again[0]), Snapshot);
         assert_eq!(provider_ids(&held), ["codex", "claude"]);
 
         // The other three go on over the same socket, with no reconnect.

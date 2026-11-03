@@ -57,10 +57,19 @@ impl Rex {
         let mut child = command
             .spawn()
             .with_context(|| format!("couldn't run {}", self.bin.display()))?;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            pipe.write_all(text.as_bytes()).await?;
-        }
-        let out = child.wait_with_output().await?;
+        let out = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+                pipe.write_all(text.as_bytes()).await?;
+            }
+            child.wait_with_output().await
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "rex {} timed out after 15 seconds",
+                args.first().unwrap_or(&"")
+            )
+        })??;
         if !out.status.success() {
             bail!(
                 "rex {} failed: {}",
@@ -154,6 +163,7 @@ pub const PANE_ENV: &[&str] = &[
     "XDG_CONFIG_HOME",
     "T3REX_REX",
     "T3REX_PASSIVE",
+    "T3REX_PERF",
     "T3REX_SESSION_LABEL",
 ];
 

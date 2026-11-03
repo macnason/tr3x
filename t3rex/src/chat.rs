@@ -25,7 +25,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use t3client::env::WatchEvent;
 use t3client::inbox::Limit;
-use t3client::projection::{ShellState, ThreadState};
+use t3client::projection::{Applied, ShellState, ThreadState};
 use t3client::transcript::{self, Block, BlockKind};
 
 use std::collections::HashMap;
@@ -86,12 +86,21 @@ struct Pane {
     media: Media,
     /// `t3code://threads/<environment>/<thread>`, which opens the thread in T3 Code.
     link: String,
-    snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
+    snapshots: mpsc::UnboundedSender<media::Ready>,
     /// What the pane says while the thread's machine is out of reach.
     offline: Option<String>,
     /// The usage-limit line the last frame drew, which time moves on: `tomorrow 9am` becomes
     /// `9am` at midnight, and `resumes` becomes `resuming` at the reset.
     limit: String,
+    files: crate::link::FileLinks,
+    display: Option<std::sync::Arc<Display>>,
+    live: Vec<String>,
+}
+
+struct Display {
+    sequence: u64,
+    blocks: Vec<Block>,
+    embeds: HashMap<String, Embed>,
 }
 
 /// The local time zone's offset, read once from `date`, so timestamps need no time zone crate.
@@ -398,6 +407,7 @@ struct Ctx<'a> {
     media: Option<&'a Media>,
     /// Opens the thread in T3, where it's clicked.
     link: &'a str,
+    files: &'a crate::link::FileLinks,
 }
 
 /// A picture's lines: its kitty sequence on the first, then a blank row for each row it covers.
@@ -413,7 +423,7 @@ fn picture_lines(media: &Media, path: &std::path::Path, cols: usize) -> Option<V
 /// Markdown with its standalone local images drawn as pictures.
 fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
     let Some(media) = ctx.media else {
-        return render::markdown(text, ctx.width).lines;
+        return render::markdown_with_links(text, ctx.width, ctx.files).lines;
     };
     let mut lines = Vec::new();
     let mut chunk = String::new();
@@ -426,7 +436,7 @@ fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
             let pictures = picture_lines(media, &path, ctx.width.min(96));
             if let Some(pictures) = pictures {
                 if !chunk.trim().is_empty() {
-                    lines.extend(render::markdown(&chunk, ctx.width).lines);
+                    lines.extend(render::markdown_with_links(&chunk, ctx.width, ctx.files).lines);
                     lines.push(String::new());
                 }
                 chunk.clear();
@@ -437,7 +447,7 @@ fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
         chunk.push_str(line);
     }
     if !chunk.trim().is_empty() {
-        lines.extend(render::markdown(&chunk, ctx.width).lines);
+        lines.extend(render::markdown_with_links(&chunk, ctx.width, ctx.files).lines);
     }
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -467,7 +477,7 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
     match block.kind {
         BlockKind::User => {
             lines.push(String::new());
-            let text = render::markdown(&block.body, width.saturating_sub(2));
+            let text = render::markdown_with_links(&block.body, width.saturating_sub(2), ctx.files);
             for (i, line) in text.lines.into_iter().enumerate() {
                 let bar = if i == 0 {
                     format!("{BLUE}{BOLD}›{RESET} ")
@@ -567,14 +577,15 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
             } else {
                 &block.body
             };
-            for line in render::markdown(text, width.saturating_sub(2)).lines {
+            for line in render::markdown_with_links(text, width.saturating_sub(2), ctx.files).lines
+            {
                 lines.push(format!("  {line}"));
             }
         }
         BlockKind::Plan => {
             lines.push(String::new());
             lines.push(format!("{MAGENTA}{BOLD}Plan{RESET}"));
-            lines.extend(render::markdown(&block.body, width).lines);
+            lines.extend(render::markdown_with_links(&block.body, width, ctx.files).lines);
         }
         BlockKind::Notice => {
             let text = one_line(if block.body.is_empty() {
@@ -594,7 +605,8 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
             } else {
                 &block.body
             };
-            for line in render::markdown(text, width.saturating_sub(2)).lines {
+            for line in render::markdown_with_links(text, width.saturating_sub(2), ctx.files).lines
+            {
                 lines.push(format!("{RED}│{RESET} {line}"));
             }
         }
@@ -901,12 +913,10 @@ impl Pane {
         text
     }
 
-    fn new(
-        media: Media,
-        link: String,
-        snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
-    ) -> Pane {
+    fn new(media: Media, link: String, snapshots: mpsc::UnboundedSender<media::Ready>) -> Pane {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let mut media = media;
+        media.listen(snapshots.clone());
         Pane {
             cols: cols as usize,
             rows: rows as usize,
@@ -930,6 +940,9 @@ impl Pane {
             snapshots,
             offline: None,
             limit: String::new(),
+            files: crate::link::FileLinks::default(),
+            display: None,
+            live: Vec::new(),
         }
     }
 
@@ -940,7 +953,22 @@ impl Pane {
 
     /// The thread's blocks: what's new and finished for good, then the live tail.
     fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
-        let blocks = transcript::blocks(state);
+        let display = self.display.get_or_insert_with(|| {
+            std::sync::Arc::new(Display {
+                sequence: state.sequence,
+                blocks: transcript::blocks(state),
+                embeds: media::embeds(state),
+            })
+        });
+        if display.sequence != state.sequence {
+            *display = std::sync::Arc::new(Display {
+                sequence: state.sequence,
+                blocks: transcript::blocks(state),
+                embeds: media::embeds(state),
+            });
+        }
+        let display = display.clone();
+        let blocks = &display.blocks;
         self.limit = self.limit_now(shell_thread);
         self.animating = state.active_run().is_some() || blocks.iter().any(is_running);
         let run_active = state.active_run().is_some();
@@ -949,7 +977,7 @@ impl Pane {
         let matches = self
             .committed
             .iter()
-            .zip(&blocks)
+            .zip(blocks)
             .all(|((id, _), b)| id == &b.item_id);
         // A message you just sent brings the view back to the bottom. No sequence scrolls a
         // terminal's view, but clearing the scrollback and printing again does.
@@ -967,7 +995,8 @@ impl Pane {
         let mut text = format!("\x1b[{};1H", self.row);
         let reflow = std::mem::take(&mut self.reflow);
         // The first frame too, which frees pictures an earlier process left in this terminal.
-        if !self.header || !matches || self.committed.len() > blocks.len() || reflow {
+        let reset = !self.header || !matches || self.committed.len() > blocks.len() || reflow;
+        if reset {
             text.push_str(self.media.free_all());
             text.push_str(&format!("\x1b[H\x1b[2J\x1b[3J\x1b[1;{}r", self.region));
             self.row = 1;
@@ -977,21 +1006,19 @@ impl Pane {
             self.spilled = 0;
             self.header = false;
         }
+        let tail_control_from = text.len();
+        let committed_before = self.committed.len();
         // Back to the top of the live tail, and clear it, down to Reply.
         if self.live_rows > 0 {
             self.row -= self.live_rows.min(self.row - 1);
-            for r in self.row..=self.region {
-                text.push_str(&format!("\x1b[{r};1H\x1b[2K"));
-            }
-            text.push_str(&format!("\x1b[{};1H", self.row));
         }
-        let printed_from = text.len();
+        let mut printed_from = text.len();
         if !self.header {
             text.push_str(&self.header_lines(state, shell_thread));
             self.header = true;
         }
         let (left, width) = self.column();
-        let embeds = media::embeds(state);
+        let embeds = &display.embeds;
         if self.media.can_snapshot() {
             for embed in embeds.values() {
                 self.media.ask(embed, self.snapshots.clone());
@@ -1001,9 +1028,10 @@ impl Pane {
             width,
             frame: 0,
             offset: self.offset_minutes,
-            embeds: &embeds,
+            embeds,
             media: Some(&self.media),
             link: &self.link,
+            files: &self.files,
         };
         let moving = Ctx {
             frame: self.frame,
@@ -1014,7 +1042,7 @@ impl Pane {
         while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active)
         {
             let block = &blocks[index];
-            let lines = pad(lines_at(&blocks, index, &fixed), left);
+            let lines = pad(lines_at(blocks, index, &fixed), left);
             // The top of this block may already be on screen, printed while it was live.
             let skip = self.spilled.min(lines.len());
             self.spilled -= skip;
@@ -1031,14 +1059,14 @@ impl Pane {
         }
         let mut live: Vec<String> = Vec::new();
         // A run still going sums up what it has done so far, above what it's doing now.
-        let open = run_start(&blocks, blocks.len());
-        let summary = run_line(&blocks[open..], &embeds, width).map(|l| pad(vec![l], left));
+        let open = run_start(blocks, blocks.len());
+        let summary = run_line(&blocks[open..], embeds, width).map(|l| pad(vec![l], left));
         let summary_at = open.max(index);
         for i in index..blocks.len() {
             if i == summary_at {
                 live.extend(summary.iter().flatten().cloned());
             }
-            live.extend(pad(lines_at(&blocks, i, &moving), left));
+            live.extend(pad(lines_at(blocks, i, &moving), left));
         }
         if summary_at == blocks.len() {
             live.extend(summary.into_iter().flatten());
@@ -1068,6 +1096,34 @@ impl Pane {
         // A tail taller than the screen can't be rewritten once its top has scrolled away, so
         // anything above the last screenful prints for good now.
         let room = self.region.saturating_sub(1).max(1);
+        if !reset
+            && committed_before == self.committed.len()
+            && self.spilled == 0
+            && live.len() == self.live.len()
+            && self.row + live.len() <= self.region
+        {
+            text.truncate(tail_control_from);
+            let mut changed = false;
+            for (i, line) in live.iter().enumerate() {
+                if self.live[i] != *line {
+                    changed = true;
+                    text.push_str(&format!("\x1b[{};1H\x1b[2K{line}", self.row + i));
+                }
+            }
+            self.live_rows = live.len();
+            self.row += self.live_rows;
+            self.live = live;
+            return if changed { text } else { String::new() };
+        }
+        if self.live_rows > 0 {
+            let mut clear = String::new();
+            for r in self.row..=self.region {
+                clear.push_str(&format!("\x1b[{r};1H\x1b[2K"));
+            }
+            clear.push_str(&format!("\x1b[{};1H", self.row));
+            printed_from += clear.len();
+            text.insert_str(tail_control_from, &clear);
+        }
         if live.len() > room {
             let cut = live.len() - room;
             for line in live.drain(..cut) {
@@ -1081,6 +1137,7 @@ impl Pane {
             text.push_str("\r\n");
         }
         self.live_rows = live.len();
+        self.live = live;
         let body = text.split_off(printed_from);
         let lines = body.matches("\r\n").count();
         if self.row + lines <= self.region {
@@ -1288,7 +1345,7 @@ async fn event_loop(
     mut clipboard: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
     let mut thread_events = client.watch_thread(thread_id, None);
-    let mut shell_events = client.watch_shell(None);
+    let mut shell_events = (role != Role::Reply).then(|| client.watch_shell(None));
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
     // Reply asks for the machine's config: the provider's driver for each instance, so the pane
     // can take its provider's name, and the address T3 serves its web app at, for the
@@ -1307,6 +1364,7 @@ async fn event_loop(
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Every eighth tick, about a second: a model the picker held for the next message.
     let mut ticks = 0u32;
     let mut visited_for = String::new();
@@ -1319,16 +1377,31 @@ async fn event_loop(
     let mut clicking = false;
     let mut wheeled: Option<tokio::time::Instant> = None;
     let mut asking = String::new();
+    let mut next_frame = tokio::time::Instant::now();
+    let mut resize = None;
+    let mut resize_at = tokio::time::Instant::now();
+    let mut perf = crate::perf::Frames::new();
+    let (file_tx, mut file_rx) = mpsc::channel(4);
+    let mut files_checked = tokio::time::Instant::now();
+
     loop {
+        let mut content_event = false;
         tokio::select! {
             event = thread_events.recv() => match event {
                 Some(WatchEvent::Item(item)) => {
-                    if item["kind"] == "snapshot" {
+                    let changed = if item["kind"] == "snapshot" {
                         composer.state = ThreadState::from_snapshot(&item);
-                    } else if let Some(s) = composer.state.as_mut() {
-                        s.apply(&item);
-                    }
+                        pane.display = None;
+                        true
+                    } else {
+                        composer.state.as_mut().is_some_and(|s| matches!(s.apply(&item), Applied::Event(_) | Applied::Snapshot))
+                    };
+                    let recovered = pane.offline.is_some() || composer.offline.is_some();
+                    pane.offline = None;
+                    composer.offline = None;
+                    if !changed && !recovered { continue; }
                     composer.thread_changed();
+                    content_event = true;
                     pane.offline = None;
                     composer.offline = None;
                     dirty = true;
@@ -1349,7 +1422,12 @@ async fn event_loop(
                 Some(WatchEvent::Failed(message)) => anyhow::bail!("T3 refused the thread: {message}"),
                 None => anyhow::bail!("the thread's subscription ended"),
             },
-            event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
+            event = async {
+                match shell_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
                 if role != Role::Reply {
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
@@ -1378,19 +1456,16 @@ async fn event_loop(
                 reply |= !config || shown.is_none() || composer.config_shown() != shown;
             },
             event = input.next() => {
+                // A content event may have left the composer waiting for the next frame.
+                let pending = reply;
                 reply = true;
                 match event {
                     Some(Ok(Event::Resize(cols, rows))) => {
-                        if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
-                            // Each terminal does its own thing with margins and rows on a
-                            // resize, so the thread prints again from the top.
-                            pane.reflow = true;
-                            pane.cols = cols as usize;
-                            pane.rows = rows as usize;
-                            dirty = true;
-                        }
+                        resize = Some((cols as usize, rows as usize));
+                        resize_at = tokio::time::Instant::now() + Duration::from_millis(50);
+                        reply = false;
                     }
-                    Some(Ok(Event::FocusGained)) => focused = true,
+                    Some(Ok(Event::FocusGained)) => { focused = true; dirty = true; },
                     Some(Ok(Event::FocusLost)) => focused = false,
                     // The conversation alone has nothing to type into.
                     Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
@@ -1411,6 +1486,7 @@ async fn event_loop(
                     None => return Ok(()),
                     _ => reply = false,
                 }
+                reply |= pending;
             },
             Some(packet) = async {
                 match clipboard.as_mut() {
@@ -1433,15 +1509,36 @@ async fn event_loop(
                 }
                 composer.reload_logos();
             }
-            Some((attachment, png)) = snap_rx.recv() => {
-                pane.media.snapshots.insert(attachment, png);
-                pane.reflow = true;
-                dirty = true;
+            Some(result) = file_rx.recv() => {
+                let mut changed = pane.files.finish(result, t3::now_ms());
+                while let Ok(result) = file_rx.try_recv() {
+                    changed |= pane.files.finish(result, t3::now_ms());
+                }
+                pane.reflow |= changed;
+                dirty |= changed;
+            }
+            Some(ready) = snap_rx.recv() => {
+                let mut changed = pane.media.ready(ready);
+                while let Ok(ready) = snap_rx.try_recv() {
+                    changed |= pane.media.ready(ready);
+                }
+                pane.reflow |= changed;
+                dirty |= changed;
             }
             _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
                 composer.clear_note();
                 reply = true;
             }
+            _ = tokio::time::sleep_until(resize_at), if resize.is_some() => {
+                if let Some((cols, rows)) = resize.take() && (cols, rows) != (pane.cols, pane.rows) {
+                    pane.cols = cols;
+                    pane.rows = rows;
+                    pane.reflow = true;
+                    dirty = true;
+                    reply = true;
+                }
+            }
+            _ = tokio::time::sleep_until(next_frame), if dirty && composer.state.is_some() || reply && role != Role::Conversation => {},
             _ = tick.tick() => {
                 if let Some(fit) = fit.as_mut()
                     && let Some(job) = fit.due()
@@ -1451,7 +1548,7 @@ async fn event_loop(
                         let _ = tx.send(job.await);
                     });
                 }
-                if pane.animating {
+                if pane.animating && focused {
                     pane.frame += 1;
                     dirty = true;
                 }
@@ -1480,6 +1577,10 @@ async fn event_loop(
                 }
             }
         }
+        if content_event && tokio::time::Instant::now() < next_frame {
+            continue;
+        }
+        let started = std::time::Instant::now();
         if let Some(width) = composer.width_set.take() {
             pane.chat_width.width = width;
             pane.reflow = true;
@@ -1544,6 +1645,35 @@ async fn event_loop(
             text.push_str(&pane.draw(s, thread));
             dirty = false;
         }
+        if role != Role::Reply
+            && let Some(s) = composer.state.as_ref()
+            && files_checked.elapsed() >= Duration::from_secs(1)
+            && let Some(display) = pane.display.as_ref()
+        {
+            let root = s.thread()["worktreePath"]
+                .as_str()
+                .or_else(|| {
+                    let project = s.thread()["projectId"].as_str()?;
+                    shell.projects.iter().find(|p| p["id"] == project)?["workspaceRoot"].as_str()
+                })
+                .unwrap_or_default();
+            for request in pane.files.requests(
+                display.blocks.iter().map(|b| b.body.as_str()),
+                composer.config.as_ref(),
+                thread_id,
+                root,
+                t3::now_ms(),
+            ) {
+                let (tx, client) = (file_tx.clone(), client.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        result = request.run(client) => { let _ = tx.send(result).await; },
+                        _ = tx.closed() => {},
+                    }
+                });
+            }
+            files_checked = tokio::time::Instant::now();
+        }
         // A frame that cleared the screen needs Reply again; any frame, the cursor back in the
         // input.
         if role == Role::Inline {
@@ -1579,7 +1709,9 @@ async fn event_loop(
             text.push_str(clicks(want));
         }
         if !text.is_empty() {
+            perf.record(started.elapsed(), text.len());
             out(&format!("\x1b[?2026h\x1b[?25l{text}\x1b[?2026l"));
+            next_frame = tokio::time::Instant::now() + Duration::from_millis(33);
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
         if focused
@@ -1753,6 +1885,7 @@ mod tests {
             embeds: &embeds,
             media: None,
             link: "",
+            files: &crate::link::FileLinks::default(),
         };
         assert!(lines_at(&blocks, 0, &ctx).is_empty());
         assert_eq!(lines_at(&blocks, 2, &ctx).len(), 1);
@@ -1790,6 +1923,7 @@ mod tests {
             embeds: &embeds,
             media: None,
             link: "",
+            files: &crate::link::FileLinks::default(),
         };
         assert!(lines_at(&blocks, 0, &ctx).is_empty());
         assert!(
@@ -2057,6 +2191,28 @@ mod tests {
         let drawn = p.draw(&state, Some(&other));
         assert!(drawn.contains("Failed") && !drawn.contains("Usage limit"));
         assert!(p.limit.is_empty());
+    }
+
+    #[test]
+    fn an_animation_frame_does_not_rewrite_unchanged_live_text() {
+        let state = ThreadState::from_snapshot(&serde_json::json!({
+            "snapshotSequence": 1,
+            "projection": {
+                "thread": {"id": "t1", "title": "Working"},
+                "runs": [{"id": "r1", "ordinal": 1, "status": "running"}],
+                "turnItems": [{"id": "a1", "type": "assistant_message", "ordinal": 1,
+                    "status": "in_progress", "text": "A long answer stays visible while the spinner moves."}]
+            }
+        })).unwrap();
+        let mut p = pane(40, 1, 0);
+        p.rows = 44;
+        p.header = false;
+        let first = p.draw(&state, None);
+        assert!(first.contains("A long answer"));
+        p.frame += 1;
+        let next = p.draw(&state, None);
+        assert!(!next.contains("A long answer"), "{next:?}");
+        assert!(next.contains(SPINNER[1]));
     }
 
     #[test]
