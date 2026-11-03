@@ -277,16 +277,36 @@ pub fn chips(
     open: Option<usize>,
     left: usize,
 ) -> (String, Vec<(usize, usize)>) {
+    chips_grouped(painter, chips, focused, open, left, &[])
+}
+
+pub fn chips_grouped(
+    painter: &mut Painter,
+    chips: &[Chip],
+    focused: Option<usize>,
+    open: Option<usize>,
+    left: usize,
+    grouped: &[usize],
+) -> (String, Vec<(usize, usize)>) {
     let mut line = String::new();
     let mut spans = Vec::new();
     let mut col = left + 1;
     for (i, chip) in chips.iter().enumerate() {
         if i > 0 {
-            line.push_str("  ");
-            col += 2;
+            if grouped.contains(&i) {
+                line.push_str(&format!(" {DIM}·{RESET} "));
+                col += 3;
+            } else {
+                line.push_str("  ");
+                col += 2;
+            }
         }
         let start = col;
-        let label = format!("{} ▾", chip.label);
+        let label = if grouped.contains(&(i + 1)) || grouped.contains(&i) {
+            chip.label.clone()
+        } else {
+            format!("{} ▾", chip.label)
+        };
         let width = unicode_width::UnicodeWidthStr::width(label.as_str())
             + if chip.icon.is_some() { 3 } else { 0 };
         let style = if open == Some(i) || focused == Some(i) {
@@ -395,10 +415,11 @@ impl Settings {
     }
 
     pub fn model_label(&self, config: &Value) -> String {
-        self.model_entry(config)
+        let name = self
+            .model_entry(config)
             .and_then(|m| m["name"].as_str())
-            .unwrap_or(&self.model)
-            .to_string()
+            .unwrap_or(&self.model);
+        short_model_name(name).to_string()
     }
 
     pub fn effort_label(&self, config: &Value) -> Option<String> {
@@ -547,6 +568,10 @@ fn default_option(descriptor: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn short_model_name(name: &str) -> &str {
+    name.strip_prefix("Claude ").unwrap_or(name)
+}
+
 /// Every model of every enabled provider, under the provider's name, with its logo.
 fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
     let mut items = Vec::new();
@@ -565,10 +590,12 @@ fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
         for model in models::models(provider) {
             let mut item = Item::new(
                 models::qualified(provider, model),
-                model["name"]
-                    .as_str()
-                    .or(model["slug"].as_str())
-                    .unwrap_or("Model"),
+                short_model_name(
+                    model["name"]
+                        .as_str()
+                        .or(model["slug"].as_str())
+                        .unwrap_or("Model"),
+                ),
             );
             item.section = Some(name.to_string());
             item.icon = logo.clone();
@@ -655,13 +682,10 @@ mod tests {
             effort: None,
             mode: "full-access".into(),
         };
-        let wide = "Claude Opus 5.5 · Medium · Full access";
+        let wide = "Opus 5.5 · Medium · Full access";
         assert_eq!(s.summary(&config, 80), wide);
         assert_eq!(s.summary(&config, 39), wide);
-        assert_eq!(
-            s.summary(&config, 36),
-            "Claude Opus… · Medium · Full access"
-        );
+        assert_eq!(s.summary(&config, 26), "Op… · Medium · Full access");
         // Too narrow for the tail: one line, cut, never wider than asked.
         for width in [1, 5, 20, 25] {
             let label = s.summary(&config, width);

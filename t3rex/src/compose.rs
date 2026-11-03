@@ -539,7 +539,10 @@ impl Composer {
         if let Some(draft) = &self.draft {
             draft.over(config, &mut settings);
         }
-        let windows = crate::usage::windows(config, &settings.instance);
+        let windows: Vec<_> = crate::usage::windows(config, &settings.instance)
+            .into_iter()
+            .filter(|window| window.left <= 20)
+            .collect();
         if windows.is_empty() {
             return None;
         }
@@ -692,6 +695,7 @@ impl Composer {
                 hits.push((rows.len(), (x, x), Hit::Remove(i)));
             }
             rows.push(line);
+            rows.push(String::new());
         }
         // The menu draws over these, right above the input.
         rows.extend(std::iter::repeat_n(String::new(), self.menu_rows));
@@ -704,6 +708,9 @@ impl Composer {
                 "{DIM}{}{RESET}",
                 crate::link::osc8(url, "Open in T3 ↗")
             ));
+        }
+        if !below.is_empty() {
+            below.insert(0, String::new());
         }
         let chips = self.chips(column);
         let mut usage = None;
@@ -723,9 +730,14 @@ impl Composer {
                 line.push_str("  ");
                 line.push_str(usage);
             }
+            if below.is_empty() {
+                below.push(String::new());
+            }
+            let at = below.len();
             below.push(line);
-            Some((spans, chips))
+            Some((spans, chips, at))
         };
+        below.push(String::new());
         // The input, wrapped, and as many of its rows as there's room for around the cursor.
         self.editor.width = width;
         let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
@@ -764,8 +776,8 @@ impl Composer {
         let shown = rows.len() - first_input;
         rows.push(edge);
         let cursor = (first_input + cursor.0 - start, cursor.1);
-        if let Some((spans, chips)) = chip_row {
-            let at = rows.len() + below.len() - 1;
+        if let Some((spans, chips, chip_at)) = chip_row {
+            let at = rows.len() + chip_at;
             hits.extend(
                 spans
                     .into_iter()
@@ -1814,11 +1826,11 @@ mod tests {
         let mut reply = reply_on_codex();
         reply.config = Some(codex(24));
         let drawn = reply.draw(28, true);
-        assert!(drawn.contains("Session 76% left"), "{drawn:?}");
+        assert!(!drawn.contains("Session 76% left"), "{drawn:?}");
         assert!(!reply.usage_moved());
         assert_eq!(
             reply.config_shown().map(|(_, usage)| usage.is_some()),
-            Some(true)
+            Some(false)
         );
         // Sizing Reply lays it out without drawing it, so the change still shows as one.
         reply.config = Some(codex(95));
@@ -1839,6 +1851,8 @@ mod tests {
         reply.config = Some(again);
         assert_eq!(reply.config_shown(), shown);
         reply.config = Some(codex(30));
+        assert_eq!(reply.config_shown(), shown);
+        reply.config = Some(codex(80));
         assert_ne!(reply.config_shown(), shown);
     }
 
