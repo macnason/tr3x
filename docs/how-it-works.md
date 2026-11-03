@@ -66,11 +66,12 @@ machine it's paired with, and draws what T3 says into one Rex session.
   over Reply's rows: what scrolls off its top goes into Rex's scrollback, and Reply stays at
   the bottom. Reply growing pushes the conversation up into the scrollback; shrinking under a
   conversation that filled its rows prints the thread again, so no gap is left.
-- Mouse reporting is on, so the model chip, an approval's or a question's buttons, and the
-  slash menu take clicks. It takes the wheel from the scrollback, so a turn of the wheel turns
-  it off, and it comes back on a moment and a half after, at the next key, or at the next
-  request. With it on, Shift-drag selects text. Tab and `/model` open the model picker too,
-  and Backspace takes a picture off.
+- Mouse reporting would take drags from Rex's selection and the wheel from the scrollback, so
+  it's on only while Reply has something to click: an approval's or a question's buttons, or
+  the slash menu. The rest of the time the conversation selects and copies like any terminal
+  output, as in Codex and Claude Code. A turn of the wheel turns it off for a moment and a
+  half, or until the next key or request. Tab and `/model` open the model picker, and
+  Backspace takes a picture off.
 - The pane subscribes to the thread once. It reports
   the thread's status to Rex with OSC 7501, from the same status word T3's sidebar shows, so
   Rex's markers are T3's. `title` is the thread's title. While it waits on you, `msg` is what

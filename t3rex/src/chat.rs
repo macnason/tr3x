@@ -10,7 +10,7 @@
 //! Clicks reach the pane only while Reply has something to click, an approval's or a
 //! question's buttons or the slash menu: while they're on, the wheel and drags would reach the
 //! pane too, not the scrollback and selection. The first turn of the wheel turns them off
-//! until the next key.
+//! for a moment and a half, or until the next key.
 //!
 //! The pane also tells Rex what the thread is doing with OSC 7501, from the same status word
 //! T3's sidebar shows, names itself with OSC 2, and reports the thread's folder with OSC 7, so
@@ -1287,7 +1287,7 @@ pub enum Role {
 /// them off, so the terminal scrolls its scrollback.
 const WHEEL_REST: Duration = Duration::from_millis(1500);
 
-/// Clicks on, for Reply's chip, buttons and menu, or off, for the scrollback.
+/// Clicks on, for Reply's buttons and menu, or off, for the scrollback and selection.
 fn clicks(on: bool) -> &'static str {
     if on {
         "\x1b[?1000h\x1b[?1006h"
@@ -1558,7 +1558,7 @@ async fn event_loop(
                     pane.reflow = true;
                     dirty = true;
                 }
-                // Clicks come back once the wheel has rested, for the chip.
+                // Clicks come back once the wheel has rested, for the buttons.
                 if wheeled.is_some_and(|at| at.elapsed() >= WHEEL_REST) {
                     wheeled = None;
                 }
@@ -1721,7 +1721,7 @@ async fn event_loop(
         }
         // Reply alone has no scrollback for the wheel, so clicks stay on there.
         let want = match role {
-            Role::Inline => wheeled.is_none(),
+            Role::Inline => composer.wants_clicks() && wheeled.is_none(),
             Role::Conversation => false,
             Role::Reply => true,
         };
