@@ -792,11 +792,6 @@ impl Composer {
         rows
     }
 
-    /// Whether anything on Reply needs clicks: buttons to answer what's pending, or the menu.
-    pub(crate) fn wants_clicks(&self) -> bool {
-        self.slash.is_open() || !self.buttons().is_empty()
-    }
-
     /// Reply drawn from the pane's row `top` (1-based) to its bottom, leaving the cursor in the
     /// input. Only the cursor moves when it would draw the same as last time, unless `force`.
     pub(crate) fn draw(&mut self, top: usize, force: bool) -> String {

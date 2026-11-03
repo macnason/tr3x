@@ -1114,7 +1114,11 @@ pub enum Role {
     Reply,
 }
 
-/// Clicks on, for Reply's buttons and menu, or off, for the scrollback and selection.
+/// How long after a turn of the wheel the one-pane window takes clicks again. The wheel turns
+/// them off, so the terminal scrolls its scrollback.
+const WHEEL_REST: Duration = Duration::from_millis(1500);
+
+/// Clicks on, for Reply's chip, buttons and menu, or off, for the scrollback.
 fn clicks(on: bool) -> &'static str {
     if on {
         "\x1b[?1000h\x1b[?1006h"
@@ -1199,8 +1203,9 @@ async fn event_loop(
     let mut reply = true;
     let mut focused = true;
     let mut renamed = false;
-    // Whether clicks are on, and whether the wheel turned them off until the next key.
-    let (mut clicking, mut wheeled) = (false, false);
+    // Whether clicks are on, and when the wheel last turned them off for the scrollback.
+    let mut clicking = false;
+    let mut wheeled: Option<tokio::time::Instant> = None;
     let mut asking = String::new();
     loop {
         tokio::select! {
@@ -1279,14 +1284,14 @@ async fn event_loop(
                     Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
                         if role == Role::Conversation => reply = false,
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        wheeled = false;
+                        wheeled = None;
                         composer.key(key);
                     }
                     Some(Ok(Event::Mouse(m))) => {
                         if !composer.click(&m)
                             && matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
                         {
-                            wheeled = true;
+                            wheeled = Some(tokio::time::Instant::now());
                         }
                     }
                     Some(Ok(Event::Paste(text))) => composer.pasted(Got::Text(text)),
@@ -1341,6 +1346,10 @@ async fn event_loop(
                 if pane.chat_width.changed() {
                     pane.reflow = true;
                     dirty = true;
+                }
+                // Clicks come back once the wheel has rested, for the chip.
+                if wheeled.is_some_and(|at| at.elapsed() >= WHEEL_REST) {
+                    wheeled = None;
                 }
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(8) && composer.reload_draft() {
@@ -1445,11 +1454,11 @@ async fn event_loop(
         .unwrap_or_default();
         if ask != asking {
             asking = ask;
-            wheeled = false;
+            wheeled = None;
         }
         // Reply alone has no scrollback for the wheel, so clicks stay on there.
         let want = match role {
-            Role::Inline => composer.wants_clicks() && !wheeled,
+            Role::Inline => wheeled.is_none(),
             Role::Conversation => false,
             Role::Reply => true,
         };
