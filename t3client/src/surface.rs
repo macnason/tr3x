@@ -3,8 +3,8 @@
 //! server's own source, which every T3 build carries as text: the `t3` executable a runtime
 //! install unpacks, the desktop app's `app.asar`, or the release tarball CI downloads.
 //!
-//! t3rex keeps the surface it was last checked against in `t3rex/t3-surface.json`. Comparing a
-//! newer build with it says what T3 added (actions t3rex could offer) and removed (calls t3rex
+//! tr3x keeps the surface it was last checked against in `tr3x/t3-surface.json`. Comparing a
+//! newer build with it says what T3 added (actions tr3x could offer) and removed (calls tr3x
 //! may make that would now fail).
 
 use std::collections::BTreeSet;
@@ -123,7 +123,7 @@ impl Surface {
         };
         if !missing.is_empty() {
             bail!(
-                "this T3 build doesn't have its {} where t3rex looks for them",
+                "this T3 build doesn't have its {} where tr3x looks for them",
                 missing.join(", ")
             );
         }

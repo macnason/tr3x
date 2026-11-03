@@ -20,7 +20,7 @@ pub struct T3Error {
     pub message: String,
     pub exit_code: i32,
     /// Fields `--json` prints beside `error`, such as the ids that find a thread whose launch
-    /// t3rex couldn't confirm. Empty for most errors.
+    /// tr3x couldn't confirm. Empty for most errors.
     pub details: Map<String, Value>,
 }
 

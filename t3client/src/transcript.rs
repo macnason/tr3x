@@ -121,7 +121,7 @@ pub enum ChangeLine {
     Removed,
     /// A line both sides of a hunk share, or any other line of the text.
     Context,
-    /// What t3rex left out, such as `… 3 more files`.
+    /// What tr3x left out, such as `… 3 more files`.
     Note,
 }
 
@@ -538,8 +538,8 @@ pub fn reads_runs(item: &Value) -> bool {
 /// nightly's `V2LifecycleRow.tsx`, which also drops the arrow when there is no source. Past
 /// `MAX_HANDOFF_SOURCES` sources a count such as `+3 more` stands for the rest. The desktop
 /// names an endpoint by its model's catalog name, and by its provider's display name when it
-/// has no model, both from T3's provider list. `t3rex read` doesn't fetch that list, so
-/// t3rex names both ends by the ids T3 sent.
+/// has no model, both from T3's provider list. `tr3x read` doesn't fetch that list, so
+/// tr3x names both ends by the ids T3 sent.
 fn handoff_detail(item: &Value, runs: &[Value]) -> String {
     let Endpoints { from, more, to } = endpoints(item, runs);
     let mut sources: Vec<String> = from.iter().map(Endpoint::label).collect();
@@ -1127,7 +1127,7 @@ fn describe_as(item: &Value, runs: &[Value], with_change: bool) -> Option<Block>
     })
 }
 
-/// The blocks `t3rex read` prints, which `describe_plain` gives.
+/// The blocks `tr3x read` prints, which `describe_plain` gives.
 pub fn blocks(state: &ThreadState) -> Vec<Block> {
     state
         .items()
@@ -1136,7 +1136,7 @@ pub fn blocks(state: &ThreadState) -> Vec<Block> {
         .collect()
 }
 
-/// Plain text for `t3rex read`. Each header and body prints as `plain` gives it, and a body
+/// Plain text for `tr3x read`. Each header and body prints as `plain` gives it, and a body
 /// is cleaned before it is split into lines, so a `\r` in it starts an indented line too.
 pub fn plain_text(state: &ThreadState, last: Option<usize>, include_reasoning: bool) -> String {
     let all: Vec<Block> = blocks(state)
@@ -1310,7 +1310,7 @@ mod tests {
             ]
         );
 
-        // The transcript row and `t3rex read` print the cleaned text, and the projection that
+        // The transcript row and `tr3x read` print the cleaned text, and the projection that
         // `--json` prints keeps the text as T3 sent it.
         let state = ThreadState::from_snapshot(&json!({
             "snapshotSequence": 1,
@@ -1528,7 +1528,7 @@ mod tests {
             block.body,
             "Kept[2J the plan\nDropped31m the logs and notes\n日本語 👩\u{200d}💻 cafe\u{301}"
         );
-        // `t3rex read` prints the marker and its detail, and `--json` prints the projection,
+        // `tr3x read` prints the marker and its detail, and `--json` prints the projection,
         // which keeps the summary as T3 sent it.
         assert_eq!(
             plain_text(&state, None, false),
@@ -1624,7 +1624,7 @@ mod tests {
             );
         }
 
-        // `t3rex read` prints each marker and its endpoints, a failed handoff's too. The
+        // `tr3x read` prints each marker and its endpoints, a failed handoff's too. The
         // projection that `--json` prints keeps the items as T3 sent them.
         let mut untitled = handoff_item(stamped);
         untitled["title"] = Value::Null;
@@ -1743,7 +1743,7 @@ mod tests {
 
     #[test]
     fn an_inherited_handoff_keeps_its_providers() {
-        // A fork inherits its parent's items but not its runs, so t3rex gives an inherited
+        // A fork inherits its parent's items but not its runs, so tr3x gives an inherited
         // handoff no runs and names both its ends by provider. The nightly differs: its
         // timeline passes the fork's own runs, where a source can take the model of a fork run
         // that came after the handoff. Here the fork's runs would name both ends of the
@@ -2078,7 +2078,7 @@ mod tests {
         assert_eq!(change.operations, 1);
         assert_eq!(change.lines, owned(&[(Operation, "modify /repo/a.ts")]));
 
-        // `t3rex read` prints the row alone, and `--json` prints the item as T3 sent it.
+        // `tr3x read` prints the row alone, and `--json` prints the item as T3 sent it.
         let state = ThreadState::from_snapshot(&json!({
             "snapshotSequence": 1,
             "projection": {"thread": {"id": "t"}, "turnItems": [edit_item(json!({}))]},
@@ -2202,7 +2202,7 @@ mod tests {
             ])
         );
 
-        // T3 cuts a long error at 32,768 bytes and says so. t3rex reads the first 4,096 and
+        // T3 cuts a long error at 32,768 bytes and says so. tr3x reads the first 4,096 and
         // says so too.
         let error = format!("{}\n… output truncated for transport", "e".repeat(32_768));
         let item = edit_item(json!({"status": "failed", "diffStr": error}));
@@ -2360,7 +2360,7 @@ mod tests {
                 (Added, "+0mplain"),
             ])
         );
-        // `t3rex read` prints the cleaned row, and `--json` keeps the item as T3 sent it.
+        // `tr3x read` prints the cleaned row, and `--json` keeps the item as T3 sent it.
         assert_eq!(
             plain_text(&state, None, false),
             "  · edit src/[2Jmain.rs next  +3 -1\n"
@@ -2480,7 +2480,7 @@ mod tests {
             assert_eq!(format!("{plain:?}"), format!("{without:?}"), "{item}");
         }
 
-        // `t3rex read` prints each row alone, with its name cleaned, from blocks that have no
+        // `tr3x read` prints each row alone, with its name cleaned, from blocks that have no
         // lines.
         let state = ThreadState::from_snapshot(&json!({
             "snapshotSequence": 1,

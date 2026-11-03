@@ -1,12 +1,12 @@
 # Choosing the host
 
-One machine **hosts** t3rex: it runs Rex's server and `t3rex sync`, and every thread's pane is a
+One machine **hosts** tr3x: it runs Rex's server and `tr3x sync`, and every thread's pane is a
 process there. Every other device is a **client**: it needs only the Rex app, attached to the
 host. T3 runs the agents on whichever machine each project lives on; the host only draws them.
 
 ```
 host (Mac or Linux)                       clients (any Rex app)
-  Rex server + t3rex sync                   attach to the host's address
+  Rex server + tr3x sync                   attach to the host's address
   T3 here, and T3 on other machines
   paired with it
 ```
@@ -19,7 +19,7 @@ keep running while every client is closed.
 Run the installer on it (T3 must be running there; on Linux, `t3 service install` keeps it up):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | sh
 ```
 
 - **Mac:** Rex is the app, and sync starts with it.
@@ -38,17 +38,17 @@ host's address. The host then shows in the sidebar and in **Filter Hosts**.
 
 ## Other machines that run T3
 
-`t3rex pair` on the host finds them on your tailnet and pairs each (over SSH, or with one command
+`tr3x pair` on the host finds them on your tailnet and pairs each (over SSH, or with one command
 to run there). Their threads join the host's session, labelled with the machine's name.
 
 ## Move the host
 
-1. **Old host:** `t3rex uninstall`. On Linux also `systemctl --user disable --now rex-server`,
+1. **Old host:** `tr3x uninstall`. On Linux also `systemctl --user disable --now rex-server`,
    and remove its `-rex` device in Tailscale.
-2. **New host:** run the installer, then `t3rex pair` for the machines the old host followed.
+2. **New host:** run the installer, then `tr3x pair` for the machines the old host followed.
 3. **Clients:** remove the old host (**Remove Host…**), add the new one.
 
-A machine that stays a client must not run t3rex: a second install gives it a session of its
+A machine that stays a client must not run tr3x: a second install gives it a session of its
 own, and its threads show twice, under **This Mac** and under the host.
 
 ## Pictures from another device
@@ -57,7 +57,7 @@ Rex carries text into a pane on another machine, but not pictures or files: a pi
 arrives as a bare key, and a drop as nothing. Send pictures to the host with Taildrop instead:
 Share → Tailscale → the host, on a Mac or a phone, or `tailscale file cp shot.png <host>:`. Sync
 takes them in and attaches each to the Reply of the thread whose window is active, as if it had
-been pasted. Files that aren't pictures are kept in t3rex's state folder, in `taildrop-kept`.
+been pasted. Files that aren't pictures are kept in tr3x's state folder, in `taildrop-kept`.
 Taildrop must be on for your tailnet.
 
 ## When something looks wrong

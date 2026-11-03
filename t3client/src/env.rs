@@ -1,4 +1,4 @@
-//! One machine's T3: its connection, and the operations t3rex's panes and sync use. Forked
+//! One machine's T3: its connection, and the operations tr3x's panes and sync use. Forked
 //! from t3term's `client.rs` (krishhgg/t3term, MIT), with t3term's login replaced by the
 //! pairing in `auth` and `pair`: a token from `credentials.json`, sent only to a server whose
 //! descriptor names the machine it was issued for.
@@ -56,7 +56,7 @@ pub struct SendReceipt {
 /// How long a failed renewal waits before the next try, while the token still works.
 const RENEW_RETRY_MS: i64 = 10 * 60 * 1000;
 
-/// The error for a machine t3rex has no working pairing with.
+/// The error for a machine tr3x has no working pairing with.
 pub fn needs_pairing(machine: &Machine) -> anyhow::Error {
     let name = machine.name();
     let quoted = if name.contains(char::is_whitespace) {
@@ -67,7 +67,7 @@ pub fn needs_pairing(machine: &Machine) -> anyhow::Error {
     err_exit(
         "PAIRING_NEEDED",
         exit::REJECTED,
-        format!("Rex isn't paired with {name}. Run `t3rex pair {quoted}`."),
+        format!("Rex isn't paired with {name}. Run `tr3x pair {quoted}`."),
     )
 }
 
@@ -143,7 +143,7 @@ impl Env {
         origins
     }
 
-    /// The first address that answers as this machine, on the protocol t3rex speaks.
+    /// The first address that answers as this machine, on the protocol tr3x speaks.
     pub async fn route(&self) -> Result<Descriptor> {
         let mut last = None;
         let mut origins = self.origins();
@@ -173,7 +173,7 @@ impl Env {
             err_exit(
                 "T3_UNREACHABLE",
                 exit::UNAVAILABLE,
-                format!("t3rex knows no address for {}.", self.name()),
+                format!("tr3x knows no address for {}.", self.name()),
             )
         }))
     }
@@ -198,7 +198,7 @@ impl Env {
         }
     }
 
-    /// Replaces the token, unless another t3rex process just did: with one the current token
+    /// Replaces the token, unless another tr3x process just did: with one the current token
     /// mints, else by pairing again the way the machine was paired. `rejected` is a token the
     /// server turned down.
     async fn pair_again(&self, rejected: Option<&str>) -> Result<String> {
@@ -240,7 +240,7 @@ impl Env {
                             e
                         } else {
                             e.context(format!(
-                                "couldn't pair with {} again; run `t3rex pair {}`",
+                                "couldn't pair with {} again; run `tr3x pair {}`",
                                 self.name(),
                                 self.name()
                             ))
@@ -275,7 +275,7 @@ impl Env {
         Ok(Api::new(&found.origin, &self.token().await?))
     }
 
-    /// Checks the machine answers and accepts t3rex, without opening a socket.
+    /// Checks the machine answers and accepts tr3x, without opening a socket.
     pub async fn check(&self) -> Result<Descriptor> {
         let found = self.route().await?;
         let api = Api::new(&found.origin, &self.token().await?);
@@ -289,14 +289,14 @@ impl Env {
     }
 
     /// Whether Rex's token for the machine was granted `scope`. A token keeps the scopes it was
-    /// paired with when it renews, so a scope t3rex asks for later needs pairing again.
+    /// paired with when it renews, so a scope tr3x asks for later needs pairing again.
     pub fn holds(&self, scope: &str) -> bool {
         self.store
             .credential(&self.machine.id)
             .is_some_and(|c| c.scopes.iter().any(|s| s == scope))
     }
 
-    /// Pairs again the way the machine was paired, for a token with every scope t3rex asks for
+    /// Pairs again the way the machine was paired, for a token with every scope tr3x asks for
     /// now. Only this Mac and machines paired over SSH can; the rest say how to.
     pub async fn pair_fresh(&self) -> Result<()> {
         let _lock = self.store.lock().await?;
@@ -570,7 +570,7 @@ impl Env {
             return Err(err_exit(
                 "INVALID_CHOICE",
                 exit::USAGE,
-                "That effort applies to one message. Pass it to `t3rex send` instead.",
+                "That effort applies to one message. Pass it to `tr3x send` instead.",
             ));
         }
         if let Some(run) = state.active_run().filter(|_| *plan != Plan::default()) {
@@ -621,12 +621,12 @@ impl Env {
         let switches_provider = plan.model_selection.as_ref().is_some_and(|selection| {
             selection["instanceId"] != state.thread()["modelSelection"]["instanceId"]
         });
-        // Older servers need a separate provider.switch command, which t3rex does not send.
+        // Older servers need a separate provider.switch command, which tr3x does not send.
         if switches_provider && !self.has_capability("serverResolvedCommandContext") {
             return Err(err_exit(
                 "UNSUPPORTED_SERVER",
                 exit::REJECTED,
-                "This T3 server is too old to switch a thread's provider from t3rex. Update T3 Code.",
+                "This T3 server is too old to switch a thread's provider from tr3x. Update T3 Code.",
             ));
         }
         Ok(())
@@ -734,7 +734,7 @@ impl Env {
     }
 }
 
-/// T3 can restart the agent's session to apply these settings, so t3rex changes them only
+/// T3 can restart the agent's session to apply these settings, so tr3x changes them only
 /// while the thread is idle.
 fn busy_for_settings(run: &Value) -> anyhow::Error {
     err_exit(
@@ -810,7 +810,7 @@ where
 /// Runs T3's config subscription, `subscribeServerConfig`, until its receiver is dropped. Each
 /// subscription opens with a snapshot of the whole configuration and goes on with changes to
 /// parts of it. The stream has no cursor, so a resubscribe asks for nothing but a new snapshot.
-/// The payload is empty, which leaves out the theme and usage-limit events t3rex doesn't read.
+/// The payload is empty, which leaves out the theme and usage-limit events tr3x doesn't read.
 pub fn spawn_config_watch<F>(connect: F) -> mpsc::Receiver<WatchEvent>
 where
     F: Fn() -> Pin<Box<dyn Future<Output = Result<RpcClient>> + Send>> + Send + Sync + 'static,
@@ -1012,7 +1012,7 @@ pub(crate) mod tests {
                 let socket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
                 return (path, socket);
             }
-            // Anything else is another program on this machine trying local ports, not t3rex.
+            // Anything else is another program on this machine trying local ports, not tr3x.
             if !head.starts_with("POST /api/auth/websocket-ticket/rpc ") {
                 let gone =
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1029,7 +1029,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The next frame from t3rex other than a ping. Fails the test after five seconds.
+    /// The next frame from tr3x other than a ping. Fails the test after five seconds.
     pub(crate) async fn recv(socket: &mut Socket) -> Value {
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
@@ -1070,7 +1070,7 @@ pub(crate) mod tests {
         id
     }
 
-    /// Sends `values` on the stream of request `id`, and checks that t3rex acks the chunk.
+    /// Sends `values` on the stream of request `id`, and checks that tr3x acks the chunk.
     async fn chunk(socket: &mut Socket, id: &Value, values: Value) {
         let chunk = json!({"_tag": "Chunk", "requestId": id, "values": values});
         let frame = Message::Text(chunk.to_string().into());
@@ -1079,7 +1079,7 @@ pub(crate) mod tests {
         assert_eq!(recv(socket).await, ack);
     }
 
-    /// What t3rex sends when it drops the stream of request `id`.
+    /// What tr3x sends when it drops the stream of request `id`.
     fn interrupt(id: &Value) -> Value {
         json!({"_tag": "Interrupt", "requestId": id, "interruptors": []})
     }

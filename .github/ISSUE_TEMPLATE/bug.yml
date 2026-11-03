@@ -9,17 +9,17 @@ body:
       required: true
   - type: textarea
     attributes:
-      label: t3rex doctor
-      description: The output of `t3rex doctor`. Check it for machine names you'd rather not share.
+      label: tr3x doctor
+      description: The output of `tr3x doctor`. Check it for machine names you'd rather not share.
       render: text
     validations:
       required: true
   - type: textarea
     attributes:
       label: sync.log
-      description: The last lines of `~/.local/state/t3rex/sync.log`, if a tab is missing or stale. They list your thread titles, so trim what's private.
+      description: The last lines of `~/.local/state/tr3x/sync.log`, if a tab is missing or stale. They list your thread titles, so trim what's private.
       render: text
   - type: input
     attributes:
       label: Versions
-      description: "`t3rex --version`, T3 Code's version, and Rex's (Rex → About Rex)."
+      description: "`tr3x --version`, T3 Code's version, and Rex's (Rex → About Rex)."

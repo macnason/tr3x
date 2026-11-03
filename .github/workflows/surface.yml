@@ -1,8 +1,8 @@
 name: t3 surface
 
-# Each day, what the newest T3 nightly offers against t3rex/t3-surface.json. A change pushes
+# Each day, what the newest T3 nightly offers against tr3x/t3-surface.json. A change pushes
 # the new surface to the t3-surface branch and keeps one issue up to date with what T3 added
-# and removed, and whether t3rex's tests pass against it.
+# and removed, and whether tr3x's tests pass against it.
 
 on:
   schedule:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      TITLE: T3 nightly changed what t3rex can call
+      TITLE: T3 nightly changed what tr3x can call
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -43,11 +43,11 @@ jobs:
       - name: Compare
         run: |
           cargo build --release --locked
-          ./target/release/t3rex surface --from "$RUNNER_TEMP/t3/t3" --label "$VERSION" \
-            --check t3rex/t3-surface.json --write t3rex/t3-surface.json > "$RUNNER_TEMP/report.md"
+          ./target/release/tr3x surface --from "$RUNNER_TEMP/t3/t3" --label "$VERSION" \
+            --check tr3x/t3-surface.json --write tr3x/t3-surface.json > "$RUNNER_TEMP/report.md"
           cat "$RUNNER_TEMP/report.md"
           # A new version alone changes only the label.
-          if git diff --quiet -I '"t3":' t3rex/t3-surface.json; then
+          if git diff --quiet -I '"t3":' tr3x/t3-surface.json; then
             echo "CHANGED=" >> "$GITHUB_ENV"
           else
             echo "CHANGED=1" >> "$GITHUB_ENV"
@@ -72,15 +72,15 @@ jobs:
           git commit -qam "chore: T3 surface from $VERSION"
           git push -qf origin t3-surface
           {
-            echo "T3 \`$VERSION\` against \`t3rex/t3-surface.json\` on master."
+            echo "T3 \`$VERSION\` against \`tr3x/t3-surface.json\` on master."
             echo
             if [ "$TESTS" = pass ]; then
-              echo "t3rex's tests pass against it."
+              echo "tr3x's tests pass against it."
             else
-              echo "**t3rex's tests fail against it**: something t3rex calls is gone. See the run's log."
+              echo "**tr3x's tests fail against it**: something tr3x calls is gone. See the run's log."
             fi
             echo
-            echo "Added names are what t3rex could offer next (an entry in \`t3rex/src/actions.rs\`)."
+            echo "Added names are what tr3x could offer next (an entry in \`tr3x/src/actions.rs\`)."
             echo
             cat "$RUNNER_TEMP/report.md"
             echo "[Open a pull request](${{ github.server_url }}/${{ github.repository }}/compare/master...t3-surface?expand=1) · [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"

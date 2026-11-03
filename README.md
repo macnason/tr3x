@@ -1,10 +1,10 @@
-# t3rex
+# tr3x
 
 Your [T3 Code](https://github.com/pingdotgg/t3code) threads, as tabs in [Rex](https://www.superlogical.com/rex).
 
 T3 runs the agents. Rex is where you read and reply. Each open thread is a tab in one Rex
 session, **T3 Code**, sorted the way T3's sidebar sorts them: whatever needs you on top. That
-goes for every machine you run T3 on, without the T3 app. t3rex runs no agent of its own: every
+goes for every machine you run T3 on, without the T3 app. tr3x runs no agent of its own: every
 message, approval and setting goes to T3.
 
 ![Rex in dark mode with the T3 Code session: a thread that needs you at the top, threads working on Claude, Codex and Gemini, another machine's threads under it, and an agent's HTML preview inline in the conversation](docs/assets/hero.png)
@@ -16,25 +16,25 @@ running with at least one project. HTML previews use Chrome or Chromium when it'
 Pull requests open in [sup](https://github.com/superultrainc/sup); the drawer offers to add it.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | sh
 ```
 
 That opens Rex and T3 if they aren't running, downloads the latest release and checks its
-SHA-256, installs `~/.local/bin/t3rex`, adds its actions and keys to Rex's config, and switches
-Rex to **T3 Code**. Rex starts t3rex's sync as its config loads, so it runs whenever Rex does.
+SHA-256, installs `~/.local/bin/tr3x`, adds its actions and keys to Rex's config, and switches
+Rex to **T3 Code**. Rex starts tr3x's sync as its config loads, so it runs whenever Rex does.
 Rex pairs with this Mac's T3 on its own. Other machines on your tailnet that run T3 are found
 and offered: one confirm where SSH reaches them, else one command to run there.
 
 From a clone, `install.sh` builds with cargo instead:
 
 ```sh
-git clone https://github.com/macnason/t3rex && cd t3rex
+git clone https://github.com/macnason/tr3x && cd tr3x
 sh install.sh
 ```
 
-`t3rex doctor` checks each part and says how to fix what isn't right.
-[Every step](docs/how-it-works.md#install-in-detail) is undone by `t3rex uninstall`. After that,
-t3rex keeps itself up to date; `t3rex updates notify` or `off` changes that.
+`tr3x doctor` checks each part and says how to fix what isn't right.
+[Every step](docs/how-it-works.md#install-in-detail) is undone by `tr3x uninstall`. After that,
+tr3x keeps itself up to date; `tr3x updates notify` or `off` changes that.
 
 ## Getting started
 
@@ -43,7 +43,7 @@ t3rex keeps itself up to date; `t3rex updates notify` or `off` changes that.
 2. **Start a thread.** ⌘T in the session, or ⌃⌘N from anywhere. Type the first message; the
    chips under it pick the project, model and worktree. Enter sends, and the tab becomes the
    thread's.
-3. **Reply.** Type at the bottom of the conversation and press Enter. `/` lists t3rex's
+3. **Reply.** Type at the bottom of the conversation and press Enter. `/` lists tr3x's
    commands and the agent's own commands and skills.
 4. **Answer what's waiting.** An approval puts **Approve**, **Always** and **Decline** over the
    input: click one, or type `a`, `s` or `d` and Enter. A question's options are buttons too.
@@ -65,11 +65,11 @@ syncs next to T3, so the session and its agents don't depend on any one screen. 
 command that adds the machine as a host in Rex on your other devices (`rex hosts add NAME
 https://<machine>-rex.<tailnet>.ts.net`). The first time, approve the new device it asks for in
 your Tailscale account; the address is yours alone. The host shows in Rex's sidebar once it's
-ticked in **Filter Hosts** and has a session open, which t3rex's **T3 Code** is. Those devices need only Rex: the
+ticked in **Filter Hosts** and has a session open, which tr3x's **T3 Code** is. Those devices need only Rex: the
 panes run on the host. On Linux the Reply input sits between two rules instead of on a fill,
 since there's no Rex app to read a theme from.
 
-**Another machine.** Run `t3rex pair`. It finds the machines on your tailnet that run T3 and
+**Another machine.** Run `tr3x pair`. It finds the machines on your tailnet that run T3 and
 pairs each one: from here where `ssh` reaches it, else with one command to run there.
 
 **Your phone.** Rex for iPhone shows the same session. Run **Fit to This Device** from the
@@ -102,7 +102,7 @@ palette on the phone, and the tabs take its size.
   `Fix the build · studio`. New threads start on whichever machine you pick.
 - **Pull requests beside the thread.** `/pr create` has T3 commit, push and open one; `/pr`
   shows it in a drawer over the right of the thread.
-- **Up to date on its own.** t3rex installs its updates in the background, and each tab picks
+- **Up to date on its own.** tr3x installs its updates in the background, and each tab picks
   the new version up once nothing's typed in it. When T3 has an update on one of your machines,
   Reply says so, and `/update` installs it there, through T3, even if you never open T3 Code.
 - **Close to settle.** Closing a tab settles the thread. A thread that's still working only
@@ -110,27 +110,27 @@ palette on the phone, and the tabs take its size.
 
 ## Let your agent drive it
 
-t3rex comes with a [skill](skills/t3rex/SKILL.md) for coding agents: install and check t3rex,
+tr3x comes with a [skill](skills/tr3x/SKILL.md) for coding agents: install and check tr3x,
 fix a tab that's missing, pair a machine, change a setting, or settle, snooze and rename
 threads from a terminal.
 
 ```sh
-npx skills add macnason/t3rex
+npx skills add macnason/tr3x
 ```
 
-Or copy `skills/t3rex` into your agent's skills folder, such as `~/.claude/skills`. Then ask it
-to "set up t3rex", or "why isn't my new thread showing in Rex?".
+Or copy `skills/tr3x` into your agent's skills folder, such as `~/.claude/skills`. Then ask it
+to "set up tr3x", or "why isn't my new thread showing in Rex?".
 
 ## Docs
 
-- [Using t3rex](docs/usage.md): every key, command and setting, chat width, and known limits.
+- [Using tr3x](docs/usage.md): every key, command and setting, chat width, and known limits.
 - [Choosing the host](docs/hosting.md): which machine runs Rex and sync, attaching clients,
   moving the host.
 - [How it works](docs/how-it-works.md): sync, machines, pairing, the panes, and install in
   detail.
 - [Contributing](CONTRIBUTING.md): building, testing, and taking screenshots without your own
   threads in them.
-- [Security](SECURITY.md): what t3rex can reach, where its tokens live, and how to report a
+- [Security](SECURITY.md): what tr3x can reach, where its tokens live, and how to report a
   problem.
 
 Works with T3 Code 0.1.6 and its nightlies (orchestration protocol 2), and Rex Beta 0.1.0.
@@ -141,10 +141,10 @@ changes.
 
 - [Rex](https://www.superlogical.com/rex) by Superlogical.
 - [T3 Code](https://github.com/pingdotgg/t3code) by Ping, which does the actual work.
-- [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), which t3rex's T3 client
+- [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), which tr3x's T3 client
   started from.
 
-t3rex is an independent project. It isn't affiliated with Superlogical or Ping.
+tr3x is an independent project. It isn't affiliated with Superlogical or Ping.
 
 ## License
 

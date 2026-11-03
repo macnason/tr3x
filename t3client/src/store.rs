@@ -1,9 +1,9 @@
-//! What t3rex keeps about the machines it's paired with, in its state directory:
+//! What tr3x keeps about the machines it's paired with, in its state directory:
 //!
 //! - `envs.json`: each machine's id, T3's name for it, the alias the user gave it, where it
 //!   answers and how it was paired. Nothing secret.
 //! - `credentials.json`, mode 0600: each machine's bearer token, its scopes and when it
-//!   expires. Every t3rex process reads it; pairing writes it under `pair.lock`.
+//!   expires. Every tr3x process reads it; pairing writes it under `pair.lock`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -35,7 +35,7 @@ pub struct Machine {
     /// T3's name for the machine, from its descriptor.
     #[serde(default)]
     pub label: String,
-    /// What the user calls it in Rex, from `t3rex env rename`.
+    /// What the user calls it in Rex, from `tr3x env rename`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
     /// Where it answers, best first.
@@ -176,7 +176,7 @@ thread_local! {
     pub(crate) static CREDENTIAL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// t3rex's machine files in one state directory.
+/// tr3x's machine files in one state directory.
 #[derive(Debug, Clone)]
 pub struct Store {
     pub dir: PathBuf,
@@ -269,7 +269,7 @@ impl Store {
         Ok(removed)
     }
 
-    /// The lock every t3rex process holds while it pairs or changes these files, so two
+    /// The lock every tr3x process holds while it pairs or changes these files, so two
     /// panes that find a token rejected at once pair only once. Waits up to a minute.
     pub async fn lock(&self) -> Result<std::fs::File> {
         std::fs::create_dir_all(&self.dir)?;

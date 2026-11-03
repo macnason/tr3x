@@ -11,7 +11,7 @@
 //! without comparing payloads (apps/server/src/orchestration-v2/Orchestrator.ts). So a
 //! `LaunchRequest` picks its ids once, can't be changed, and goes only to the environment it was
 //! built for. Sending the same request again, to the same server, is the only safe retry, and
-//! t3rex never sends one again on its own.
+//! tr3x never sends one again on its own.
 
 use std::fmt;
 use std::time::Duration;
@@ -317,7 +317,7 @@ impl LaunchRequest {
     }
 
     /// The error for a launch T3 may have acted on. It carries the ids that find the thread and
-    /// `outcome`: "unknown" when t3rex can't tell what T3 did, or "rejected" when T3 answered
+    /// `outcome`: "unknown" when tr3x can't tell what T3 did, or "rejected" when T3 answered
     /// with a failure it named.
     fn failure(
         &self,
@@ -364,7 +364,7 @@ impl LaunchRequest {
                 exit::REJECTED,
                 "unknown",
                 format!(
-                    "T3 failed the launch of thread {id} with an unexpected error: {}. T3 may have created the thread before the error, so t3rex can't tell whether the launch happened.",
+                    "T3 failed the launch of thread {id} with an unexpected error: {}. T3 may have created the thread before the error, so tr3x can't tell whether the launch happened.",
                     message.trim_end_matches('.')
                 ),
             ),
@@ -375,7 +375,7 @@ impl LaunchRequest {
                 exit::UNAVAILABLE,
                 "unknown",
                 format!(
-                    "t3rex sent the launch of thread {id}, but can't tell whether T3 launched it ({unknown}). T3 may have launched it or may still, so t3rex won't send it again."
+                    "tr3x sent the launch of thread {id}, but can't tell whether T3 launched it ({unknown}). T3 may have launched it or may still, so tr3x won't send it again."
                 ),
             ),
         }
@@ -491,7 +491,7 @@ impl Env {
     ///
     /// - `THREAD_LAUNCH_UNCONFIRMED`, exit 5, outcome "unknown": the connection dropped or T3
     ///   didn't answer within 60 seconds. T3 may have launched the thread, or may still: a
-    ///   launch that waits for the server to finish starting can land after t3rex gives up.
+    ///   launch that waits for the server to finish starting can land after tr3x gives up.
     /// - `THREAD_LAUNCH_REJECTED`, exit 4, outcome "rejected": T3 ran the launch and it failed.
     ///   A failure after T3 created the thread leaves the thread behind.
     /// - `T3_RPC_FAILED`, exit 4, outcome "rejected": any other failure T3 tags, such as a
@@ -534,7 +534,7 @@ impl Env {
                 exit::FAILURE,
                 "unknown",
                 format!(
-                    "T3 answered the launch of thread {}, but {problem}, so t3rex can't confirm what it launched.",
+                    "T3 answered the launch of thread {}, but {problem}, so tr3x can't confirm what it launched.",
                     request.thread_id
                 ),
             )
@@ -586,7 +586,7 @@ mod tests {
         json!({"_tag": "Failure", "cause": [{"_tag": "Fail", "error": error}]})
     }
 
-    /// Checks that t3rex's next request launches exactly `request`, and returns its id.
+    /// Checks that tr3x's next request launches exactly `request`, and returns its id.
     async fn launch(socket: &mut Socket, request: &LaunchRequest) -> Value {
         let frame = recv(socket).await;
         let id = frame["id"].clone();
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(t3(&error.unwrap_err()).code, "LAUNCH_PLAN_INCOMPLETE");
     }
 
-    /// The desktop app keeps 50 UTF-16 units of the trimmed message. t3rex does too, but never
+    /// The desktop app keeps 50 UTF-16 units of the trimmed message. tr3x does too, but never
     /// cuts a character in half.
     #[test]
     fn titles_from_the_message_keep_fifty_utf16_units() {
@@ -894,7 +894,7 @@ mod tests {
         assert!(error.details.is_empty());
     }
 
-    /// When the connection drops after the launch goes out, the outcome is unknown. t3rex
+    /// When the connection drops after the launch goes out, the outcome is unknown. tr3x
     /// reports the ids that find the thread and never connects again to resend it.
     #[tokio::test]
     async fn a_launch_whose_connection_drops_is_unconfirmed_and_never_resent() {
@@ -908,7 +908,7 @@ mod tests {
             let (_, mut socket) = open(&listener, &mut tickets).await;
             launch(&mut socket, &sent).await;
             drop(socket);
-            // t3rex may connect again, since other watches share the connection, but it must
+            // tr3x may connect again, since other watches share the connection, but it must
             // not send the launch again.
             let resent = tokio::time::timeout(Duration::from_millis(500), async {
                 let (_, mut socket) = open(&listener, &mut tickets).await;
@@ -942,11 +942,11 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(server.await.unwrap(), "t3rex sent the launch again");
+        assert!(server.await.unwrap(), "tr3x sent the launch again");
     }
 
     /// A launch T3 holds past the timeout is unconfirmed too. The test shortens the 60 seconds
-    /// to 200 ms and holds the launch, with the socket open, until t3rex gives up.
+    /// to 200 ms and holds the launch, with the socket open, until tr3x gives up.
     #[tokio::test]
     async fn a_launch_t3_holds_past_the_timeout_is_unconfirmed() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -965,7 +965,7 @@ mod tests {
         let short = client.launch_thread_within(&request, Duration::from_millis(200));
         let error = tokio::time::timeout(Duration::from_secs(10), short)
             .await
-            .expect("t3rex gives up within 10 seconds")
+            .expect("tr3x gives up within 10 seconds")
             .unwrap_err();
         done.send(()).unwrap();
         server.await.unwrap();
@@ -1070,7 +1070,7 @@ mod tests {
             let error = t3(&error);
             assert_eq!((error.code, error.exit_code), ("T3_RPC_FAILED", 4));
             let message = format!(
-                "T3 failed the launch of thread {thread} with an unexpected error: {shown}. T3 may have created the thread before the error, so t3rex can't tell whether the launch happened."
+                "T3 failed the launch of thread {thread} with an unexpected error: {shown}. T3 may have created the thread before the error, so tr3x can't tell whether the launch happened."
             );
             assert_eq!(error.message, message);
             assert_eq!(error.details, details(&request, "unknown"));
@@ -1154,7 +1154,7 @@ mod tests {
             let error = t3(&error);
             assert_eq!((error.code, error.exit_code), ("T3_INVALID_LAUNCH", 1));
             let message = format!(
-                "T3 answered the launch of thread {thread}, but {problem}, so t3rex can't confirm what it launched."
+                "T3 answered the launch of thread {thread}, but {problem}, so tr3x can't confirm what it launched."
             );
             assert_eq!(error.message, message);
             assert_eq!(error.details, details(&request, "unknown"));

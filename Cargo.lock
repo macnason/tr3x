@@ -1844,29 +1844,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "t3rex"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "crossterm",
- "futures-util",
- "image",
- "libc",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "syntect",
- "t3client",
- "tempfile",
- "tokio",
- "unicode-segmentation",
- "unicode-width",
- "uuid",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2026,6 +2003,29 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "tr3x"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "crossterm",
+ "futures-util",
+ "image",
+ "libc",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "syntect",
+ "t3client",
+ "tempfile",
+ "tokio",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+]
 
 [[package]]
 name = "tracing"

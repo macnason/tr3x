@@ -1,26 +1,26 @@
 #!/bin/sh
-# t3rex: your T3 Code threads, as tabs in Rex. One command:
+# tr3x: your T3 Code threads, as tabs in Rex. One command:
 #
-#   curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | sh
 #   sh install.sh                        # from a clone, building with cargo
 #
-# On a Mac or on Linux. Checks that Rex and T3 Code are installed and running, gets the t3rex
+# On a Mac or on Linux. Checks that Rex and T3 Code are installed and running, gets the tr3x
 # binary (a build when run from a clone with Rust installed, else the latest release, checked
-# against its SHA-256), and runs `t3rex install`. T3REX_URL (and T3REX_SHA256) pick another tarball. Nothing needs
-# sudo. `t3rex uninstall` undoes it.
+# against its SHA-256), and runs `tr3x install`. TR3X_URL (and TR3X_SHA256) pick another tarball. Nothing needs
+# sudo. `tr3x uninstall` undoes it.
 set -eu
 
-REPO=macnason/t3rex
+REPO=macnason/tr3x
 OS=$(uname -s)
 case "$OS" in
-  Darwin) NAME=t3rex-macos-universal ;;
+  Darwin) NAME=tr3x-macos-universal ;;
   Linux)
     case "$(uname -m)" in
-      x86_64|amd64) NAME=t3rex-linux-x86_64 ;;
-      aarch64|arm64) NAME=t3rex-linux-aarch64 ;;
-      *) printf '✗ t3rex has no build for %s\n' "$(uname -m)" >&2; exit 1 ;;
+      x86_64|amd64) NAME=tr3x-linux-x86_64 ;;
+      aarch64|arm64) NAME=tr3x-linux-aarch64 ;;
+      *) printf '✗ tr3x has no build for %s\n' "$(uname -m)" >&2; exit 1 ;;
     esac ;;
-  *) printf '✗ t3rex needs macOS or Linux\n' >&2; exit 1 ;;
+  *) printf '✗ tr3x needs macOS or Linux\n' >&2; exit 1 ;;
 esac
 ASSET=$NAME.tar.gz
 
@@ -72,9 +72,9 @@ UNIT
 
 if [ "$OS" = Darwin ]; then
   CURL=/usr/bin/curl
-  REX_APP=${T3REX_REX_APP:-"/Applications/Rex Beta.app"}
+  REX_APP=${TR3X_REX_APP:-"/Applications/Rex Beta.app"}
   REX="$REX_APP/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
-  T3_APP=${T3REX_T3_APP:-}
+  T3_APP=${TR3X_T3_APP:-}
   if [ -z "$T3_APP" ]; then
     for app in "/Applications/T3 Code.app" "/Applications/T3 Code (Nightly).app" "/Applications/T3 Code (Beta).app"; do
       [ -d "$app" ] && { T3_APP=$app; break; }
@@ -82,7 +82,7 @@ if [ "$OS" = Darwin ]; then
   fi
 else
   CURL=curl T3_APP=
-  REX=${T3REX_REX:-$(command -v rex || true)}
+  REX=${TR3X_REX:-$(command -v rex || true)}
 fi
 
 # Rex: installed, and its server answering.
@@ -143,45 +143,45 @@ HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd || pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 BIN=""
-if [ -z "${T3REX_URL:-}" ] && [ -f "$HERE/t3rex/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  say "Building t3rex (a minute or two the first time)…"
-  cargo build --release --locked -p t3rex --manifest-path "$HERE/Cargo.toml"
-  BIN="$HERE/target/release/t3rex"
+if [ -z "${TR3X_URL:-}" ] && [ -f "$HERE/tr3x/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+  say "Building tr3x (a minute or two the first time)…"
+  cargo build --release --locked -p tr3x --manifest-path "$HERE/Cargo.toml"
+  BIN="$HERE/target/release/tr3x"
 else
-  URL=${T3REX_URL:-https://github.com/$REPO/releases/latest/download/$ASSET}
-  SUM=${T3REX_SHA256:-}
-  if [ -z "${T3REX_URL:-}" ] && [ -z "$SUM" ]; then
+  URL=${TR3X_URL:-https://github.com/$REPO/releases/latest/download/$ASSET}
+  SUM=${TR3X_SHA256:-}
+  if [ -z "${TR3X_URL:-}" ] && [ -z "$SUM" ]; then
     $CURL -fsSL -o "$WORK/sum" "$URL.sha256" || {
-      no "Couldn't download t3rex from github.com/$REPO"
+      no "Couldn't download tr3x from github.com/$REPO"
       say "  Check your connection, or run this from a clone with Rust installed (https://rustup.rs)."
       exit 1
     }
     SUM=$(cut -d' ' -f1 < "$WORK/sum")
   fi
-  say "Downloading t3rex…"
-  $CURL -fL --progress-bar -o "$WORK/t3rex.tar.gz" "$URL" || { no "Couldn't download $URL"; exit 1; }
+  say "Downloading tr3x…"
+  $CURL -fL --progress-bar -o "$WORK/tr3x.tar.gz" "$URL" || { no "Couldn't download $URL"; exit 1; }
   if [ -n "$SUM" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
-      GOT=$(sha256sum "$WORK/t3rex.tar.gz" | cut -d' ' -f1)
+      GOT=$(sha256sum "$WORK/tr3x.tar.gz" | cut -d' ' -f1)
     else
-      GOT=$(shasum -a 256 "$WORK/t3rex.tar.gz" | cut -d' ' -f1)
+      GOT=$(shasum -a 256 "$WORK/tr3x.tar.gz" | cut -d' ' -f1)
     fi
     [ "$GOT" = "$SUM" ] || { no "The download's SHA-256 doesn't match"; say "  Expected $SUM, got $GOT."; exit 1; }
   fi
-  mkdir "$WORK/x" && tar -xzf "$WORK/t3rex.tar.gz" -C "$WORK/x"
-  BIN=$(find "$WORK/x" -type f -name t3rex -perm -u+x | head -1)
+  mkdir "$WORK/x" && tar -xzf "$WORK/tr3x.tar.gz" -C "$WORK/x"
+  BIN=$(find "$WORK/x" -type f -name tr3x -perm -u+x | head -1)
   # A download can be quarantined; this one was asked for.
   if [ "$OS" = Darwin ] && [ -n "$BIN" ]; then xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true; fi
 fi
-[ -n "$BIN" ] && [ -x "$BIN" ] || { no "Couldn't find t3rex in the download"; exit 1; }
-ok "t3rex $("$BIN" --version | cut -d' ' -f2)"
+[ -n "$BIN" ] && [ -x "$BIN" ] || { no "Couldn't find tr3x in the download"; exit 1; }
+ok "tr3x $("$BIN" --version | cut -d' ' -f2)"
 
 # Copies itself to ~/.local/bin when it runs from a build or a download.
 # Piped into sh, stdin is this script: install asks about other machines on the terminal.
 if [ -r /dev/tty ] && [ -t 1 ]; then
-  T3REX_REX="$REX" "$BIN" install </dev/tty
+  TR3X_REX="$REX" "$BIN" install </dev/tty
 else
-  T3REX_REX="$REX" "$BIN" install
+  TR3X_REX="$REX" "$BIN" install
 fi
 
 # A machine that stays on is the one other devices follow. Say how, once. The first time, Rex's

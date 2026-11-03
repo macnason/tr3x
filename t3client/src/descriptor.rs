@@ -74,7 +74,7 @@ impl Descriptor {
         }
         let message = match self.protocol_version {
             Some(v) if v > PROTOCOL_VERSION => format!(
-                "T3 {} on {} speaks orchestration protocol {v}, which this build doesn't know yet. Update t3rex.",
+                "T3 {} on {} speaks orchestration protocol {v}, which this build doesn't know yet. Update tr3x.",
                 self.server_version,
                 self.name()
             ),
@@ -97,7 +97,7 @@ impl Descriptor {
             "ENVIRONMENT_CHANGED",
             exit::REJECTED,
             format!(
-                "The T3 at {} is {} ({}), not the machine t3rex paired with ({expected}).",
+                "The T3 at {} is {} ({}), not the machine tr3x paired with ({expected}).",
                 self.origin,
                 self.name(),
                 self.environment_id

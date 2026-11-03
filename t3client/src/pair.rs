@@ -206,7 +206,7 @@ pub enum Forgot {
     Kept,
 }
 
-/// Forgets `machine`: revokes t3rex's session through the machine's CLI where t3rex can run
+/// Forgets `machine`: revokes tr3x's session through the machine's CLI where tr3x can run
 /// it, then drops its token and its entry.
 pub async fn forget(store: &Store, machine: &Machine) -> Result<Forgot> {
     let _lock = store.lock().await?;
@@ -475,7 +475,7 @@ mod tests {
     }
 
     /// A pasted link pairs with the machine its address answers as, and saves the token
-    /// where every t3rex process finds it.
+    /// where every tr3x process finds it.
     #[tokio::test]
     async fn a_link_pairs_and_saves_the_machine() {
         let server = crate::http::fake::Server::start(|path| match path {

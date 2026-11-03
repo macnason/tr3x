@@ -20,9 +20,9 @@ use crate::store::Store;
 
 pub const DEFAULT_PORT: u16 = 3779;
 
-/// The port sync listens on: `T3REX_JOIN_PORT`, else 3779.
+/// The port sync listens on: `TR3X_JOIN_PORT`, else 3779.
 pub fn port() -> u16 {
-    std::env::var("T3REX_JOIN_PORT")
+    std::env::var("TR3X_JOIN_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT)
@@ -88,7 +88,7 @@ pub async fn serve(store: Store) -> Result<()> {
     for ip in &me.ips {
         match TcpListener::bind(SocketAddr::new(*ip, port())).await {
             Ok(listener) => bound.push(listener),
-            Err(e) => eprintln!("t3rex: can't take joins on {ip}:{}: {e}", port()),
+            Err(e) => eprintln!("tr3x: can't take joins on {ip}:{}: {e}", port()),
         }
     }
     if bound.is_empty() {
@@ -230,7 +230,7 @@ async fn join(request: &Request, ip: IpAddr, name: &str, store: &Store) -> Resul
         format!("http://{ip}:{port}"),
     ];
     let machine = pair::pair(store, How::Joined { origins, minted }, None).await?;
-    eprintln!("t3rex: {} joined", machine.name());
+    eprintln!("tr3x: {} joined", machine.name());
     Ok(machine.name().to_string())
 }
 

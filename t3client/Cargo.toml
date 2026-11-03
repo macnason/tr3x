@@ -3,7 +3,7 @@ name = "t3client"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/macnason/t3rex"
+repository = "https://github.com/macnason/tr3x"
 publish = false
 description = "A T3 Code client: pairing, one connection per machine, and T3's thread and sidebar logic."
 

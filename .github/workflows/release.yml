@@ -16,27 +16,27 @@ jobs:
   release:
     runs-on: macos-latest
     env:
-      NAME: t3rex-macos-universal
+      NAME: tr3x-macos-universal
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - run: cargo build --release --locked -p t3rex --target aarch64-apple-darwin
-      - run: cargo build --release --locked -p t3rex --target x86_64-apple-darwin
+      - run: cargo build --release --locked -p tr3x --target aarch64-apple-darwin
+      - run: cargo build --release --locked -p tr3x --target x86_64-apple-darwin
       - name: Package
         run: |
           mkdir -p "dist/$NAME"
-          lipo -create -output "dist/$NAME/t3rex" \
-            target/aarch64-apple-darwin/release/t3rex \
-            target/x86_64-apple-darwin/release/t3rex
-          codesign --force --sign - "dist/$NAME/t3rex"
-          lipo -info "dist/$NAME/t3rex"
+          lipo -create -output "dist/$NAME/tr3x" \
+            target/aarch64-apple-darwin/release/tr3x \
+            target/x86_64-apple-darwin/release/tr3x
+          codesign --force --sign - "dist/$NAME/tr3x"
+          lipo -info "dist/$NAME/tr3x"
           # The updater refuses a binary that doesn't say its release's version.
           want=${GITHUB_REF_NAME#v}
-          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' t3rex/Cargo.toml | head -1)
-          test "$("dist/$NAME/t3rex" --version)" = "t3rex $want" \
-            || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
+          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' tr3x/Cargo.toml | head -1)
+          test "$("dist/$NAME/tr3x" --version)" = "tr3x $want" \
+            || { echo "tr3x/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
@@ -61,25 +61,25 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
-            name: t3rex-linux-x86_64
+            name: tr3x-linux-x86_64
           - runner: ubuntu-24.04-arm
-            name: t3rex-linux-aarch64
+            name: tr3x-linux-aarch64
     runs-on: ${{ matrix.runner }}
     env:
       NAME: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked -p t3rex
+      - run: cargo build --release --locked -p tr3x
       - name: Package
         run: |
           mkdir -p "dist/$NAME"
-          cp target/release/t3rex "dist/$NAME/t3rex"
+          cp target/release/tr3x "dist/$NAME/tr3x"
           # The updater refuses a binary that doesn't say its release's version.
           want=${GITHUB_REF_NAME#v}
-          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' t3rex/Cargo.toml | head -1)
-          test "$("dist/$NAME/t3rex" --version)" = "t3rex $want" \
-            || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
+          [ "$GITHUB_REF_TYPE" = tag ] || want=$(sed -n 's/^version = "\(.*\)"/\1/p' tr3x/Cargo.toml | head -1)
+          test "$("dist/$NAME/tr3x" --version)" = "tr3x $want" \
+            || { echo "tr3x/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")

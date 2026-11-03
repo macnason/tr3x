@@ -1,4 +1,4 @@
-# Using t3rex
+# Using tr3x
 
 Every key, command and setting. New to it? Start with [getting started](../README.md#getting-started).
 
@@ -13,10 +13,10 @@ Every key, command and setting. New to it? Start with [getting started](../READM
 | Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
 | Approve | Click **Approve**, **Always** or **Decline** over the input, or Tab to them and Enter. `a`, `s` or `d` then Enter does the same. Anything else you type is a reply. |
 | Answer | Click an option, or Tab to it. A pending question also takes the input as its answer, and a number picks that option. |
-| Another machine | On it, run `curl -fsSL http://<this Mac>:3779/join \| sh`; `t3rex pair` prints the exact command. That's all: it pairs that machine's T3 with Rex over your tailnet, and only your own machines can. Where `ssh <host>` already works, `t3rex pair` does it from here with one confirm instead. A link from T3 → Settings → Connections there works too (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
+| Another machine | On it, run `curl -fsSL http://<this Mac>:3779/join \| sh`; `tr3x pair` prints the exact command. That's all: it pairs that machine's T3 with Rex over your tailnet, and only your own machines can. Where `ssh <host>` already works, `tr3x pair` does it from here with one confirm instead. A link from T3 → Settings → Connections there works too (`tr3x pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `tr3x envs` lists them, `tr3x env rename box studio` names one, `tr3x env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
-| Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
-| Reply pane | `/reply pane` in Reply, or `t3rex reply pane`, gives Reply a pane of its own under the conversation, sized to fit it; `/reply inline` puts it back. Open windows change within a few seconds. Rex's iPhone app shows each pane as a window of its own, so inline suits a phone. |
+| Sessions | One **T3 Code** session for every machine, or `tr3x sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
+| Reply pane | `/reply pane` in Reply, or `tr3x reply pane`, gives Reply a pane of its own under the conversation, sized to fit it; `/reply inline` puts it back. Open windows change within a few seconds. Rex's iPhone app shows each pane as a window of its own, so inline suits a phone. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
 | Pull request | **Create Pull Request** in the palette, or `/pr create` in Reply: T3 commits, pushes and opens one with the title and body it writes, as its own Create PR does, on a new branch if the thread is on the default one. **Show Pull Request** or `/pr` opens the thread's. Either way it opens in a drawer floating over the right of the thread, full height when the window is wide enough, else over nearly all of it. [sup](https://github.com/superultrainc/sup) shows it there: description, conversation, review threads, checks and files; `m` merges, `A` approves, `M` comments, `q` steps back to sup's list of your pull requests and again closes the drawer. sup is optional: a drawer that opens without it shows `gh pr view`, and Enter installs sup into `~/.local/bin`, checked against its release, and shows the pull request in it. |
@@ -24,7 +24,7 @@ Every key, command and setting. New to it? Start with [getting started](../READM
 | Find | **Find Thread…** in the palette lists every thread on every machine, grouped Open, Snoozed, Settled and Archived, newest first. Typing filters. Enter brings one back to its tab, unsettling, waking or unarchiving it as needed; ⌥Enter opens it in T3. |
 | Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
 | Commands | `/steer …` `/settle` `/unsettle` `/snooze` `/wake` `/pin` `/unpin` `/rename` `/retitle` `/fork` `/archive` `/delete` `/stop` `/force-stop` `/model` `/effort` `/mode` `/open` `/pr` `/width` `/details`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. A command the thread's machine is too old for isn't listed. |
-| Updates | t3rex checks once a day and installs its own updates; `t3rex updates notify` makes it ask first, `t3rex updates off` stops it checking. A tab picks up a new version once nothing's typed in it. When a machine's T3 is behind, Reply says `T3 update · /update`. `/update`, **Update t3rex and T3…** in the palette, or `t3rex update` in a terminal lists what's out and installs it on Enter: the T3 Code app downloads its update and restarts to install it, asking first while threads run there (T3 picks them up again after); a machine running T3's background service updates and restarts by itself. A machine running a plain `t3 serve` is updated there. `t3rex update --check` only lists. |
+| Updates | tr3x checks once a day and installs its own updates; `tr3x updates notify` makes it ask first, `tr3x updates off` stops it checking. A tab picks up a new version once nothing's typed in it. When a machine's T3 is behind, Reply says `T3 update · /update`. `/update`, **Update tr3x and T3…** in the palette, or `tr3x update` in a terminal lists what's out and installs it on Enter: the T3 Code app downloads its update and restarts to install it, asking first while threads run there (T3 picks them up again after); a machine running T3's background service updates and restarts by itself. A machine running a plain `t3 serve` is updated there. `tr3x update --check` only lists. |
 | Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you |
 | Palette | Everything else is in Rex's command palette (⌘⇧P) under **T3 Code**. To give an action a key, add a line like `rex.bind("ctrl+cmd+s", "t3_settle")` to `~/.config/rex/init.lua`. |
 
@@ -36,7 +36,7 @@ finished subagent's result is in its parent thread.
 The conversation, Reply and the new-thread composer share one centred column, like T3's chat
 lane. It follows T3 Code's **Chat width** setting, so it works as installed:
 
-| T3 setting | T3 lane | t3rex column |
+| T3 setting | T3 lane | tr3x column |
 |---|---|---|
 | Comfortable (default) | 46rem | 96 columns |
 | Wide | 72rem | 150 columns |
@@ -45,7 +45,7 @@ lane. It follows T3 Code's **Chat width** setting, so it works as installed:
 46rem of T3's sans holds about 92 to 100 characters a line, so 96 sits in that range. Wide keeps
 T3's 72/46 ratio. A pane narrower than the column uses its full width.
 
-To differ from T3: `/width wide` in Reply, or `t3rex width comfortable|wide|full|N` (a number is
+To differ from T3: `/width wide` in Reply, or `tr3x width comfortable|wide|full|N` (a number is
 a column count). `/width t3` goes back to following T3.
 
 ## Known limits
@@ -69,7 +69,7 @@ a column count). `/width t3` goes back to following T3.
 - **Pull requests on GitHub.** sup reads GitHub with the host's `gh` login, whichever machine
   the thread runs on. T3 makes the pull request with its own login there.
 - **Tailscale for other machines.** Finding and joining machines goes over your tailnet. Without
-  Tailscale, pair with SSH or a link. Pairings renew on their own; one made before t3rex asked
+  Tailscale, pair with SSH or a link. Pairings renew on their own; one made before tr3x asked
   for `access:write` renews the old way, so a linked machine from then needs one more link.
 - **Moving targets.** Works with T3 Code 0.1.6 and its nightlies (orchestration
   protocol 2), and Rex Beta 0.1.0 (1642), API revision 7.

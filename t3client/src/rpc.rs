@@ -3,8 +3,8 @@
 //! Client frames: `Request`, `Ack` (after each stream chunk, or once the caller accepts a bounded
 //! stream's chunk), `Interrupt`, `Ping`. Server frames: `Chunk`, `Exit`, `Defect`,
 //! `ClientProtocolError`, `Pong`. A frame may hold one message or an array of them. One
-//! connection multiplexes any number of calls and streams. A frame t3rex can't parse ends
-//! the connection, since t3rex can't tell which call or stream it was for. JSON is UTF-8, so
+//! connection multiplexes any number of calls and streams. A frame tr3x can't parse ends
+//! the connection, since tr3x can't tell which call or stream it was for. JSON is UTF-8, so
 //! a binary frame that isn't UTF-8 is one of those. json.rs says how a frame with half a
 //! UTF-16 surrogate pair in it still parses.
 
@@ -33,9 +33,9 @@ use crate::http::Api;
 pub use bounded::{BoundedChunk, BoundedStream, StreamLimits};
 
 /// Why calls end after `RpcClient::close`.
-const CLOSED: &str = "t3rex closed the connection";
+const CLOSED: &str = "tr3x closed the connection";
 /// Why the requests still tracked end once no handle can use the connection.
-const ABANDONED: &str = "t3rex dropped every handle on the connection";
+const ABANDONED: &str = "tr3x dropped every handle on the connection";
 /// How long a connection that ended gives its WebSocket Close frame to go out, and after the
 /// last handle drops, the `Ack` and `Interrupt` frames still queued before it too. A peer that
 /// stopped reading never takes them, and the socket drops without them.
@@ -45,7 +45,7 @@ const WRITE_MIN_RATE: usize = 32 * 1024;
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// No frame at all for this long means the socket is dead even if TCP has not noticed.
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
-/// The largest WebSocket message t3rex reads, tungstenite's default. T3 sends each message
+/// The largest WebSocket message tr3x reads, tungstenite's default. T3 sends each message
 /// in one frame, since Effect's RPC server hands each response to `ws.send` and ws doesn't
 /// split it. A terminal history full of escapes can pass tungstenite's default 16 MiB frame
 /// limit as JSON, so a frame here may take the whole message limit.
@@ -71,12 +71,12 @@ pub enum RpcError {
         /// the request died instead of failing. Boxed to keep the error small.
         error: Box<Value>,
     },
-    /// T3 sent what t3rex can't follow: a `Defect`, a `ClientProtocolError`, a bounded
-    /// stream's `Chunk` without a `values` array, or a frame t3rex can't parse, a binary one
+    /// T3 sent what tr3x can't follow: a `Defect`, a `ClientProtocolError`, a bounded
+    /// stream's `Chunk` without a `values` array, or a frame tr3x can't parse, a binary one
     /// that isn't UTF-8 among them. A frame it can't parse also closes the connection, and
     /// [`RpcClient::is_closed`] says so.
     Protocol(String),
-    /// t3rex stopped a bounded stream on its own side and interrupted it on the server. A
+    /// tr3x stopped a bounded stream on its own side and interrupted it on the server. A
     /// chunk would have taken the stream over its limits, and that chunk and everything after
     /// it are lost, or the caller dropped a chunk without accepting it.
     Stopped(String),
@@ -88,7 +88,7 @@ impl std::fmt::Display for RpcError {
             RpcError::Disconnected(reason) => write!(f, "T3 connection lost: {reason}"),
             RpcError::Failed { message, .. } => f.write_str(message),
             RpcError::Protocol(message) => write!(f, "T3 protocol error: {message}"),
-            RpcError::Stopped(reason) => write!(f, "t3rex stopped the stream: {reason}"),
+            RpcError::Stopped(reason) => write!(f, "tr3x stopped the stream: {reason}"),
         }
     }
 }
@@ -169,7 +169,7 @@ enum Stop {
     Abandoned,
     /// The socket closed, failed or went silent, for this reason.
     Lost(String),
-    /// T3 sent a frame t3rex can't parse, for this reason. Nothing in it went to a call or
+    /// T3 sent a frame tr3x can't parse, for this reason. Nothing in it went to a call or
     /// stream, and nothing acks it.
     Malformed(String),
 }
@@ -303,7 +303,7 @@ impl RpcClient {
                             // where the UTF-8 stopped, never what the frame held.
                             Some(Ok(Message::Binary(bytes))) => match std::str::from_utf8(&bytes) {
                                 Ok(text) => json::decode(text),
-                                Err(e) => break Stop::Malformed(format!("t3rex couldn't read a binary frame as UTF-8 ({e})")),
+                                Err(e) => break Stop::Malformed(format!("tr3x couldn't read a binary frame as UTF-8 ({e})")),
                             },
                             Some(Ok(Message::Close(frame))) => break Stop::Lost(format!("server closed the socket ({frame:?})")),
                             Some(Ok(_)) => continue,
@@ -313,7 +313,7 @@ impl RpcClient {
                         // The reason is where serde_json stopped, never what the frame held.
                         let decoded = match decoded {
                             Ok(decoded) => decoded,
-                            Err(e) => break Stop::Malformed(format!("t3rex couldn't parse a frame as JSON ({e})")),
+                            Err(e) => break Stop::Malformed(format!("tr3x couldn't parse a frame as JSON ({e})")),
                         };
                         let messages = match decoded {
                             Value::Array(items) => items,
@@ -423,7 +423,7 @@ impl RpcClient {
     /// out and drops the socket. It sends T3 no request, so T3 sees a client that went away.
     ///
     /// Nothing calls it on its own. A connection nobody closes lasts until its socket drops,
-    /// T3 sends a frame t3rex can't parse, or the last handle on it drops, which
+    /// T3 sends a frame tr3x can't parse, or the last handle on it drops, which
     /// [`RpcClient`] describes. Unlike the last handle dropping, a close sends nothing still
     /// queued, a stream's `Interrupt` included.
     pub fn close(&self) {
@@ -500,7 +500,7 @@ impl RpcClient {
     ///
     /// A chunk counts toward the limits from the moment it arrives until the caller accepts or
     /// drops it, whether it waits in the stream or the caller holds it. A chunk that would take
-    /// the stream over them stops it: t3rex interrupts the stream, and
+    /// the stream over them stops it: tr3x interrupts the stream, and
     /// [`BoundedStream::next`] returns the chunks that came before, then [`RpcError::Stopped`].
     /// The connection's reader never waits for the caller, so the other calls and streams on
     /// the socket go on. docs/bounded-rpc-streams.md has the details.
@@ -673,7 +673,7 @@ async fn handle_message(message: Value, pending: &PendingMap, ack: &mpsc::Unboun
                         map.remove(&request_id);
                     }
                 }
-                // A request t3rex no longer follows gets no Ack, as in Effect's own client
+                // A request tr3x no longer follows gets no Ack, as in Effect's own client
                 // (effect/src/rpc/RpcClient.ts). One that ended or stopped must not let T3 send
                 // more.
                 _ => {}

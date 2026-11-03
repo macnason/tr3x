@@ -1,4 +1,4 @@
-//! Every machine t3rex is paired with, each with a connection of its own, and the thread
+//! Every machine tr3x is paired with, each with a connection of its own, and the thread
 //! references that name a thread on one of them.
 
 use std::fmt;
@@ -26,7 +26,7 @@ impl ThreadRef {
     }
 
     /// `env/thread`, or a bare thread id, which is on `home`: what panes started before
-    /// t3rex knew more than one machine pass.
+    /// tr3x knew more than one machine pass.
     pub fn parse(text: &str, home: &str) -> ThreadRef {
         match text.split_once('/') {
             Some((env, thread)) if !env.is_empty() => ThreadRef::new(env, thread),
@@ -109,7 +109,7 @@ impl Hub {
         found.next().is_none().then(|| first.clone())
     }
 
-    /// How many machines t3rex holds a token for.
+    /// How many machines tr3x holds a token for.
     pub fn paired(&self) -> usize {
         self.store
             .count_credentials(self.envs.iter().map(|e| e.id()))

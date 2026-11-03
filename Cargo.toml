@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["t3client", "t3rex"]
+members = ["t3client", "tr3x"]
 
 [profile.release]
 strip = true

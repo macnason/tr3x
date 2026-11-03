@@ -18,7 +18,7 @@
 //! frame: two keys that differ only in such a half would both become U+FFFD and collide.
 //!
 //! `\ufffd` is as long as the escape it replaces, so the copy is exactly as long as the frame
-//! t3rex received, and the socket's limit on a message bounds it too. Every frame with a
+//! tr3x received, and the socket's limit on a message bounds it too. Every frame with a
 //! syntax error costs that copy and a scan of it, whether or not the scan finds a half. The
 //! scan reads the copy once, and a string with a half in it twice. Only the four hex digits of
 //! each such escape change. The copy must still parse, so a frame that is wrong in any other
@@ -197,7 +197,7 @@ mod tests {
             // is U+FFFD.
             r#"{"\ud83d":1,"\udbff":2}"#,
             r#"{"\ufffd":1,"\ude42":2}"#,
-            // A value t3rex would repair before a key with whitespace before its colon.
+            // A value tr3x would repair before a key with whitespace before its colon.
             "{\"a\":\"\\ud83d\", \"\\ude42\" \r\n\t: 1}",
         ];
         for frame in frames {

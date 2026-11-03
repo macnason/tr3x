@@ -1,31 +1,31 @@
 #!/bin/sh
-# Development: rebuild, close t3rex's sessions, and start sync again from a clean state, so every
-# pane runs the new binary. Uses the state dir in $T3REX_STATE_DIR (required, so it never
+# Development: rebuild, close tr3x's sessions, and start sync again from a clean state, so every
+# pane runs the new binary. Uses the state dir in $TR3X_STATE_DIR (required, so it never
 # touches an installed setup's state by accident). The sync Rex runs for an install has its own
 # state and lock, and carries on. The dev session is called t3x-dev, and its panes only read:
 # they never mark a thread visited. Pairings in the state dir are kept.
 set -e
-: "${T3REX_STATE_DIR:?set T3REX_STATE_DIR to a scratch directory}"
-case "$T3REX_STATE_DIR" in
-  "$HOME/.local/state/t3rex"|"$HOME/.local/state/t3rex/") echo "dev-restart: that's the installed state; use a scratch dir" >&2; exit 1 ;;
+: "${TR3X_STATE_DIR:?set TR3X_STATE_DIR to a scratch directory}"
+case "$TR3X_STATE_DIR" in
+  "$HOME/.local/state/tr3x"|"$HOME/.local/state/tr3x/") echo "dev-restart: that's the installed state; use a scratch dir" >&2; exit 1 ;;
 esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+REX=${TR3X_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
 # A build that fails stops here, with cargo's own output: nothing is killed or deleted below.
-cargo build --release --quiet -p t3rex --manifest-path "$HERE/Cargo.toml"
-pkill -f "$HERE/target/release/t3rex sync" || true
-if [ -f "$T3REX_STATE_DIR/state.json" ]; then
+cargo build --release --quiet -p tr3x --manifest-path "$HERE/Cargo.toml"
+pkill -f "$HERE/target/release/tr3x sync" || true
+if [ -f "$TR3X_STATE_DIR/state.json" ]; then
   /usr/bin/python3 -I -c "
 import json,sys
 s=json.load(open(sys.argv[1]))
 ids=[g.get('sessionId') for g in s.get('groups',{}).values()] + [s.get('session_id')]
-print('\n'.join(i for i in ids if i))" "$T3REX_STATE_DIR/state.json" | while read -r S; do
+print('\n'.join(i for i in ids if i))" "$TR3X_STATE_DIR/state.json" | while read -r S; do
     "$REX" --autostart=false kill "$S" >/dev/null 2>&1 || true
   done
 fi
-rm -f "$T3REX_STATE_DIR/state.json" "$T3REX_STATE_DIR/sync.log"
-mkdir -p "$T3REX_STATE_DIR"
-T3REX_SESSION_LABEL=${T3REX_SESSION_LABEL:-t3x-dev} T3REX_PASSIVE=1 \
-  nohup "$HERE/target/release/t3rex" sync --log --no-first > /dev/null 2>&1 &
+rm -f "$TR3X_STATE_DIR/state.json" "$TR3X_STATE_DIR/sync.log"
+mkdir -p "$TR3X_STATE_DIR"
+TR3X_SESSION_LABEL=${TR3X_SESSION_LABEL:-t3x-dev} TR3X_PASSIVE=1 \
+  nohup "$HERE/target/release/tr3x" sync --log --no-first > /dev/null 2>&1 &
 sleep "${WAIT:-6}"
-cat "$T3REX_STATE_DIR/sync.log"
+cat "$TR3X_STATE_DIR/sync.log"

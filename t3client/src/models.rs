@@ -1,6 +1,6 @@
 //! Model, reasoning-effort and mode choices, checked against the server's provider list.
 //!
-//! Models and option values come from `server.getConfig`, so new ones work without a t3rex
+//! Models and option values come from `server.getConfig`, so new ones work without a tr3x
 //! update. Field names follow T3's contracts: `ServerProvider` and `ServerProviderModel` in
 //! packages/contracts/src/server.ts, option descriptors in model.ts, `ModelSelection` in
 //! modelSelection.ts and the mode values in providerPolicy.ts.
@@ -137,7 +137,7 @@ pub fn find_model<'a>(config: &'a Value, query: &str) -> Result<(&'a Value, &'a 
         err_exit(
             "MODEL_NOT_FOUND",
             exit::NOT_FOUND,
-            format!("No model matches {query}. `t3rex models` lists them."),
+            format!("No model matches {query}. `tr3x models` lists them."),
         )
     };
     if let Some((instance, model)) = query.split_once('/')
@@ -231,7 +231,7 @@ fn option_value(descriptor: &Value, value: &str) -> Result<Value> {
                     ))
                 })
         }
-        _ => Err(usage(format!("t3rex cannot set the {id} option."))),
+        _ => Err(usage(format!("tr3x cannot set the {id} option."))),
     }
 }
 
@@ -275,7 +275,7 @@ fn choose(plan: &mut Plan, options: &mut Vec<Value>, descriptor: &Value, raw: &s
         Some(ULTRATHINK) => plan.prompt_effort = Some(ULTRATHINK.to_string()),
         Some(other) => {
             return Err(usage(format!(
-                "T3 applies {other} through the message text in a way t3rex does not support yet."
+                "T3 applies {other} through the message text in a way tr3x does not support yet."
             )));
         }
         None => {
@@ -333,7 +333,7 @@ pub fn plan(config: &Value, thread: &Value, choice: &Choice) -> Result<Plan> {
     }
     let unknown_model = || {
         usage(format!(
-            "T3 lists no options for {current_instance}/{current_model}, so t3rex cannot change them."
+            "T3 lists no options for {current_instance}/{current_model}, so tr3x cannot change them."
         ))
     };
 
@@ -517,7 +517,7 @@ pub fn default_runtime_mode(
     let unreadable = |what: &str| {
         err(
             "T3_INVALID_CONFIG",
-            format!("t3rex can't read {what} in T3's settings. Pass --mode to choose one."),
+            format!("tr3x can't read {what} in T3's settings. Pass --mode to choose one."),
         )
     };
     let mode_in = |holder: &Map<String, Value>, what: &str| -> Result<Option<&'static str>> {
@@ -552,13 +552,13 @@ pub fn default_runtime_mode(
     Ok((mode, ModeSource::Environment))
 }
 
-/// The usage error for a launch without a model. t3rex doesn't pick one, since the desktop
+/// The usage error for a launch without a model. tr3x doesn't pick one, since the desktop
 /// app's choice depends on state it keeps in the browser.
 pub fn model_required() -> anyhow::Error {
     err_exit(
         "MODEL_REQUIRED",
         exit::USAGE,
-        "A new thread needs a model. Pass --model; `t3rex models` lists them.",
+        "A new thread needs a model. Pass --model; `tr3x models` lists them.",
     )
 }
 
@@ -611,7 +611,7 @@ pub fn plan_new_thread(
     if !named("instanceId") || !named("model") {
         return Err(err(
             "T3_INVALID_CONFIG",
-            "T3 lists that model without an instance id or slug, so t3rex can't launch a thread with it.",
+            "T3 lists that model without an instance id or slug, so tr3x can't launch a thread with it.",
         ));
     }
     Ok((plan, source))
@@ -1096,7 +1096,7 @@ mod tests {
         assert_eq!(plan.interaction_mode.as_deref(), Some("plan"));
     }
 
-    /// Settings t3rex can't read stop a launch that needs them, and the error doesn't repeat
+    /// Settings tr3x can't read stop a launch that needs them, and the error doesn't repeat
     /// what they hold. A launch with `--mode` doesn't read them.
     #[test]
     fn unreadable_settings_are_an_error_unless_a_mode_is_chosen() {

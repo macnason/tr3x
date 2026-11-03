@@ -1,4 +1,4 @@
-//! A T3 Code client for t3rex: pairing with each machine that runs T3, one connection per
+//! A T3 Code client for tr3x: pairing with each machine that runs T3, one connection per
 //! machine, and T3's own thread and sidebar logic.
 //!
 //! The wire client, projection, models, launch and transcript code are forked from

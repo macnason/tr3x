@@ -15,7 +15,7 @@ use crate::error::{err, err_exit, exit};
 use crate::http::{Api, direct_client};
 use crate::store::Credential;
 
-/// What t3rex asks a machine for: reading and running threads, listing its linked machines,
+/// What tr3x asks a machine for: reading and running threads, listing its linked machines,
 /// reading project files for icons, and branches. `access:write` lets it mint its own next
 /// pairing code before its token runs out, and revoke the token it replaces.
 pub const SCOPES: &[&str] = &[
@@ -167,7 +167,7 @@ fn form_encode(text: &str) -> String {
         .collect()
 }
 
-/// How t3rex names itself in T3 → Connections: "Rex on Mac mini".
+/// How tr3x names itself in T3 → Connections: "Rex on Mac mini".
 pub fn client_label() -> String {
     let name = computer_name().unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
@@ -276,7 +276,7 @@ pub async fn exchange(origin: &str, code: &str, label: &str) -> Result<Credentia
         .as_str()
         .is_some_and(|t| !t.eq_ignore_ascii_case("bearer"))
     {
-        bail!("T3 at {origin} issued a key-bound token, which t3rex can't use");
+        bail!("T3 at {origin} issued a key-bound token, which tr3x can't use");
     }
     let now = now_ms();
     let lasts = answer["expires_in"].as_i64().unwrap_or(30 * 24 * 3600);
@@ -309,7 +309,7 @@ pub async fn check_session(api: &Api) -> Result<Checked> {
         None => Err(err(
             "T3_API_ERROR",
             format!(
-                "T3 at {} answered /api/auth/session without saying whether it accepts t3rex.",
+                "T3 at {} answered /api/auth/session without saying whether it accepts tr3x.",
                 api.origin
             ),
         )),
@@ -337,12 +337,12 @@ impl T3Command {
         command
     }
 
-    /// This machine's `t3`: `T3REX_T3_COMMAND`, else the running server's own, else `t3` on
+    /// This machine's `t3`: `TR3X_T3_COMMAND`, else the running server's own, else `t3` on
     /// the PATH, else the newest runtime T3 installed, else the T3 Code app's.
     pub fn local(local: &Local) -> Result<T3Command> {
-        if let Ok(configured) = std::env::var("T3REX_T3_COMMAND") {
+        if let Ok(configured) = std::env::var("TR3X_T3_COMMAND") {
             let mut parts = configured.split_whitespace().map(str::to_string);
-            let program = parts.next().context("T3REX_T3_COMMAND is empty")?;
+            let program = parts.next().context("TR3X_T3_COMMAND is empty")?;
             return Ok(T3Command {
                 program: program.into(),
                 args_prefix: parts.collect(),
@@ -397,7 +397,7 @@ impl T3Command {
         Err(err_exit(
             "T3_CLI_MISSING",
             exit::UNAVAILABLE,
-            "Couldn't find T3 Code's `t3` on this Mac. Open T3 Code once, or set T3REX_T3_COMMAND.",
+            "Couldn't find T3 Code's `t3` on this Mac. Open T3 Code once, or set TR3X_T3_COMMAND.",
         ))
     }
 }
@@ -438,7 +438,7 @@ fn parse_ps_command(line: &str) -> Option<T3Command> {
     })
 }
 
-/// The flags of `t3 auth pairing create` for a code t3rex trades at once.
+/// The flags of `t3 auth pairing create` for a code tr3x trades at once.
 fn pairing_args(label: &str) -> Vec<String> {
     let mut args: Vec<String> = ["auth", "pairing", "create", "--json", "--ttl", "5m"]
         .iter()
@@ -516,7 +516,7 @@ fi
 [ -n "$T3$APP" ] || T3="$(ls -1d "$H"/runtime/versions/*/t3 2>/dev/null | sort | tail -n 1)"
 [ -n "$T3$APP" ] || T3="$FIRST"
 [ -n "$T3$APP" ] || APP="$FIRSTAPP"
-[ -n "$T3$APP" ] || {{ echo "t3rex: no t3 on this machine" >&2; exit 3; }}
+[ -n "$T3$APP" ] || {{ echo "tr3x: no t3 on this machine" >&2; exit 3; }}
 t3run() {{
   if [ -n "$T3" ]; then "$T3" "$@"
   else ELECTRON_RUN_AS_NODE=1 "$APP/Contents/MacOS/$(basename "$APP" .app)" "$APP/Contents/Resources/app.asar/{SERVER_ENTRY_SUFFIX}" "$@"
@@ -685,7 +685,7 @@ impl Cli<'_> {
 }
 
 /// The id of the session `credential` belongs to, in `t3 auth session list --json`: the one
-/// with t3rex's label that expires when the credential does.
+/// with tr3x's label that expires when the credential does.
 fn session_of(list: &str, label: &str, credential: &Credential) -> Option<String> {
     let start = list.find(['[', '{'])?;
     let value: Value = serde_json::from_str(&list[start..]).ok()?;
@@ -732,7 +732,7 @@ async fn current_session(api: &Api) -> Result<String> {
         _ => bail!("T3 sent no access snapshot"),
     };
     let event = event.as_array().and_then(|a| a.first()).unwrap_or(&event);
-    current_in(event).context("T3 didn't say which session is t3rex's")
+    current_in(event).context("T3 didn't say which session is tr3x's")
 }
 
 /// The current session in an access snapshot.

@@ -83,14 +83,14 @@ impl Api {
         })?;
         let status = response.status();
         if status.is_redirection() {
-            // No route t3rex calls redirects. At T3 f570bd21 only the web app's pages and the
+            // No route tr3x calls redirects. At T3 f570bd21 only the web app's pages and the
             // MCP sign-in page do. Following one would send this request, and its body, to a
-            // server t3rex didn't choose.
+            // server tr3x didn't choose.
             return Err(err_exit(
                 "T3_REDIRECTED",
                 exit::REJECTED,
                 format!(
-                    "T3 at {} answered {method} {path} with a redirect. t3rex sends a request only to the server it chose, so it stopped.",
+                    "T3 at {} answered {method} {path} with a redirect. tr3x sends a request only to the server it chose, so it stopped.",
                     self.origin
                 ),
             ));
@@ -101,7 +101,7 @@ impl Api {
                 "T3_UNAUTHORIZED",
                 exit::REJECTED,
                 format!(
-                    "T3 at {} no longer accepts t3rex's pairing ({status}).",
+                    "T3 at {} no longer accepts tr3x's pairing ({status}).",
                     self.origin
                 ),
             ));

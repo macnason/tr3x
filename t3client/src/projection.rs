@@ -514,7 +514,7 @@ impl ShellState {
 /// leaves every other field as it was, fields this build doesn't know included.
 ///
 /// A change that comes before any configuration has nothing to apply to, and is ignored. So is
-/// an item of another version or type, such as the theme and usage-limit events t3rex doesn't
+/// an item of another version or type, such as the theme and usage-limit events tr3x doesn't
 /// ask for, and one that lacks the part it changes. None of them touches the configuration held.
 pub fn apply_config(config: &mut Option<Value>, item: &Value) -> Applied {
     if item.get("version").and_then(Value::as_u64) != Some(1) {
@@ -1010,7 +1010,7 @@ mod tests {
                 "keybindingsUpdated",
                 json!({"keybindings": {}, "issues": []}),
             ),
-            // Events t3rex doesn't ask for, or that no build knows yet.
+            // Events tr3x doesn't ask for, or that no build knows yet.
             config_change("environmentThemesUpdated", json!({"themes": []})),
             config_change("usageLimitSourcesUpdated", json!({"sources": []})),
             config_change("somethingNew", json!({"providers": []})),

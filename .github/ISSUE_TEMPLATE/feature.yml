@@ -1,5 +1,5 @@
 name: Something's missing
-description: A thing t3rex could do, that T3 or Rex already offers.
+description: A thing tr3x could do, that T3 or Rex already offers.
 body:
   - type: textarea
     attributes:

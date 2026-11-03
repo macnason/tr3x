@@ -17,7 +17,7 @@
 //!
 //! Field names are the shell's (`OrchestrationV2ThreadShell` in
 //! `packages/contracts/src/orchestrationV2.ts`). Threads from several machines can be ordered
-//! together: a thread's `t3rexEnv` field, when set, keeps the return stamps of two machines'
+//! together: a thread's `tr3xEnv` field, when set, keeps the return stamps of two machines'
 //! threads apart.
 
 use std::cmp::Reverse;
@@ -358,7 +358,7 @@ fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
 
 /// A thread's id with the machine it's on, so the same id on two machines stays two threads.
 fn key(thread: &Value) -> String {
-    format!("{}\0{}", str_of(thread, "t3rexEnv"), id(thread))
+    format!("{}\0{}", str_of(thread, "tr3xEnv"), id(thread))
 }
 
 /// `sortPinnedThreadsByOrderKey`: threads the user arranged, by their keys, then the rest
@@ -440,8 +440,8 @@ fn belongs_in_working(thread: &Value) -> bool {
 
 /// `createInboxReturnTracker`: when this client saw each thread leave the Working shelf. The
 /// server stamps a run's request and its finish, but nothing marks an approval asked partway
-/// through a run or background work ending, so the moment t3rex sees the change stands in.
-/// The stamps last as long as t3rex runs.
+/// through a run or background work ending, so the moment tr3x sees the change stands in.
+/// The stamps last as long as tr3x runs.
 #[derive(Debug, Default)]
 struct Returns {
     /// The threads that belonged in Working at the last look, or None before the first.
@@ -451,7 +451,7 @@ struct Returns {
 
 impl Returns {
     /// Looks at every thread the shell has, listed or not, at `now`. The first look only notes
-    /// which threads are working, so starting t3rex stamps nothing and moves no card.
+    /// which threads are working, so starting tr3x stamps nothing and moves no card.
     fn observe(&mut self, threads: &[Value], now: i64) {
         let present: HashSet<String> = threads.iter().map(key).collect();
         let working: HashSet<String> = threads
@@ -574,7 +574,7 @@ fn shelves<'a>(
 
 // ---- rows ----
 
-/// Where t3rex lists a thread in Rex, which has one list of windows and no shelves. A snoozed,
+/// Where tr3x lists a thread in Rex, which has one list of windows and no shelves. A snoozed,
 /// settled, archived or subagent thread isn't listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
@@ -722,7 +722,7 @@ pub fn parse_iso_ms(text: &str) -> Option<i64> {
     Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis)
 }
 
-/// `parse_iso_ms`, under the name t3rex uses.
+/// `parse_iso_ms`, under the name tr3x uses.
 pub use parse_iso_ms as parse_iso;
 
 #[cfg(test)]
@@ -1928,10 +1928,10 @@ mod tests {
         let busy = |env: &str| {
             with(
                 thread("same"),
-                json!({"t3rexEnv": env, "latestRunId": "r", "activeRunId": "r", "status": "running"}),
+                json!({"tr3xEnv": env, "latestRunId": "r", "activeRunId": "r", "status": "running"}),
             )
         };
-        let idle = |env: &str| with(thread("same"), json!({"t3rexEnv": env}));
+        let idle = |env: &str| with(thread("same"), json!({"tr3xEnv": env}));
         let mut returns = Returns::default();
         returns.observe(&[busy("a"), busy("b")], 1);
         returns.observe(&[idle("a"), busy("b")], 2);
