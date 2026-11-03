@@ -32,6 +32,7 @@ mod state;
 mod surface;
 mod sync;
 mod t3;
+mod taildrop;
 mod term;
 mod update;
 mod usage;
