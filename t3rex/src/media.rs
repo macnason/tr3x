@@ -91,18 +91,12 @@ pub struct Media {
     held: RefCell<Held>,
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-}
-
-/// A headless Chromium: Playwright's, or a Chrome in /Applications.
-fn find_chrome() -> Option<PathBuf> {
+/// A headless Chromium: Playwright's, or a Chrome or Chromium the machine has.
+pub(crate) fn find_chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("T3REX_CHROME") {
         return Some(PathBuf::from(path));
     }
-    let playwright = home().join("Library/Caches/ms-playwright");
+    let playwright = crate::platform::playwright();
     if let Ok(dirs) = std::fs::read_dir(&playwright) {
         let mut found: Vec<PathBuf> = dirs
             .flatten()
@@ -124,14 +118,9 @@ fn find_chrome() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.is_file())
+    crate::platform::browsers()
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 pub fn mac_is_dark() -> bool {
@@ -147,7 +136,7 @@ impl Media {
             attachments: state_dir
                 .map(|d| d.join("attachments"))
                 .filter(|d| d.is_dir()),
-            cache: home().join("Library/Caches/t3rex"),
+            cache: crate::platform::cache(),
             dark: crate::scheme::dark(),
             cell_ratio: current_cell_ratio().unwrap_or(0.5),
             snapshots: HashMap::new(),

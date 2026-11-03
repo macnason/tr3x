@@ -27,7 +27,9 @@ use serde_json::{Value, json};
 use crate::t3;
 
 /// The release asset `install.sh` and the updater download.
-const ASSET: &str = "t3rex-macos-universal.tar.gz";
+fn asset_name() -> String {
+    format!("{}.tar.gz", crate::platform::release_name())
+}
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// The scope T3 asks for before it updates itself.
 const MAINTAIN: &str = "environment:maintain";
@@ -296,6 +298,7 @@ async fn release_at(url: &str) -> Result<Release> {
         .context("the release has no tag")?
         .trim_start_matches('v')
         .to_string();
+    let name = asset_name();
     let asset = |name: &str| {
         release["assets"]
             .as_array()
@@ -306,8 +309,8 @@ async fn release_at(url: &str) -> Result<Release> {
             .map(str::to_string)
     };
     Ok(Release {
-        tarball: asset(ASSET).with_context(|| format!("release {version} has no {ASSET}"))?,
-        sum: asset(&format!("{ASSET}.sha256"))
+        tarball: asset(&name).with_context(|| format!("release {version} has no {name}"))?,
+        sum: asset(&format!("{name}.sha256"))
             .with_context(|| format!("release {version} has no checksum"))?,
         version,
     })
@@ -322,7 +325,7 @@ async fn fetch(release: &Release) -> Result<PathBuf> {
 async fn fetch_into(release: &Release, dir: &Path) -> Result<PathBuf> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir.join("x"))?;
-    let tarball = dir.join(ASSET);
+    let tarball = dir.join(asset_name());
     let tarball_s = tarball.to_string_lossy().into_owned();
     curl(&["-o", &tarball_s, &release.tarball])
         .await
@@ -338,7 +341,7 @@ async fn fetch_into(release: &Release, dir: &Path) -> Result<PathBuf> {
         bail!("the download's SHA-256 doesn't match the release's");
     }
     let x = dir.join("x");
-    let status = tokio::process::Command::new("/usr/bin/tar")
+    let status = tokio::process::Command::new("tar")
         .arg("-xzf")
         .arg(&tarball)
         .arg("-C")
@@ -362,16 +365,28 @@ async fn fetch_into(release: &Release, dir: &Path) -> Result<PathBuf> {
 }
 
 async fn sha256(path: &Path) -> Result<String> {
-    let out = tokio::process::Command::new("/usr/bin/shasum")
-        .args(["-a", "256"])
+    // macOS has `shasum`; most Linux machines have `sha256sum`, and some only `shasum`.
+    let (program, args): (&str, &[&str]) = if crate::platform::MAC || !on_path("sha256sum") {
+        ("shasum", &["-a", "256"])
+    } else {
+        ("sha256sum", &[])
+    };
+    let out = tokio::process::Command::new(program)
+        .args(args)
         .arg(path)
         .output()
-        .await?;
+        .await
+        .with_context(|| format!("couldn't run {program} to check the download"))?;
     Ok(String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_lowercase())
+}
+
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
 }
 
 fn find_binary(dir: &Path) -> Option<PathBuf> {
@@ -843,34 +858,43 @@ mod tests {
     /// t3rex that says its version.
     fn release_files(dir: &Path, says: &str, sum: Option<&str>) -> String {
         use std::os::unix::fs::PermissionsExt;
-        let pkg = dir.join("pkg/t3rex-macos-universal");
+        let pkg = dir.join("pkg").join(crate::platform::release_name());
         std::fs::create_dir_all(&pkg).unwrap();
         let bin = pkg.join("t3rex");
         std::fs::write(&bin, format!("#!/bin/sh\necho 't3rex {says}'\n")).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let tarball = dir.join(ASSET);
-        let ok = std::process::Command::new("/usr/bin/tar")
+        let asset = asset_name();
+        let tarball = dir.join(&asset);
+        let ok = std::process::Command::new("tar")
             .arg("-czf")
             .arg(&tarball)
             .arg("-C")
             .arg(dir.join("pkg"))
-            .arg("t3rex-macos-universal")
+            .arg(crate::platform::release_name())
             .status()
             .unwrap();
         assert!(ok.success());
-        let out = std::process::Command::new("/usr/bin/shasum")
-            .args(["-a", "256"])
-            .arg(&tarball)
-            .output()
-            .unwrap();
+        let out = std::process::Command::new(if crate::platform::MAC {
+            "shasum"
+        } else {
+            "sha256sum"
+        })
+        .args(if crate::platform::MAC {
+            &["-a", "256"][..]
+        } else {
+            &[][..]
+        })
+        .arg(&tarball)
+        .output()
+        .unwrap();
         let real = String::from_utf8_lossy(&out.stdout).to_string();
-        std::fs::write(dir.join(format!("{ASSET}.sha256")), sum.unwrap_or(&real)).unwrap();
+        std::fs::write(dir.join(format!("{asset}.sha256")), sum.unwrap_or(&real)).unwrap();
         let url = |name: &str| format!("file://{}", dir.join(name).display());
         let json = json!({
             "tag_name": "v9.9.9",
             "assets": [
-                {"name": ASSET, "browser_download_url": url(ASSET)},
-                {"name": format!("{ASSET}.sha256"), "browser_download_url": url(&format!("{ASSET}.sha256"))},
+                {"name": asset, "browser_download_url": url(&asset)},
+                {"name": format!("{asset}.sha256"), "browser_download_url": url(&format!("{asset}.sha256"))},
             ],
         });
         std::fs::write(dir.join("release.json"), json.to_string()).unwrap();
@@ -886,7 +910,7 @@ mod tests {
         let bin = fetch_into(&release, &dir.path().join("update"))
             .await
             .unwrap();
-        assert!(bin.ends_with("t3rex-macos-universal/t3rex"));
+        assert!(bin.ends_with(format!("{}/t3rex", crate::platform::release_name())));
     }
 
     #[tokio::test]

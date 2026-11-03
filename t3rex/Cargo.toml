@@ -22,7 +22,7 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "
 unicode-width = "0.2.2"
 unicode-segmentation = "1.12"
 uuid = { version = "1.27.0", features = ["v4"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "tiff", "ico"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

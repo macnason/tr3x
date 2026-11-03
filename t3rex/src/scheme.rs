@@ -197,7 +197,7 @@ unsafe fn start() -> std::io::Result<()> {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            &mut raw,
+            &raw mut raw,
             std::ptr::null_mut(),
         ) != 0
         {

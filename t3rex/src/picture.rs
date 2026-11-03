@@ -142,21 +142,28 @@ fn renamed(name: &str, mime: &str) -> String {
     format!("{stem}.{ext}")
 }
 
-/// The Mac's `sips`, for the HEIC the decoder can't read.
+/// The Mac's `sips`, or ImageMagick elsewhere, for the HEIC the decoder can't read.
 fn sips_png(bytes: &[u8]) -> Option<Vec<u8>> {
     let dir = std::env::temp_dir().join(format!("t3rex-paste-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).ok()?;
     let (src, dst) = (dir.join("in.heic"), dir.join("out.png"));
     let done = std::fs::write(&src, bytes).ok().and_then(|_| {
-        std::process::Command::new("/usr/bin/sips")
-            .args(["-s", "format", "png"])
-            .arg(&src)
-            .arg("--out")
-            .arg(&dst)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|_| std::fs::read(&dst).ok())
+        if cfg!(target_os = "macos") {
+            std::process::Command::new("/usr/bin/sips")
+                .args(["-s", "format", "png"])
+                .arg(&src)
+                .arg("--out")
+                .arg(&dst)
+                .output()
+        } else {
+            std::process::Command::new("magick")
+                .arg(&src)
+                .arg(&dst)
+                .output()
+        }
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|_| std::fs::read(&dst).ok())
     });
     let _ = std::fs::remove_dir_all(&dir);
     done

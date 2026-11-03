@@ -167,6 +167,12 @@ fn lua(bin: &Path, rex: &Path) -> String {
 
 /// Boots out and deletes the launchd agent an earlier install made. Returns whether there was
 /// one.
+#[cfg(not(target_os = "macos"))]
+async fn retire_launchd() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
 async fn retire_launchd() -> bool {
     let plist = plist_path();
     if !plist.exists() {
@@ -425,7 +431,7 @@ pub async fn uninstall() -> Result<()> {
         }
     }
     let _ = std::fs::remove_dir_all(state::dir());
-    let _ = std::fs::remove_dir_all(home().join("Library/Caches/t3rex"));
+    let _ = std::fs::remove_dir_all(crate::platform::cache());
     let _ = std::fs::remove_file(bin_path());
     step(true, "Removed t3rex", "");
     Ok(())
@@ -433,26 +439,7 @@ pub async fn uninstall() -> Result<()> {
 
 /// A headless Chromium for HTML snapshots, where `media` looks for one.
 fn has_chromium() -> bool {
-    if std::env::var_os("T3REX_CHROME").is_some() {
-        return true;
-    }
-    let playwright = std::fs::read_dir(home().join("Library/Caches/ms-playwright"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|d| {
-            d.file_name()
-                .to_string_lossy()
-                .starts_with("chromium_headless_shell")
-        });
-    playwright
-        || [
-            "/Applications/Google Chrome.app",
-            "/Applications/Chromium.app",
-            "/Applications/Google Chrome Canary.app",
-        ]
-        .iter()
-        .any(|app| Path::new(app).exists())
+    crate::media::find_chrome().is_some()
 }
 
 pub async fn doctor() -> Result<()> {
@@ -541,7 +528,11 @@ pub async fn doctor() -> Result<()> {
     if hub.envs().is_empty() {
         fail(
             "T3 server",
-            "T3 Code isn't set up on this Mac",
+            if crate::platform::MAC {
+                "T3 Code isn't set up on this Mac"
+            } else {
+                "T3 isn't running on this machine"
+            },
             "Open T3 Code once, or `t3rex pair` a machine that runs it.",
         );
     }
@@ -683,10 +674,16 @@ pub async fn doctor() -> Result<()> {
 pub async fn open_in_t3(thread: &str) -> Result<()> {
     let (_, thread) = crate::t3::thread(thread)?;
     let url = format!("t3code://threads/{}/{}", thread.env, thread.thread);
-    let opened = tokio::process::Command::new("/usr/bin/open")
+    let opener = if crate::platform::MAC {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    };
+    let opened = tokio::process::Command::new(opener)
         .arg(&url)
         .output()
-        .await?;
+        .await
+        .with_context(|| format!("couldn't run {opener} to open {url}"))?;
     if !opened.status.success() {
         bail!("couldn't open {url}");
     }
