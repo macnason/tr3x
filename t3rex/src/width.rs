@@ -175,10 +175,36 @@ pub fn apply(arg: &str) -> Result<String> {
     Ok(format!("Chat width: {}", width.name()))
 }
 
+/// Whether finished turns show their work (`"details": true`), which `/details` and
+/// `t3rex details` set. Off by default: each turn folds to `Worked for …`, as in T3 Code.
+pub fn details() -> bool {
+    read(&ours())
+        .and_then(|s| s.get("details")?.as_bool())
+        .unwrap_or(false)
+}
+
+/// What `/details` and `t3rex details` take: `on`, `off`, or nothing to switch it.
+pub fn apply_details(arg: &str) -> Result<String> {
+    let on = match arg.trim().to_lowercase().as_str() {
+        "" => !details(),
+        "on" | "show" | "true" => true,
+        "off" | "hide" | "false" => false,
+        other => anyhow::bail!("Can't read {other:?}: on or off"),
+    };
+    set_setting("details", on.then_some(Value::Bool(true)))?;
+    Ok(if on {
+        "Details shown"
+    } else {
+        "Details folded"
+    }
+    .into())
+}
+
 /// The setting as a pane follows it: read again when either file changes, checked at most
 /// every couple of seconds.
 pub struct Follow {
     pub width: ChatWidth,
+    pub details: bool,
     stamps: [Option<SystemTime>; 2],
     checked: Instant,
 }
@@ -191,12 +217,13 @@ impl Follow {
     pub fn new() -> Follow {
         Follow {
             width: current().0,
+            details: details(),
             stamps: stamps(),
             checked: Instant::now(),
         }
     }
 
-    /// Whether the width changed since the last look.
+    /// Whether the width or the details setting changed since the last look.
     pub fn changed(&mut self) -> bool {
         if self.checked.elapsed() < Duration::from_secs(2) {
             return false;
@@ -207,9 +234,10 @@ impl Follow {
             return false;
         }
         self.stamps = now;
-        let width = current().0;
-        let changed = width != self.width;
+        let (width, details) = (current().0, details());
+        let changed = width != self.width || details != self.details;
         self.width = width;
+        self.details = details;
         changed
     }
 }

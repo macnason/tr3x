@@ -43,6 +43,7 @@ lists them with the command for each instead, and `t3rex pair` does that part la
 | `t3rex env rename <machine> <name>` | What Rex calls a machine. An empty name goes back to T3's. |
 | `t3rex env forget <machine>` | Unpairs a machine. |
 | `t3rex width [comfortable\|wide\|full\|N\|t3]` | How wide conversations read. `t3` follows T3's Chat width. |
+| `t3rex details [on\|off]` | Show each finished turn's work, or fold it to `Worked for …` (default). Alone, switches it. |
 | `t3rex reply [inline\|pane]` | Reply at the bottom of the conversation, or in a pane of its own. |
 | `t3rex sessions [merged\|per-machine]` | One T3 Code session, or one per machine. |
 | `t3rex update` | Lists updates for t3rex and each machine's T3, and installs them on Enter. `--check` only lists. |

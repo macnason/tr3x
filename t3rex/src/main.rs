@@ -8,6 +8,7 @@ mod compose;
 mod draft;
 mod fade;
 mod find;
+mod fold;
 mod icons;
 mod install;
 mod link;
@@ -54,8 +55,8 @@ struct Cli {
     command: Command,
 }
 
-// What a user runs is install, uninstall, doctor, update, updates, width, pair, envs, env,
-// sessions and reply.
+// What a user runs is install, uninstall, doctor, update, updates, width, details, pair,
+// envs, env, sessions and reply.
 // The rest is what Rex's actions, panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
 enum Command {
@@ -245,6 +246,9 @@ enum Command {
     /// Show or set how wide conversations read: comfortable, wide, full, a column count, or
     /// t3 to follow T3 Code's Chat width.
     Width { width: Option<String> },
+    /// Show each finished turn's work (on), or fold it to `Worked for …` (off, the default).
+    /// Alone, switches it.
+    Details { on: Option<String> },
     /// Pair with T3 on another machine: over SSH, or with a pairing link from T3 there. Alone,
     /// finds the machines on your tailnet that run T3.
     Pair {
@@ -681,6 +685,10 @@ async fn run(cli: Cli) -> Result<()> {
             for want in sync::wanted(&machines, &mut inbox, t3::now_ms()) {
                 println!("{:?}\t{}\t{}", want.place, want.thread, want.label);
             }
+            Ok(())
+        }
+        Command::Details { on } => {
+            println!("{}", width::apply_details(on.as_deref().unwrap_or(""))?);
             Ok(())
         }
         Command::Width { width } => {
