@@ -1373,6 +1373,21 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     _ => continue,
                 },
                 _ = tick.tick() => {
+                    // An update replaced the binary: start again on it, while nothing is typed.
+                    if !ui.launching
+                        && ui.folder.is_none()
+                        && ui.editor.text.is_empty()
+                        && ui.images.is_empty()
+                        && crate::icons::replaced()
+                    {
+                        out(&format!("{}\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l", paste::OFF));
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        crate::icons::start_again();
+                        // Still here: carry on as it was.
+                        let _ = crossterm::terminal::enable_raw_mode();
+                        out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
+                        ui.draw();
+                    }
                     if ui.note.as_ref().is_some_and(|(n, _)| n == Escape::NOTE) && !ui.escape.armed() {
                         ui.note = None;
                         ui.draw();

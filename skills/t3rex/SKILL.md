@@ -45,9 +45,11 @@ lists them with the command for each instead, and `t3rex pair` does that part la
 | `t3rex width [comfortable\|wide\|full\|N\|t3]` | How wide conversations read. `t3` follows T3's Chat width. |
 | `t3rex reply [inline\|pane]` | Reply at the bottom of the conversation, or in a pane of its own. |
 | `t3rex sessions [merged\|per-machine]` | One T3 Code session, or one per machine. |
+| `t3rex update` | Lists updates for t3rex and each machine's T3, and installs them on Enter. `--check` only lists. |
+| `t3rex updates [auto\|notify\|off]` | Whether t3rex installs its own updates, asks first, or never checks. |
 | `t3rex uninstall` | Stops sync, removes the config, closes t3rex's session. |
 
-With no argument, `width`, `reply` and `sessions` print the current value.
+With no argument, `width`, `reply`, `sessions` and `updates` print the current value.
 
 Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a t3rex pane,
 `REX_BLOCK` already names the thread, so `--thread` can be left out:
@@ -65,6 +67,7 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 | `~/.config/t3rex/settings.json` | Width, Reply, sessions, pane fading. The commands above edit it. |
 | `~/.local/state/t3rex/sync.log` | What sync did last. Read it when a tab is missing or stale. |
 | `~/.local/state/t3rex/state.json` | The session and a window per thread. Sync owns it. |
+| `~/.local/state/t3rex/updates.json` | What the last update check found. |
 | `~/.local/state/t3rex/envs.json`, `credentials.json` | Paired machines and their tokens (mode 0600). |
 
 ## Rules
@@ -81,6 +84,9 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 - **Esc in an empty Reply stops the running thread.** When driving a pane with `rex send-key`,
   never send Escape unless stopping it is the point. Same for `stop --force`, which kills the
   agent.
+- **Updating T3 restarts it.** On a Mac running the T3 Code app, `t3rex update` restarts the
+  app to install, which stops running threads until T3 picks them up again. Ask the user before
+  running it, and never script past its question. `t3rex update --check` is always safe.
 - **Leave other people's sessions alone.** t3rex never touches a Rex session it didn't make;
   neither should you while working on it.
 - **A machine out of reach isn't an error to fix.** Its tabs read `(offline)` and come back on

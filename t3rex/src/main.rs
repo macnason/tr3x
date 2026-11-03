@@ -31,6 +31,7 @@ mod surface;
 mod sync;
 mod t3;
 mod term;
+mod update;
 mod usage;
 mod width;
 
@@ -53,7 +54,8 @@ struct Cli {
     command: Command,
 }
 
-// What a user runs is install, uninstall, doctor, width, pair, envs, env, sessions and reply.
+// What a user runs is install, uninstall, doctor, update, updates, width, pair, envs, env,
+// sessions and reply.
 // The rest is what Rex's actions, panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
 enum Command {
@@ -266,7 +268,25 @@ enum Command {
     /// Show or set where Reply goes: inline, under the conversation, or a pane of its own.
     Reply { mode: Option<String> },
     /// Set up t3rex: the Rex config that runs it, and a first sync.
-    Install,
+    Install {
+        /// As the updater runs it: over the installed t3rex, leaving the session as it is.
+        #[arg(long, hide = true)]
+        update: bool,
+    },
+    /// Update t3rex, and T3 on each machine Rex follows. Asks before anything restarts.
+    Update {
+        /// Only say what's out.
+        #[arg(long)]
+        check: bool,
+        /// As sync runs it: t3rex alone, nothing asked.
+        #[arg(long, hide = true)]
+        auto: bool,
+        /// Wait before leaving, so a floating window shows how it went.
+        #[arg(long, hide = true)]
+        wait: bool,
+    },
+    /// Show or set how t3rex updates itself: auto, notify, or off.
+    Updates { mode: Option<String> },
     /// Undo `install`: stop sync, remove the config, close t3rex's session.
     Uninstall,
     /// Check each part of the setup, with a fix for what's wrong.
@@ -360,6 +380,8 @@ fn main() {
         unsafe { std::env::set_var("PATH", joined) };
     }
     let cli = Cli::parse();
+    // A pane starts again once the binary it runs is replaced; this is the one it started on.
+    icons::note_binary();
     for pair in &cli.set_env {
         if let Some((key, value)) = pair.split_once('=')
             && rex::PANE_ENV.contains(&key)
@@ -692,7 +714,15 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", reply::apply(mode.as_deref().unwrap_or_default())?);
             Ok(())
         }
-        Command::Install => install::install().await,
+        Command::Install { update } => install::install(update).await,
+        Command::Update { check, auto, wait } => update::run(check, auto, wait).await,
+        Command::Updates { mode } => {
+            println!(
+                "{}",
+                update::apply_mode(mode.as_deref().unwrap_or_default())?
+            );
+            Ok(())
+        }
         Command::Uninstall => install::uninstall().await,
         Command::Doctor => install::doctor().await,
     }

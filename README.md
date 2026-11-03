@@ -31,7 +31,8 @@ sh install.sh
 ```
 
 `t3rex doctor` checks each part and says how to fix what isn't right.
-[Every step](docs/how-it-works.md#install-in-detail) is undone by `t3rex uninstall`.
+[Every step](docs/how-it-works.md#install-in-detail) is undone by `t3rex uninstall`. After that,
+t3rex keeps itself up to date; `t3rex updates notify` or `off` changes that.
 
 ## Getting started
 
@@ -91,6 +92,9 @@ palette on the phone, and the tabs take its size.
   `Fix the build · studio`. New threads start on whichever machine you pick.
 - **Pull requests beside the thread.** `/pr create` has T3 commit, push and open one; `/pr`
   shows it in a drawer over the right of the thread.
+- **Up to date on its own.** t3rex installs its updates in the background, and each tab picks
+  the new version up once nothing's typed in it. When T3 has an update on one of your machines,
+  Reply says so, and `/update` installs it there, through T3, even if you never open T3 Code.
 - **Close to settle.** Closing a tab settles the thread. A thread that's still working only
   hides until it changes, so nothing gets stopped by accident.
 

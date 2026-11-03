@@ -24,7 +24,7 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn bin_path() -> PathBuf {
+pub fn bin_path() -> PathBuf {
     home().join(".local/bin/t3rex")
 }
 
@@ -238,7 +238,9 @@ async fn first_sync(since: SystemTime) -> Option<State> {
     None
 }
 
-pub async fn install() -> Result<()> {
+/// `update`: run by the updater from a new release, so it goes where t3rex is installed, and
+/// leaves your session and machines as they are.
+pub async fn install(update: bool) -> Result<()> {
     let rex = Rex::find();
     if rex.sessions().await.is_err() {
         step(
@@ -260,7 +262,11 @@ pub async fn install() -> Result<()> {
     );
 
     let exe = std::env::current_exe()?;
-    let bin = install_target(&exe);
+    let bin = if update {
+        bin_path()
+    } else {
+        install_target(&exe)
+    };
     if bin != exe {
         std::fs::create_dir_all(bin.parent().unwrap())?;
         // Copy beside it and rename, so a running sync keeps its old binary.
@@ -324,6 +330,9 @@ pub async fn install() -> Result<()> {
             crate::sync::SESSION_LABEL
         ),
     );
+    if update {
+        return Ok(());
+    }
     if let Some(session) = &state.session() {
         let _ = rex
             .client_do("session.select", &[("session_id", session)])

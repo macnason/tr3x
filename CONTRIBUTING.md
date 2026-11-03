@@ -36,6 +36,13 @@ tests still pass. Check it locally with:
 target/release/t3rex surface --check t3rex/t3-surface.json
 ```
 
+## Releasing
+
+Push a tag such as `v0.2.0` and `release.yml` builds, checksums and publishes it. Every
+install picks it up within a day, on its own, so a release is a deploy: run the build on a Mac
+beside an installed one first (above). Bump `version` in `t3rex/Cargo.toml` to match the tag;
+the updater checks the binary says the version its release claims.
+
 ## Pull requests
 
 - [Conventional commits](https://www.conventionalcommits.org): `feat:`, `fix:`, `docs:`,

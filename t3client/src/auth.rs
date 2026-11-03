@@ -25,6 +25,8 @@ pub const SCOPES: &[&str] = &[
     "access:write",
     "filesystem:read",
     "source-control:write",
+    // Updating T3 on a machine (`server.updateServer`), from Rex's Updates.
+    "environment:maintain",
 ];
 
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
