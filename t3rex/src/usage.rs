@@ -47,6 +47,39 @@ pub fn windows(config: &Value, instance: &str) -> Vec<Window> {
         .collect()
 }
 
+/// What's wrong with the provider `instance`, as Reply warns of it, and its colour. T3 reports a
+/// provider that doesn't answer its status check with a `warning` or `error` status and a
+/// message. A timeout means the check ran on the machine the provider lives on, so the hint
+/// says where to look. None when the provider is fine, or T3 says nothing about it.
+pub fn problem(config: &Value, instance: &str) -> Option<(String, &'static str)> {
+    let provider = t3client::models::providers(config)
+        .iter()
+        .find(|p| p["instanceId"].as_str() == Some(instance))?;
+    let tone = match provider["status"].as_str()? {
+        "error" => RED,
+        "warning" => YELLOW,
+        _ => return None,
+    };
+    let name = provider["displayName"]
+        .as_str()
+        .or(provider["instanceId"].as_str())
+        .unwrap_or("Provider");
+    let message = crate::chat::one_line(provider["message"].as_str().unwrap_or_default());
+    let text = if message.to_lowercase().contains("timed out") {
+        match provider["driver"].as_str() {
+            Some(driver) => format!(
+                "{name} didn't answer on its machine. Run `{driver} --version` there to check it starts."
+            ),
+            None => format!("{name} didn't answer on its machine. Check it there."),
+        }
+    } else if message.is_empty() {
+        format!("{name} isn't ready.")
+    } else {
+        format!("{name}: {message}")
+    };
+    Some((text, tone))
+}
+
 /// A window as Reply words it, and its colour: `Session 62% left`, or `Session resets 3pm` for
 /// one that's used up until then.
 fn word(window: &Window, now: i64, offset_minutes: i64) -> (String, &'static str) {
@@ -147,6 +180,34 @@ mod tests {
         let unread = json!({"checkedAt": "2026-10-31T00:00:00.000Z", "windows": [window("Session", 10.0, None)],
             "unavailable": {"reason": "probeFailed"}});
         assert!(windows(&config(unread), "claudeAgent").is_empty());
+    }
+
+    #[test]
+    fn a_provider_that_isnt_ready_says_why() {
+        let codex = |status: &str, message: &str| {
+            json!({"providers": [{"instanceId": "codex", "driver": "codex", "displayName": "Codex",
+                "status": status, "message": message}]})
+        };
+        let timeout = "Timed out while checking Codex app-server provider status.";
+        assert_eq!(
+            problem(&codex("error", timeout), "codex"),
+            Some((
+                "Codex didn't answer on its machine. Run `codex --version` there to check it starts.".into(),
+                RED
+            ))
+        );
+        assert_eq!(
+            problem(&codex("warning", "Signed out."), "codex"),
+            Some(("Codex: Signed out.".into(), YELLOW))
+        );
+        assert_eq!(
+            problem(&codex("error", ""), "codex"),
+            Some(("Codex isn't ready.".into(), RED))
+        );
+        // Fine, disabled, unknown, or another provider's: nothing to warn of.
+        assert_eq!(problem(&codex("ready", timeout), "codex"), None);
+        assert_eq!(problem(&codex("disabled", timeout), "codex"), None);
+        assert_eq!(problem(&codex("error", timeout), "claudeAgent"), None);
     }
 
     fn w(label: &str, left: u8, resets_at: Option<i64>) -> Window {
