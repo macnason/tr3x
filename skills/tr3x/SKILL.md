@@ -1,6 +1,6 @@
 ---
 name: tr3x
-description: Install, check, fix and drive tr3x, which shows T3 Code threads as tabs in the Rex terminal on macOS. Use when the user mentions tr3x, or the T3 Code session in Rex; asks to set it up, why a thread's tab is missing or wrong, to pair another machine, to change chat width, Reply placement or sessions; or wants a T3 thread settled, snoozed, pinned, renamed, forked, stopped, opened in T3, or its pull request shown, from a terminal.
+description: Install, check, fix and drive tr3x, which shows T3 Code threads as tabs in the Rex terminal, on a Mac or Linux. Use when the user mentions tr3x, or the T3 Code session in Rex; asks to set it up, why a thread's tab is missing or wrong, to pair another machine, to change chat width, Reply placement or sessions; or wants a T3 thread settled, snoozed, pinned, renamed, forked, stopped, opened in T3, or its pull request shown, from a terminal.
 ---
 
 # tr3x
@@ -21,8 +21,8 @@ sync is running and what it last logged, and the session. Every ✗ prints its f
 exits non-zero. Run it before guessing, and again after a fix to confirm it.
 
 No `tr3x` on the PATH means it isn't installed, or `~/.local/bin` isn't on the PATH. Install
-with the one command below. It needs macOS, Rex Beta, and T3 Code running with a project. Never
-use sudo; nothing tr3x does needs it.
+with the one command below. It needs a Mac (Rex Beta) or Linux (Rex), and T3 Code running with
+a project. Never use sudo; nothing tr3x does needs it.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | sh
@@ -76,8 +76,9 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 - **Don't edit `state.json` or `credentials.json`, and don't kill `tr3x sync`.** Sync rewrites
   state on every change, and a token edited by hand stops working. To restart sync, run
   `rex config reload`: the config starts it. ⌃⌘I and ⌃⌘N also start it if it's down. Outside
-  a Rex pane `rex` isn't on the PATH; it's
-  `/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex`.
+  a Rex pane `rex` isn't on the PATH on a Mac; it's
+  `/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex`. On Linux it's
+  `rex`.
 - **Closing a tab settles its thread.** Don't close tr3x's windows with `rex` to tidy up.
   Use `tr3x snooze` to put one away, or leave it.
 - **`delete` removes the thread in T3 too, and can't be undone.** Ask the user first, then pass

@@ -2,7 +2,7 @@
 
 ## Build and test
 
-Needs Rust (stable), macOS, Rex Beta and T3 Code.
+Needs Rust (stable), a Mac or Linux machine, Rex (Rex Beta on a Mac) and T3 Code.
 
 ```sh
 cargo build --release -p tr3x
