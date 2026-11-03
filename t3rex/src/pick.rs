@@ -1,10 +1,10 @@
-//! The model picker: a floating layer over a thread's window, opened from the Reply pane with
+//! The model picker: a floating layer over a thread's window, opened from Reply with
 //! /model, /effort or /mode alone, or Change Model… in the palette. It lists every enabled provider's models under the
 //! provider's logo, then the model's efforts, and the access modes. A choice applies to the
-//! thread's next message at once, as T3's composer chips do, and the Reply header follows.
+//! thread at once, as T3's composer chips do, and the Reply header follows. While a run works,
+//! a model or effort waits in a draft for the next message instead.
 
 use std::collections::HashMap;
-use std::io::Write;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
@@ -13,16 +13,12 @@ use serde_json::json;
 use t3client::models;
 
 use crate::chat::{RED, RESET, fit};
+use crate::draft::{self, Draft};
 use crate::icons::Painter;
 use crate::picker::{self, Chip, Menu, MenuKey, Settings};
 use crate::rex::{Rex, lua_str};
 use crate::t3;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 #[derive(Clone, Copy, PartialEq, Debug, clap::ValueEnum)]
 pub enum Field {
@@ -53,7 +49,14 @@ return {{}}"#,
     Rex::find().lua(session, &script).await.map(drop)
 }
 
+/// While the thread works, a model or effort waits for the next message, as in T3. Access
+/// applies at once.
+fn holds(field: Field, working: bool) -> bool {
+    working && field != Field::Access
+}
+
 pub async fn run(thread: String, first: Field) -> Result<()> {
+    let key = thread.clone();
     let (client, thread) = t3::thread(&thread)?;
     let thread_id = thread.thread;
     let _scheme = crate::scheme::listen();
@@ -61,6 +64,9 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
         tokio::try_join!(client.server_config(), client.thread(&thread_id, true))?;
     let mut logos: HashMap<String, crate::icons::Icon> = HashMap::new();
     let mut settings = Settings::of_thread(&config, state.thread());
+    if let Some(draft) = draft::load(&key) {
+        draft.over(&config, &mut settings);
+    }
     let (tx, mut loaded) = tokio::sync::mpsc::unbounded_channel();
     {
         let providers = models::providers(&config).to_vec();
@@ -77,22 +83,12 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
         f
     };
     let open = |field: Field, s: &Settings, logos: &HashMap<String, crate::icons::Icon>| {
-        let (items, current) = match field {
-            Field::Model => (
-                picker::model_items(&config, logos),
-                Some(format!("{}/{}", s.instance, s.model)),
-            ),
-            Field::Effort => (
-                picker::effort_items(&config, s),
-                picker::effort_now(&config, s),
-            ),
-            Field::Access => (picker::mode_items(&config, s), Some(s.mode.clone())),
-        };
+        let (items, current) = s.menu(field, &config, logos);
         Menu::new(items, current.as_deref())
     };
     let mut field = first;
     let mut menu = open(field, &settings, &logos);
-    let mut painter = Painter;
+    let mut painter = Painter::default();
     let mut note: Option<String> = None;
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((60, 20));
@@ -107,17 +103,7 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
             let fs = fields(&settings);
             let chips: Vec<Chip> = fs
                 .iter()
-                .map(|f| match f {
-                    Field::Model => Chip {
-                        icon: logos.get(&settings.instance).cloned(),
-                        label: settings.model_label(&config),
-                    },
-                    Field::Effort => Chip {
-                        icon: None,
-                        label: settings.effort_label(&config).unwrap_or_default(),
-                    },
-                    Field::Access => Chip { icon: None, label: settings.mode_label() },
-                })
+                .map(|f| settings.chip(*f, &config, &logos))
                 .collect();
             let at = fs.iter().position(|f| *f == field);
             let (row, s) = picker::chips(&mut painter, &chips, None, at, 2);
@@ -186,25 +172,29 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
             };
             let Some(id) = chosen else { continue };
             let mut next = settings.clone();
-            match field {
-                Field::Model => next.set_model(&config, &id),
-                Field::Effort => next.effort = Some(id),
-                Field::Access => next.mode = id,
-            }
-            match models::plan(&config, state.thread(), &next.choice()) {
-                Ok(plan) => match client.apply_settings(&state, &plan).await {
-                    Ok(_) => {
-                        settings = next;
-                        // After a model, its efforts; after anything else, done.
-                        if field == Field::Model && fields(&settings).contains(&Field::Effort) {
-                            field = Field::Effort;
-                            menu = open(field, &settings, &logos);
-                        } else {
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => note = Some(format!("{e:#}")),
+            next.choose(field, &config, id);
+            let held = holds(field, state.active_run().is_some());
+            let applied = match held {
+                true => draft::save(&key, &Draft::of(&next)).map(|_| None),
+                false => match models::plan(&config, state.thread(), &next.choice()) {
+                    Ok(plan) => client.apply_settings(&state, &plan).await,
+                    Err(e) => Err(e),
                 },
+            };
+            match applied {
+                Ok(_) => {
+                    if !held {
+                        draft::clear(&key);
+                    }
+                    settings = next;
+                    // After a model, its efforts; after anything else, done.
+                    if field == Field::Model && fields(&settings).contains(&Field::Effort) {
+                        field = Field::Effort;
+                        menu = open(field, &settings, &logos);
+                    } else {
+                        return Ok(());
+                    }
+                }
                 Err(e) => note = Some(format!("{e:#}")),
             }
         }
@@ -214,4 +204,19 @@ pub async fn run(thread: String, first: Field) -> Result<()> {
     out("\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
     let _ = crossterm::terminal::disable_raw_mode();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_working_thread_holds_its_model_and_effort_but_not_access() {
+        for field in [Field::Model, Field::Effort] {
+            assert!(holds(field, true));
+            assert!(!holds(field, false));
+        }
+        assert!(!holds(Field::Access, true));
+        assert!(!holds(Field::Access, false));
+    }
 }

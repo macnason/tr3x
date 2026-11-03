@@ -1,20 +1,30 @@
-//! The conversation pane: the thread as plain terminal output, so Rex's scrollback, find,
-//! selection and links work on it. Finished blocks print once and stay. The blocks of a
-//! running turn form a live tail at the bottom that redraws in place until they finish.
+//! A thread's pane: the conversation, and Reply under it (`compose`), or with the `reply`
+//! setting at `pane`, either of them in a pane of its own (`Role`). The conversation is
+//! plain terminal output, so Rex's scrollback, find, selection and links work on it. Finished
+//! blocks print once and stay. The blocks of a running turn form a live tail at the bottom
+//! that redraws in place until they finish. It prints in the rows over Reply's, which a
+//! scroll region holds. When it needs to scroll, it clears Reply's rows and scrolls the whole
+//! screen instead, because the terminal moves text, not pictures, when a region scrolls; then
+//! Reply draws again at the bottom, on a phone as on a Mac.
+//!
+//! Clicks reach the pane only while Reply has something to click, an approval's or a
+//! question's buttons or the slash menu: while they're on, the wheel and drags would reach the
+//! pane too, not the scrollback and selection. The first turn of the wheel turns them off
+//! until the next key.
 //!
 //! The pane also tells Rex what the thread is doing with OSC 7501, from the same status word
 //! T3's sidebar shows, names itself with OSC 2, and reports the thread's folder with OSC 7, so
 //! a split opened beside it starts there.
 
-use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
 use base64::Engine;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use serde_json::Value;
 use t3client::env::WatchEvent;
+use t3client::inbox::Limit;
 use t3client::projection::{ShellState, ThreadState};
 use t3client::transcript::{self, Block, BlockKind};
 
@@ -22,9 +32,12 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+use crate::compose::Composer;
 use crate::media::{self, Embed, Media};
+use crate::paste::{self, Got};
 use crate::render::{self, visible_width};
 use crate::t3;
+use crate::term::out;
 use crate::width::Follow;
 
 pub const RESET: &str = "\x1b[0m";
@@ -47,6 +60,12 @@ struct Pane {
     committed: Vec<(String, String)>,
     /// Rows the live tail takes at the bottom, which the next frame rewrites.
     live_rows: usize,
+    /// The rows the conversation scrolls in, above Reply's.
+    region: usize,
+    /// The cursor's row, 1-based: the row after the last one printed.
+    row: usize,
+    /// The last frame cleared the screen, Reply's rows too.
+    cleared: bool,
     /// Lines from the top of the live tail that have printed for good, because the tail
     /// outgrew the screen. Later frames and the commit skip them.
     spilled: usize,
@@ -70,12 +89,9 @@ struct Pane {
     snapshots: mpsc::UnboundedSender<(String, std::path::PathBuf)>,
     /// What the pane says while the thread's machine is out of reach.
     offline: Option<String>,
-}
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
+    /// The usage-limit line the last frame drew, which time moves on: `tomorrow 9am` becomes
+    /// `9am` at midnight, and `resumes` becomes `resuming` at the reset.
+    limit: String,
 }
 
 /// The local time zone's offset, read once from `date`, so timestamps need no time zone crate.
@@ -109,6 +125,76 @@ fn clock(iso: &str, offset_minutes: i64) -> Option<String> {
         _ => (h - 12, "PM"),
     };
     Some(format!("{h12}:{m:02} {half}"))
+}
+
+/// A moment in local time, as Find Thread and the conversation word it: `3pm` or `3:30pm`
+/// today, `tomorrow 9am`, `Tue 9am` within the week, else `12 Nov`. Before today,
+/// `yesterday 3pm`, else the date.
+pub fn when(at: i64, now: i64, offset_minutes: i64) -> String {
+    let local = |ms: i64| ms + offset_minutes * 60_000;
+    let day = 86_400_000;
+    let days = local(at).div_euclid(day) - local(now).div_euclid(day);
+    let minutes = local(at).rem_euclid(day) / 60_000;
+    let (h, m) = (minutes / 60, minutes % 60);
+    let hour = match h % 12 {
+        0 => 12,
+        h => h,
+    };
+    let half = if h < 12 { "am" } else { "pm" };
+    let clock = if m == 0 {
+        format!("{hour}{half}")
+    } else {
+        format!("{hour}:{m:02}{half}")
+    };
+    // 1970-01-01 was a Thursday.
+    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+        [local(at).div_euclid(day).rem_euclid(7) as usize];
+    match days {
+        0 => clock,
+        1 => format!("tomorrow {clock}"),
+        -1 => format!("yesterday {clock}"),
+        2..=6 => format!("{weekday} {clock}"),
+        _ => {
+            let date = t3::iso(local(at));
+            let month = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ][date[5..7].parse::<usize>().unwrap_or(1) - 1];
+            format!("{} {month}", date[8..10].trim_start_matches('0'))
+        }
+    }
+}
+
+/// What a usage limit leaves the thread waiting for, after its status word: `resets 3pm`, or
+/// `resumes 3pm` when T3 will send it on then, `resuming` once that time has passed, and
+/// `reset 3pm` after a reset nothing resumed. Empty when the provider didn't say when.
+fn limit_wait(limit: &Limit, now: i64, offset_minutes: i64) -> String {
+    let Some(at) = limit.resets_at else {
+        return String::new();
+    };
+    let time = when(at, now, offset_minutes);
+    match (at > now, limit.resumes) {
+        (true, true) => format!("resumes {time}"),
+        (true, false) => format!("resets {time}"),
+        (false, true) => "resuming".to_string(),
+        (false, false) => format!("reset {time}"),
+    }
+}
+
+/// The conversation's last line for a thread stopped on a usage limit, as T3's notice says it:
+/// `Usage limit reached · resets 3pm`, with `· resumes then` when auto-resume is on.
+fn limit_line(limit: &Limit, now: i64, offset_minutes: i64) -> String {
+    let mut line = "Usage limit reached".to_string();
+    match limit.resets_at {
+        Some(at) if at > now => {
+            line.push_str(&format!(" · resets {}", when(at, now, offset_minutes)));
+            if limit.resumes {
+                line.push_str(" · resumes then");
+            }
+        }
+        Some(_) => line.push_str(&format!(" · {}", limit_wait(limit, now, offset_minutes))),
+        None => {}
+    }
+    line
 }
 
 /// `1m 12s`, `45s` or `2h 3m`.
@@ -621,11 +707,11 @@ fn in_run(block: &Block) -> bool {
 }
 
 /// The finished calls in a run, as one line. None when nothing in it has finished.
-fn run_line(run: &[Block], width: usize) -> Option<String> {
+fn run_line(run: &[Block], embeds: &HashMap<String, Embed>, width: usize) -> Option<String> {
     let done: Vec<&Block> = run
         .iter()
         .filter(|b| b.kind == BlockKind::Tool && b.tool_name != "AskUserQuestion")
-        .filter(|b| !is_running(b))
+        .filter(|b| !is_running(b) && !embeds.contains_key(&b.item_id))
         .collect();
     if done.is_empty() {
         return None;
@@ -658,11 +744,13 @@ fn lines_at(blocks: &[Block], i: usize, ctx: &Ctx) -> Vec<String> {
     let mut lines = Vec::new();
     let block = &blocks[i];
     if !in_run(block)
-        && let Some(line) = run_line(&blocks[run_start(blocks, i)..i], ctx.width)
+        && let Some(line) = run_line(&blocks[run_start(blocks, i)..i], ctx.embeds, ctx.width)
     {
         lines.push(line);
     }
-    if block.kind != BlockKind::Tool || is_running(block) {
+    // An HTML embed is a picture, so it always draws.
+    if block.kind != BlockKind::Tool || is_running(block) || ctx.embeds.contains_key(&block.item_id)
+    {
         lines.extend(block_lines(block, ctx));
     }
     lines
@@ -687,10 +775,18 @@ fn within(text: &str, max: usize) -> String {
     out
 }
 
-/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it. `msg` says what the
-/// thread is waiting on you for, when it is, else the status word; `title` names the thread.
-/// Both are cut to the protocol's limits: 2048 and 192 bytes.
-fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String {
+/// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it under the window's label,
+/// which already names the thread. `msg` is that line: what the thread is waiting on you for,
+/// when it is, else the project and the status word, or the project alone when idle. `title`
+/// is the project. `shown` is the word the line says, which can differ from `word`, the one
+/// the state comes from: a finished run you've already seen still says Done, at rest. Both
+/// are cut to the protocol's limits: 2048 and 192 bytes.
+fn status_sequence(
+    word: Option<&str>,
+    shown: Option<&str>,
+    ask: Option<&str>,
+    project: Option<&str>,
+) -> String {
     let (state, extra) = match word {
         Some("Approval") => ("blocked", ":kind=permission"),
         Some("Input") => ("blocked", ":kind=question"),
@@ -701,13 +797,15 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String
     };
     let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut seq = format!("\x1b]7501;state={state}{extra}:app=t3code");
-    let title = within(title, 192);
+    let title = within(project.unwrap_or_default(), 192);
     if !title.is_empty() {
         seq.push_str(&format!(":title={}", b64(&title)));
     }
-    let msg = match (state, ask) {
-        ("blocked", Some(ask)) => within(ask, 2048),
-        _ => word.map(str::to_string).unwrap_or_default(),
+    let msg = match (state, ask, shown, project) {
+        ("blocked", Some(ask), _, _) => within(ask, 2048),
+        (_, _, Some(word), Some(project)) => within(&format!("{project} · {word}"), 2048),
+        (_, _, Some(word), None) => word.to_string(),
+        (_, _, None, project) => within(project.unwrap_or_default(), 2048),
     };
     if !msg.is_empty() {
         seq.push_str(&format!(":msg={}", b64(&msg)));
@@ -716,18 +814,32 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String
     seq
 }
 
+/// The name of the project `thread` belongs to.
+fn project_name<'a>(shell: &'a ShellState, thread: &Value) -> Option<&'a str> {
+    let id = thread["projectId"].as_str()?;
+    shell.projects.iter().find(|p| p["id"] == id)?["title"].as_str()
+}
+
 /// What a pane says while its machine is out of reach: that it is, or that it needs pairing.
-pub fn offline_line(machine: &str, reason: &str, retry_in: Duration) -> String {
+/// This Mac's T3 runs inside T3 Code, so when it's gone the app was quit (or is restarting),
+/// and its agents stopped with it. Saying so beats a retry count nobody can act on.
+pub fn offline_line(machine: &str, local: bool, reason: &str, retry_in: Duration) -> String {
     if let Some(at) = reason.find("Run `t3rex pair") {
         return reason[at..].trim_end_matches('.').to_string();
+    }
+    if local {
+        return LOCAL_OFFLINE.to_string();
     }
     let secs = retry_in.as_secs().max(1);
     format!("{machine} is offline · retrying in {secs}s")
 }
 
+const LOCAL_OFFLINE: &str =
+    "T3 Code isn't running · agents stop when it quits · open T3 Code to carry on";
+
 impl Pane {
     /// Before the thread has loaded: the offline line alone, at the top.
-    fn waiting(&self) {
+    fn waiting(&mut self) {
         if let Some(offline) = &self.offline {
             let (left, width) = self.column();
             out(&format!(
@@ -735,7 +847,58 @@ impl Pane {
                 " ".repeat(left),
                 fit(offline, width)
             ));
+            self.row = 3;
+            self.cleared = true;
         }
+    }
+
+    /// The conversation's rows become `region`, for Reply growing or shrinking under it.
+    /// Growing pushes the conversation up into the scrollback as far as it needs; when that
+    /// would take rows of the live tail, which the next frame rewrites, it prints again. So
+    /// does shrinking under a conversation that filled its rows, which would leave a gap.
+    fn set_region(&mut self, region: usize) -> String {
+        if region == self.region {
+            return String::new();
+        }
+        let old = std::mem::replace(&mut self.region, region);
+        let margins = format!("\x1b[1;{region}r");
+        if region > old && self.header && self.row >= old {
+            self.reflow = true;
+            return margins;
+        }
+        // Reply's old rows, the conversation's now.
+        if region > old {
+            let clear: String = (old + 1..=region)
+                .map(|r| format!("\x1b[{r};1H\x1b[2K"))
+                .collect();
+            return clear + &margins;
+        }
+        if !self.header {
+            return margins;
+        }
+        let k = self.row.saturating_sub(region);
+        if k == 0 {
+            return margins;
+        }
+        if self.live_rows > 0 && self.row - self.live_rows <= k {
+            self.reflow = true;
+            return margins;
+        }
+        self.row -= k;
+        // The whole screen scrolls, not the region: pictures stay put when a region scrolls.
+        self.cleared = true;
+        format!("{}{margins}", self.scroll_up(k))
+    }
+
+    /// Scrolls the whole screen up `k` rows, taking pictures with the text, and clears what
+    /// was Reply's. Within margins the terminal moves the text but not its pictures, so the
+    /// conversation never scrolls in its region; Reply draws again after.
+    fn scroll_up(&self, k: usize) -> String {
+        let mut text = format!("\x1b[r\x1b[{};1H{}", self.rows, "\n".repeat(k));
+        if self.region < self.rows {
+            text.push_str(&format!("\x1b[{};1H\x1b[J", self.region + 1));
+        }
+        text
     }
 
     fn new(
@@ -749,6 +912,9 @@ impl Pane {
             rows: rows as usize,
             committed: Vec::new(),
             live_rows: 0,
+            region: rows as usize,
+            row: 1,
+            cleared: false,
             spilled: 0,
             status: String::new(),
             title: String::new(),
@@ -763,6 +929,7 @@ impl Pane {
             link,
             snapshots,
             offline: None,
+            limit: String::new(),
         }
     }
 
@@ -771,9 +938,10 @@ impl Pane {
         self.chat_width.width.column(self.cols)
     }
 
-    /// Prints the thread's blocks: what's new and finished for good, then the live tail.
-    fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) {
+    /// The thread's blocks: what's new and finished for good, then the live tail.
+    fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
         let blocks = transcript::blocks(state);
+        self.limit = self.limit_now(shell_thread);
         self.animating = state.active_run().is_some() || blocks.iter().any(is_running);
         let run_active = state.active_run().is_some();
         // A history that no longer starts with what was printed, after a reconnect, prints
@@ -796,21 +964,28 @@ impl Pane {
             self.reflow |= self.header;
             self.last_user = newest;
         }
-        let mut text = String::from("\x1b[?2026h");
+        let mut text = format!("\x1b[{};1H", self.row);
         let reflow = std::mem::take(&mut self.reflow);
         // The first frame too, which frees pictures an earlier process left in this terminal.
         if !self.header || !matches || self.committed.len() > blocks.len() || reflow {
             text.push_str(self.media.free_all());
-            text.push_str("\x1b[H\x1b[2J\x1b[3J");
+            text.push_str(&format!("\x1b[H\x1b[2J\x1b[3J\x1b[1;{}r", self.region));
+            self.row = 1;
+            self.cleared = true;
             self.committed.clear();
             self.live_rows = 0;
             self.spilled = 0;
             self.header = false;
         }
-        // Back to the top of the live tail, and clear it.
+        // Back to the top of the live tail, and clear it, down to Reply.
         if self.live_rows > 0 {
-            text.push_str(&format!("\x1b[{}F\x1b[J", self.live_rows));
+            self.row -= self.live_rows.min(self.row - 1);
+            for r in self.row..=self.region {
+                text.push_str(&format!("\x1b[{r};1H\x1b[2K"));
+            }
+            text.push_str(&format!("\x1b[{};1H", self.row));
         }
+        let printed_from = text.len();
         if !self.header {
             text.push_str(&self.header_lines(state, shell_thread));
             self.header = true;
@@ -857,7 +1032,7 @@ impl Pane {
         let mut live: Vec<String> = Vec::new();
         // A run still going sums up what it has done so far, above what it's doing now.
         let open = run_start(&blocks, blocks.len());
-        let summary = run_line(&blocks[open..], width).map(|l| pad(vec![l], left));
+        let summary = run_line(&blocks[open..], &embeds, width).map(|l| pad(vec![l], left));
         let summary_at = open.max(index);
         for i in index..blocks.len() {
             if i == summary_at {
@@ -892,7 +1067,7 @@ impl Pane {
         }
         // A tail taller than the screen can't be rewritten once its top has scrolled away, so
         // anything above the last screenful prints for good now.
-        let room = self.rows.saturating_sub(1).max(1);
+        let room = self.region.saturating_sub(1).max(1);
         if live.len() > room {
             let cut = live.len() - room;
             for line in live.drain(..cut) {
@@ -906,11 +1081,51 @@ impl Pane {
             text.push_str("\r\n");
         }
         self.live_rows = live.len();
-        text.push_str("\x1b[?2026l");
-        out(&text);
+        let body = text.split_off(printed_from);
+        let lines = body.matches("\r\n").count();
+        if self.row + lines <= self.region {
+            text.push_str(&body);
+            self.row += lines;
+            return text;
+        }
+        // Past the region's bottom: printed over the whole screen, with Reply's rows cleared
+        // first, so what scrolls takes its pictures along, then scrolled up off Reply's rows.
+        // Claude Code prints this way; Codex scrolls a region but never shows pictures.
+        text.push_str("\x1b[r");
+        if self.region < self.rows {
+            text.push_str(&format!("\x1b[{};1H\x1b[J", self.region + 1));
+        }
+        text.push_str(&format!("\x1b[{};1H", self.row));
+        text.push_str(&body);
+        let end = (self.row + lines).min(self.rows);
+        if end > self.region {
+            text.push_str(&self.scroll_up(end - self.region));
+        }
+        text.push_str(&format!("\x1b[1;{}r", self.region));
+        self.row = self.region;
+        self.cleared = true;
+        text
     }
 
+    /// The usage limit the thread stopped on, as its last line says it now, or empty.
+    fn limit_now(&self, shell_thread: Option<&Value>) -> String {
+        shell_thread
+            .and_then(t3client::inbox::limit)
+            .map(|limit| limit_line(&limit, t3::now_ms(), self.offset_minutes))
+            .unwrap_or_default()
+    }
+
+    /// The finished turn's last line: when it finished and how long it took, or that it
+    /// failed or stopped. A turn stopped on a usage limit says when the limit resets, and
+    /// whether T3 resumes the thread then.
     fn footer(&self, state: &ThreadState) -> Option<String> {
+        if !self.limit.is_empty() {
+            return Some(format!(
+                "{}{YELLOW}◷{RESET} {DIM}{}{RESET}",
+                " ".repeat(self.column().0),
+                fit(&self.limit, self.column().1.saturating_sub(2))
+            ));
+        }
         let run = state.latest_run()?;
         let done = run["completedAt"].as_str()?;
         let started = run["startedAt"].as_str().or(run["requestedAt"].as_str())?;
@@ -953,12 +1168,27 @@ impl Pane {
         text
     }
 
-    fn set_status(&mut self, thread: Option<&Value>, state: Option<&ThreadState>) {
+    fn set_status(
+        &mut self,
+        shell: &ShellState,
+        thread: Option<&Value>,
+        state: Option<&ThreadState>,
+    ) {
         let Some(thread) = thread else { return };
-        let word = t3client::inbox::status_label(thread, t3::now_ms());
-        let title = one_line(thread["title"].as_str().unwrap_or(""));
+        let now = t3::now_ms();
+        let word = t3client::inbox::status_label(thread, now);
+        // A usage limit says what it waits for: `Limited · resumes 3pm`.
+        let limited = t3client::inbox::limit(thread)
+            .map(|limit| limit_wait(&limit, now, self.offset_minutes))
+            .filter(|wait| !wait.is_empty())
+            .map(|wait| format!("Limited · {wait}"));
+        let shown = limited
+            .as_deref()
+            .or(word)
+            .or(t3client::inbox::finished(thread).then_some("Done"));
+        let project = project_name(shell, thread).map(one_line);
         let ask = state.and_then(crate::ask::line);
-        let seq = status_sequence(word, ask.as_deref(), &title);
+        let seq = status_sequence(word, shown, ask.as_deref(), project.as_deref());
         if seq != self.status {
             out(&seq);
             self.status = seq;
@@ -985,144 +1215,134 @@ impl Pane {
     }
 }
 
-/// The sibling pane in this window: the composer.
-async fn composer_block() -> Option<String> {
-    let me = std::env::var("REX_BLOCK").ok()?;
-    let session = std::env::var("REX_SESSION").ok()?;
-    let view = crate::rex::Rex::find().inspect(&session).await.ok()?;
-    for window in view["windows"].as_array()? {
-        let blocks: Vec<&str> = window["layers"]
-            .as_array()?
-            .iter()
-            .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
-            .filter_map(|b| b["block_id"].as_str())
-            .collect();
-        if blocks.contains(&me.as_str()) {
-            return blocks.into_iter().find(|b| *b != me).map(str::to_string);
-        }
+/// What a thread's pane shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The conversation, with Reply in its bottom rows.
+    Inline,
+    /// The conversation alone, over a Reply pane.
+    Conversation,
+    /// Reply alone, under the conversation's pane, sized to fit.
+    Reply,
+}
+
+/// How long after a turn of the wheel the one-pane window takes clicks again. The wheel turns
+/// them off, so the terminal scrolls its scrollback.
+const WHEEL_REST: Duration = Duration::from_millis(1500);
+
+/// Clicks on, for Reply's chip, buttons and menu, or off, for the scrollback.
+fn clicks(on: bool) -> &'static str {
+    if on {
+        "\x1b[?1000h\x1b[?1006h"
+    } else {
+        "\x1b[?1006l\x1b[?1000l"
     }
-    None
 }
 
-/// Typing in the conversation goes to the composer: focus moves there with the keys typed.
-/// Keys go through one task in order, so a burst of typing arrives as typed.
-fn spawn_handoff() -> mpsc::UnboundedSender<String> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    tokio::spawn(async move {
-        let bin = crate::rex::Rex::find().bin;
-        let session = std::env::var("REX_SESSION").unwrap_or_default();
-        let mut block: Option<String> = None;
-        while let Some(first) = rx.recv().await {
-            let mut text = first;
-            while let Ok(more) = rx.try_recv() {
-                text.push_str(&more);
-            }
-            if block.is_none() {
-                block = composer_block().await;
-            }
-            let Some(block) = block.as_deref() else {
-                continue;
-            };
-            let _ = tokio::process::Command::new(&bin)
-                .args(["focus", "-s", &session, block])
-                .output()
-                .await;
-            if !text.is_empty() {
-                let _ = tokio::process::Command::new(&bin)
-                    .args(["send", "-b", block, &text])
-                    .output()
-                    .await;
-            }
-        }
-    });
-    tx
-}
-
-pub async fn run(thread: String, passive: bool) -> Result<()> {
+pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     let (client, thread) = t3::thread(&thread)?;
     let thread_id = thread.thread;
-    let mut thread_events = client.watch_thread(&thread_id, None);
-    let mut shell_events = client.watch_shell(None);
     let scheme = crate::scheme::listen();
     crossterm::terminal::enable_raw_mode()?;
-    // Clear what the login printed, hide the cursor, and ask for focus reports.
-    out("\x1b[H\x1b[2J\x1b[3J\x1b[?25l\x1b[?1004h");
+    // Clear what the login printed, and ask for focus reports and bracketed paste. Paste
+    // events too, where the filter can take the clipboard's replies.
+    let clipboard = crate::scheme::clipboard();
+    // Reply alone keeps nothing to scroll back to, so it takes the alternate screen. Its
+    // title is its job: the window's label above already names the thread and project.
+    if role == Role::Reply {
+        out("\x1b]2;Reply\x07\x1b[?1049h");
+    }
+    out("\x1b[H\x1b[2J\x1b[3J\x1b[?1004h\x1b[?2004h");
+    if clipboard.is_some() {
+        out(paste::ON);
+    }
     if let Ok(cwd) = std::env::current_dir() {
         out(&format!(
             "\x1b]7;file://localhost{}\x1b\\",
             percent(&cwd.to_string_lossy())
         ));
     }
-    let result = event_loop(
-        passive,
-        &client,
-        &thread_id,
-        &mut thread_events,
-        &mut shell_events,
-        scheme,
-    )
-    .await;
-    out("\x1b[?1004l\x1b[?25h");
+    let keys = crate::scheme::keys();
+    let result = event_loop(passive, role, &client, &thread_id, scheme, clipboard).await;
+    drop(keys);
+    out(&format!(
+        "{}{}\x1b[r\x1b[?2004l\x1b[?1004l\x1b[?25h{}",
+        paste::OFF,
+        clicks(false),
+        if role == Role::Reply {
+            "\x1b[?1049l"
+        } else {
+            ""
+        }
+    ));
     let _ = crossterm::terminal::disable_raw_mode();
     result
 }
 
 async fn event_loop(
     passive: bool,
+    role: Role,
     client: &std::sync::Arc<t3client::env::Env>,
     thread_id: &str,
-    thread_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
-    shell_events: &mut tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     mut scheme: tokio::sync::watch::Receiver<Option<bool>>,
+    mut clipboard: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
+    let mut thread_events = client.watch_thread(thread_id, None);
+    let mut shell_events = client.watch_shell(None);
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
-    // The provider's driver for each instance, so the pane can take its provider's name, and
-    // the address T3 serves its web app at, for the thread's link. Asked for until the machine
-    // answers.
-    let (config_tx, mut config_rx) = mpsc::unbounded_channel();
-    {
-        let client = client.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Ok(config) = client.server_config().await {
-                    let _ = config_tx.send(config);
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
+    // Reply asks for the machine's config: the provider's driver for each instance, so the pane
+    // can take its provider's name, and the address T3 serves its web app at, for the
+    // thread's link.
+    let (mut composer, mut done) = Composer::new(client.clone(), thread_id.to_string());
+    if role == Role::Reply {
+        composer.share = 1.0;
     }
-    let mut config: Option<Value> = None;
+    // Reply alone fits its pane to what it shows, by moving the split above it.
+    let mut fit = (role == Role::Reply).then(crate::reply::Fit::new).flatten();
+    let (fitted_tx, mut fitted) = mpsc::unbounded_channel();
+    // Where Reply alone starts in its pane, to clear above it when that moves.
+    let mut reply_top = 0;
     let link = crate::link::thread(None, client.id(), thread_id);
-    let handoff = spawn_handoff();
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
-    let mut state: Option<ThreadState> = None;
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
+    // Every eighth tick, about a second: a model the picker held for the next message.
+    let mut ticks = 0u32;
     let mut visited_for = String::new();
     let mut dirty = false;
+    // Reply draws again only when something it shows may have changed.
+    let mut reply = true;
     let mut focused = true;
     let mut renamed = false;
+    // Whether clicks are on, and when the wheel last turned them off for the scrollback.
+    let mut clicking = false;
+    let mut wheeled: Option<tokio::time::Instant> = None;
+    let mut asking = String::new();
     loop {
         tokio::select! {
             event = thread_events.recv() => match event {
                 Some(WatchEvent::Item(item)) => {
                     if item["kind"] == "snapshot" {
-                        state = ThreadState::from_snapshot(&item);
-                    } else if let Some(s) = state.as_mut() {
+                        composer.state = ThreadState::from_snapshot(&item);
+                    } else if let Some(s) = composer.state.as_mut() {
                         s.apply(&item);
                     }
+                    composer.thread_changed();
                     pane.offline = None;
+                    composer.offline = None;
                     dirty = true;
+                    reply = true;
                 }
                 Some(WatchEvent::Reconnecting { reason, retry_in }) => {
-                    let said = offline_line(client.name(), &reason, retry_in);
+                    let said = offline_line(client.name(), client.is_local(), &reason, retry_in);
+                    composer.offline = Some(said.clone());
                     if pane.offline.as_deref() != Some(said.as_str()) {
                         pane.offline = Some(said);
                         dirty = true;
-                        if state.is_none() {
+                        if composer.state.is_none() {
                             pane.waiting();
+                            reply = true;
                         }
                     }
                 }
@@ -1131,54 +1351,106 @@ async fn event_loop(
             },
             event = shell_events.recv() => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
-                let thread = t3client::inbox::find_thread(&shell, thread_id);
-                pane.set_status(thread, state.as_ref());
+                if role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    pane.set_status(&shell, thread, composer.state.as_ref());
+                }
             },
-            event = input.next() => match event {
-                Some(Ok(Event::Resize(cols, rows))) => {
-                    if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
-                        pane.reflow = cols as usize != pane.cols;
-                        pane.cols = cols as usize;
-                        pane.rows = rows as usize;
+            Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
+                fit.finished(ok);
+            },
+            event = done.recv() => if let Some(event) = event {
+                // The config comes again with each change, so the thread prints again only
+                // for a new link.
+                let config = matches!(event, crate::compose::Done::Config(_));
+                let shown = composer.config_shown();
+                if let crate::compose::Done::Config(found) = &event {
+                    let link = crate::link::thread(Some(found), client.id(), thread_id);
+                    if link != pane.link {
+                        pane.link = link;
+                        pane.reflow = true;
                         dirty = true;
                     }
                 }
-                Some(Ok(Event::FocusGained)) => focused = true,
-                Some(Ok(Event::FocusLost)) => focused = false,
-                Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                        continue;
-                    }
-                    let typed = match key.code {
-                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => c.to_string(),
-                        _ => String::new(),
-                    };
-                    let _ = handoff.send(typed);
-                }
-                Some(Err(_)) | None => {}
-                _ => {}
+                composer.done(event);
+                // A config that changes nothing Reply shows draws nothing: T3 sends one each
+                // time a provider's status is checked.
+                reply |= !config || shown.is_none() || composer.config_shown() != shown;
             },
-            // A screen that turns light or dark: snapshots again in its scheme.
+            event = input.next() => {
+                reply = true;
+                match event {
+                    Some(Ok(Event::Resize(cols, rows))) => {
+                        if (cols as usize, rows as usize) != (pane.cols, pane.rows) {
+                            // Each terminal does its own thing with margins and rows on a
+                            // resize, so the thread prints again from the top.
+                            pane.reflow = true;
+                            pane.cols = cols as usize;
+                            pane.rows = rows as usize;
+                            dirty = true;
+                        }
+                    }
+                    Some(Ok(Event::FocusGained)) => focused = true,
+                    Some(Ok(Event::FocusLost)) => focused = false,
+                    // The conversation alone has nothing to type into.
+                    Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
+                        if role == Role::Conversation => reply = false,
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        wheeled = None;
+                        composer.key(key);
+                    }
+                    Some(Ok(Event::Mouse(m))) => {
+                        if !composer.click(&m)
+                            && matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+                        {
+                            wheeled = Some(tokio::time::Instant::now());
+                        }
+                    }
+                    Some(Ok(Event::Paste(text))) => composer.pasted(Got::Text(text)),
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Ok(()),
+                    _ => reply = false,
+                }
+            },
+            Some(packet) = async {
+                match clipboard.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => if let Some(got) = composer.clipboard.feed(&packet) {
+                composer.pasted(got);
+                reply = true;
+            },
+            // A screen that turns light or dark: snapshots and logos again in its scheme.
             Ok(()) = scheme.changed() => {
+                // The fill under the input follows the new background.
+                crate::scheme::ask_background();
                 let dark = crate::scheme::dark();
                 if dark != pane.media.dark {
                     pane.media.set_dark(dark);
                     pane.reflow = true;
                     dirty = true;
                 }
-            }
-            Some(found) = config_rx.recv() => {
-                pane.link = crate::link::thread(Some(&found), client.id(), thread_id);
-                pane.reflow = true;
-                config = Some(found);
-                dirty = true;
+                composer.reload_logos();
             }
             Some((attachment, png)) = snap_rx.recv() => {
                 pane.media.snapshots.insert(attachment, png);
                 pane.reflow = true;
                 dirty = true;
             }
+            _ = tokio::time::sleep_until(composer.note_until.unwrap_or_else(tokio::time::Instant::now)), if composer.note_until.is_some() => {
+                composer.clear_note();
+                reply = true;
+            }
             _ = tick.tick() => {
+                if let Some(fit) = fit.as_mut()
+                    && let Some(job) = fit.due()
+                {
+                    let tx = fitted_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(job.await);
+                    });
+                }
                 if pane.animating {
                     pane.frame += 1;
                     dirty = true;
@@ -1187,33 +1459,127 @@ async fn event_loop(
                     pane.reflow = true;
                     dirty = true;
                 }
+                // Clicks come back once the wheel has rested, for the chip.
+                if wheeled.is_some_and(|at| at.elapsed() >= WHEEL_REST) {
+                    wheeled = None;
+                }
+                ticks = ticks.wrapping_add(1);
+                if ticks.is_multiple_of(8) && composer.reload_draft() {
+                    reply = true;
+                    dirty = true;
+                }
+                // A usage limit's times read differently as the clock moves on.
+                if ticks.is_multiple_of(8) && role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    if pane.limit_now(thread) != pane.limit {
+                        dirty = true;
+                    }
+                }
+                if ticks.is_multiple_of(8) && role != Role::Conversation && composer.usage_moved() {
+                    reply = true;
+                }
             }
         }
-        // A thread that moved to another provider: start again under that provider's name,
-        // so Rex's sidebar shows its glyph. The thread prints again from the top.
-        if !renamed && let Some(s) = state.as_ref() {
+        if let Some(width) = composer.width_set.take() {
+            pane.chat_width.width = width;
+            pane.reflow = true;
+            dirty = true;
+        }
+        // A thread that moved to another provider: once nothing is typed, start again under
+        // that provider's name, so Rex's sidebar shows its glyph. The thread prints again from
+        // the top.
+        if !renamed
+            && composer.idle()
+            && let Some(s) = composer.state.as_ref()
+        {
             let instance = s.thread()["modelSelection"]["instanceId"]
                 .as_str()
                 .unwrap_or_default();
-            let driver = crate::icons::driver_of(config.as_ref(), instance);
+            let driver = crate::icons::driver_of(composer.config.as_ref(), instance);
             let want = crate::icons::program_name(driver).unwrap_or("t3rex");
-            if !instance.is_empty() && crate::icons::started_as() != want {
+            if !instance.is_empty()
+                && composer.config.is_some()
+                && crate::icons::started_as() != want
+            {
                 renamed = true;
-                out("\x1b[?1004l\x1b[?25h");
+                out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
                 let _ = crossterm::terminal::disable_raw_mode();
                 crate::icons::become_program(driver);
             }
         }
-        if dirty && let Some(s) = state.as_ref() {
-            let thread = t3client::inbox::find_thread(&shell, thread_id);
-            let project = thread
-                .and_then(|t| t["projectId"].as_str())
-                .and_then(|p| shell.projects.iter().find(|x| x["id"] == p))
-                .and_then(|p| p["title"].as_str());
-            pane.set_title(s, project);
-            pane.set_status(thread, Some(s));
-            pane.draw(s, thread);
+        // Reply's rows at the bottom, and the conversation's above them.
+        composer.cols = pane.cols;
+        composer.rows = pane.rows;
+        composer.column = pane.column();
+        let height = match role {
+            Role::Inline => composer.height().min(pane.rows.saturating_sub(1)).max(1),
+            Role::Conversation => 0,
+            Role::Reply => composer.height().min(pane.rows).max(1),
+        };
+        let mut text = String::new();
+        if role == Role::Reply {
+            if let Some(fit) = fit.as_mut() {
+                fit.want(composer.wanted);
+            }
+            // Reply alone sits at the bottom of its pane, over blank rows.
+            let top = pane.rows + 1 - height;
+            let force = std::mem::take(&mut pane.reflow) || top != reply_top;
+            if force {
+                text.push_str("\x1b[H\x1b[2J");
+            }
+            reply_top = top;
+            if reply || force {
+                text.push_str(&composer.draw(top, force));
+                reply = false;
+            }
             dirty = false;
+        } else {
+            text = pane.set_region(pane.rows.saturating_sub(height).max(1));
+        }
+        dirty |= pane.reflow;
+        if dirty && let Some(s) = composer.state.as_ref() {
+            let thread = t3client::inbox::find_thread(&shell, thread_id);
+            pane.set_title(s, thread.and_then(|t| project_name(&shell, t)));
+            pane.set_status(&shell, thread, Some(s));
+            text.push_str(&pane.draw(s, thread));
+            dirty = false;
+        }
+        // A frame that cleared the screen needs Reply again; any frame, the cursor back in the
+        // input.
+        if role == Role::Inline {
+            if reply || pane.cleared || !text.is_empty() && composer.parked.is_empty() {
+                text.push_str(&composer.draw(pane.region + 1, pane.cleared));
+                pane.cleared = false;
+                reply = false;
+            } else if !text.is_empty() {
+                text.push_str(&composer.parked);
+            }
+        }
+        // A new question or approval turns clicks back on.
+        let ask = crate::ask::pending(
+            composer
+                .state
+                .as_ref()
+                .map_or(&ThreadState::default(), |s| s),
+        )
+        .map(|(r, _)| r["id"].as_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+        if ask != asking {
+            asking = ask;
+            wheeled = None;
+        }
+        // Reply alone has no scrollback for the wheel, so clicks stay on there.
+        let want = match role {
+            Role::Inline => wheeled.is_none(),
+            Role::Conversation => false,
+            Role::Reply => true,
+        };
+        if want != clicking {
+            clicking = want;
+            text.push_str(clicks(want));
+        }
+        if !text.is_empty() {
+            out(&format!("\x1b[?2026h\x1b[?25l{text}\x1b[?2026l"));
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
         if focused
@@ -1277,6 +1643,22 @@ mod tests {
             change: None,
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_lost_mac_says_t3_quit_and_a_lost_machine_says_offline() {
+        let lost = "T3 connection lost: the server closed the connection";
+        let wait = Duration::from_secs(4);
+        assert_eq!(offline_line("Mac mini", true, lost, wait), LOCAL_OFFLINE);
+        assert_eq!(
+            offline_line("studio", false, lost, wait),
+            "studio is offline · retrying in 4s"
+        );
+        let unpaired = "Rex isn't paired. Run `t3rex pair studio`.";
+        assert_eq!(
+            offline_line("studio", true, unpaired, wait),
+            "Run `t3rex pair studio`"
+        );
     }
 
     #[test]
@@ -1374,7 +1756,11 @@ mod tests {
         };
         assert!(lines_at(&blocks, 0, &ctx).is_empty());
         assert_eq!(lines_at(&blocks, 2, &ctx).len(), 1);
-        assert!(run_line(&blocks, 80).unwrap().contains("Ran 2 commands"));
+        assert!(
+            run_line(&blocks, &embeds, 80)
+                .unwrap()
+                .contains("Ran 2 commands")
+        );
         blocks[2].status = "completed".into();
         let mut reply = tool("", "", "", "");
         reply.kind = BlockKind::Assistant;
@@ -1384,36 +1770,111 @@ mod tests {
     }
 
     #[test]
+    fn an_html_embed_draws_beside_a_folded_run() {
+        let mut blocks = vec![
+            tool("command_execution", "$ ls", "ls", ""),
+            tool("command_execution", "$ ls", "ls", ""),
+            tool("command_execution", "$ ls", "ls", ""),
+        ];
+        blocks[1].item_id = "embed".into();
+        let embed = media::Embed {
+            attachment: "a".into(),
+            title: "Options".into(),
+            height: 400,
+        };
+        let embeds = HashMap::from([("embed".to_string(), embed)]);
+        let ctx = Ctx {
+            width: 80,
+            frame: 0,
+            offset: 0,
+            embeds: &embeds,
+            media: None,
+            link: "",
+        };
+        assert!(lines_at(&blocks, 0, &ctx).is_empty());
+        assert!(
+            lines_at(&blocks, 1, &ctx)
+                .iter()
+                .any(|l| l.contains("Options"))
+        );
+        assert!(
+            run_line(&blocks, &embeds, 80)
+                .unwrap()
+                .contains("Ran 2 commands")
+        );
+    }
+
+    #[test]
     fn status_maps_to_rex_states() {
         assert!(
-            status_sequence(Some("Approval"), None, "t").contains("state=blocked:kind=permission")
+            status_sequence(Some("Approval"), Some("Approval"), None, Some("t"))
+                .contains("state=blocked:kind=permission")
         );
-        assert!(status_sequence(Some("Input"), None, "t").contains("state=blocked:kind=question"));
-        assert!(status_sequence(Some("Working"), None, "t").contains("state=working"));
-        assert!(status_sequence(Some("Done"), None, "t").contains("state=done"));
-        assert!(status_sequence(None, None, "t").contains("state=idle"));
+        assert!(
+            status_sequence(Some("Input"), Some("Input"), None, Some("t"))
+                .contains("state=blocked:kind=question")
+        );
+        assert!(
+            status_sequence(Some("Working"), Some("Working"), None, Some("t"))
+                .contains("state=working")
+        );
+        assert!(
+            status_sequence(Some("Done"), Some("Done"), None, Some("t")).contains("state=done")
+        );
+        assert!(status_sequence(None, None, None, Some("t")).contains("state=idle"));
     }
 
     #[test]
     fn status_says_what_is_asked_within_the_limits() {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
-        let seq = status_sequence(Some("Approval"), Some("Run pnpm test?"), "Fix the build");
+        let seq = status_sequence(
+            Some("Approval"),
+            Some("Approval"),
+            Some("Run pnpm test?"),
+            Some("t3rex"),
+        );
         assert_eq!(
             seq,
             format!(
                 "\x1b]7501;state=blocked:kind=permission:app=t3code:title={}:msg={}\x1b\\",
-                b64("Fix the build"),
+                b64("t3rex"),
                 b64("Run pnpm test?")
             )
         );
-        // Not blocked: the status word, whatever was asked before.
+        // Not blocked: the project and the status word, whatever was asked before.
         assert!(
-            status_sequence(Some("Working"), Some("x"), "t")
-                .ends_with(&format!(":msg={}\x1b\\", b64("Working")))
+            status_sequence(Some("Working"), Some("Working"), Some("x"), Some("t3rex"))
+                .ends_with(&format!(":msg={}\x1b\\", b64("t3rex · Working")))
+        );
+        // Idle: the project alone, on the line under the label; no project, the word alone.
+        assert_eq!(
+            status_sequence(None, None, None, Some("t3rex")),
+            format!(
+                "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex")
+            )
+        );
+        assert_eq!(
+            status_sequence(None, None, None, None),
+            "\x1b]7501;state=idle:app=t3code\x1b\\"
+        );
+        // A finished run you've seen: Done on the line, at rest in Rex.
+        assert_eq!(
+            status_sequence(None, Some("Done"), None, Some("t3rex")),
+            format!(
+                "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex · Done")
+            )
+        );
+        assert!(
+            status_sequence(Some("Done"), Some("Done"), None, None)
+                .ends_with(&format!(":app=t3code:msg={}\x1b\\", b64("Done")))
         );
         // Over the limits: cut on a character, never mid-way through one.
         let long = "é".repeat(2000);
-        let seq = status_sequence(Some("Input"), Some(&long), &long);
+        let seq = status_sequence(Some("Input"), Some("Input"), Some(&long), Some(&long));
         let field = |key: &str| {
             let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
             let end = seq[at..].find([':', '\x1b']).unwrap() + at;
@@ -1424,6 +1885,178 @@ mod tests {
         assert_eq!(field("title").len(), 192);
         assert_eq!(field("msg").len(), 2048);
         assert!(seq.len() < 4096);
+    }
+
+    fn pane(region: usize, row: usize, live_rows: usize) -> Pane {
+        let (tx, _) = mpsc::unbounded_channel();
+        let mut pane = Pane::new(Media::new(None), String::new(), tx);
+        (pane.region, pane.row, pane.live_rows, pane.header) = (region, row, live_rows, true);
+        pane
+    }
+
+    #[test]
+    fn reply_growing_pushes_the_conversation_up() {
+        // Full: the cursor sits on the region's last row. Two more rows for Reply scroll the
+        // conversation up two, from the old bottom, before the margins move.
+        let mut p = pane(20, 20, 2);
+        p.rows = 24;
+        assert_eq!(
+            p.set_region(18),
+            "\x1b[r\x1b[24;1H\n\n\x1b[19;1H\x1b[J\x1b[1;18r"
+        );
+        assert_eq!(p.row, 18);
+        assert!(p.cleared);
+        assert!(!p.reflow);
+        // A short conversation has room: only the margins move.
+        let mut p = pane(20, 5, 2);
+        assert_eq!(p.set_region(18), "\x1b[1;18r");
+        assert_eq!(p.row, 5);
+    }
+
+    #[test]
+    fn reply_growing_into_the_live_tail_prints_again() {
+        let mut p = pane(20, 20, 19);
+        p.set_region(17);
+        assert!(p.reflow);
+    }
+
+    #[test]
+    fn reply_shrinking_under_a_full_conversation_prints_again() {
+        let mut p = pane(18, 18, 2);
+        p.set_region(20);
+        assert!(p.reflow);
+        // Under a short one, Reply's old rows are just cleared.
+        let mut p = pane(18, 5, 2);
+        assert_eq!(
+            p.set_region(20),
+            "\x1b[19;1H\x1b[2K\x1b[20;1H\x1b[2K\x1b[1;20r"
+        );
+        assert!(!p.reflow);
+    }
+
+    #[test]
+    fn moments_read_in_local_time() {
+        let h = 3_600_000;
+        // 2026-10-31T00:00:00Z, a Saturday, at UTC.
+        let now = t3client::inbox::parse_iso("2026-10-31T00:00:00.000Z").unwrap();
+        assert_eq!(when(now + 15 * h, now, 0), "3pm");
+        assert_eq!(when(now + 15 * h + 30 * 60_000, now, 0), "3:30pm");
+        assert_eq!(when(now + 33 * h, now, 0), "tomorrow 9am");
+        assert_eq!(when(now + 3 * 24 * h, now, 0), "Tue 12am");
+        assert_eq!(when(now + 12 * 24 * h + 9 * h, now, 0), "12 Nov");
+        assert_eq!(when(now - 9 * h, now, 0), "yesterday 3pm");
+        assert_eq!(when(now - 3 * 24 * h, now, 0), "28 Oct");
+        // Ten hours ahead, 3pm UTC is 1am the next day.
+        assert_eq!(when(now + 15 * h, now, 600), "tomorrow 1am");
+    }
+
+    #[test]
+    fn a_usage_limit_says_when_it_resets_and_whether_it_resumes() {
+        let h = 3_600_000;
+        let now = t3client::inbox::parse_iso("2026-10-31T00:00:00.000Z").unwrap();
+        let limit = |resets_at: Option<i64>, resumes: bool| Limit { resets_at, resumes };
+        let later = Some(now + 15 * h);
+        assert_eq!(
+            limit_line(&limit(later, true), now, 0),
+            "Usage limit reached · resets 3pm · resumes then"
+        );
+        assert_eq!(limit_wait(&limit(later, true), now, 0), "resumes 3pm");
+        assert_eq!(
+            limit_line(&limit(later, false), now, 0),
+            "Usage limit reached · resets 3pm"
+        );
+        assert_eq!(limit_wait(&limit(later, false), now, 0), "resets 3pm");
+        // The reset has come: T3 is about to send it on, or it's your move.
+        let passed = Some(now - h);
+        assert_eq!(
+            limit_line(&limit(passed, true), now, 0),
+            "Usage limit reached · resuming"
+        );
+        assert_eq!(
+            limit_line(&limit(passed, false), now, 0),
+            "Usage limit reached · reset yesterday 11pm"
+        );
+        // The provider didn't say when.
+        assert_eq!(
+            limit_line(&limit(None, false), now, 0),
+            "Usage limit reached"
+        );
+        assert_eq!(limit_wait(&limit(None, false), now, 0), "");
+    }
+
+    #[test]
+    fn a_limited_thread_says_what_it_waits_for_under_its_label() {
+        let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+        assert_eq!(
+            status_sequence(
+                Some("Limited"),
+                Some("Limited · resumes 3pm"),
+                None,
+                Some("t3rex")
+            ),
+            format!(
+                "\x1b]7501;state=error:app=t3code:title={}:msg={}\x1b\\",
+                b64("t3rex"),
+                b64("t3rex · Limited · resumes 3pm")
+            )
+        );
+    }
+
+    /// A thread whose only run stopped on a usage limit, and the shell's word on it.
+    fn limited(recovery: Value, resets_at: i64) -> (ThreadState, Value) {
+        let state = ThreadState::from_snapshot(&serde_json::json!({
+            "kind": "snapshot",
+            "snapshotSequence": 3,
+            "projection": {
+                "thread": {"id": "t1", "title": "Ship it"},
+                "runs": [{"id": "r1", "ordinal": 1, "status": "failed", "userMessageId": "m1",
+                    "startedAt": "2026-10-31T00:00:00.000Z", "completedAt": "2026-10-31T00:01:00.000Z"}],
+                "runtimeRequests": [],
+                "turnItems": [],
+                "visibleTurnItems": []
+            }
+        }))
+        .unwrap();
+        let reset = t3::iso(resets_at);
+        let mut recovery = recovery;
+        if recovery.is_object() {
+            recovery["resetAt"] = Value::String(reset.clone());
+        }
+        let shell = serde_json::json!({
+            "id": "t1", "latestRunId": "r1", "status": "failed", "lastErrorClass": "usage_limit",
+            "usageLimitResetAt": reset, "limitRecovery": recovery,
+            "pendingRuntimeRequest": null, "archivedAt": null, "settledOverride": null,
+        });
+        (state, shell)
+    }
+
+    #[test]
+    fn the_conversation_ends_on_the_limit_not_failed() {
+        let resets = t3::now_ms() + 2 * 3_600_000;
+        let armed = serde_json::json!({"runId": "r1", "autoResume": true});
+        let (state, shell) = limited(armed, resets);
+        let mut p = pane(20, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, Some(&shell));
+        let time = when(resets, t3::now_ms(), p.offset_minutes);
+        assert!(
+            drawn.contains(&format!(
+                "Usage limit reached · resets {time} · resumes then"
+            )),
+            "{drawn:?}"
+        );
+        assert!(!drawn.contains("Failed"), "{drawn:?}");
+        // Without auto-resume, only when it resets.
+        let (state, shell) = limited(Value::Null, resets);
+        let drawn = p.draw(&state, Some(&shell));
+        assert!(drawn.contains(&format!("Usage limit reached · resets {time}")));
+        assert!(!drawn.contains("resumes"));
+        // Another failure keeps its own line.
+        let mut other = shell.clone();
+        other["lastErrorClass"] = Value::String("provider_error".into());
+        let drawn = p.draw(&state, Some(&other));
+        assert!(drawn.contains("Failed") && !drawn.contains("Usage limit"));
+        assert!(p.limit.is_empty());
     }
 
     #[test]

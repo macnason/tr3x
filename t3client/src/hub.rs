@@ -111,43 +111,145 @@ impl Hub {
 
     /// How many machines t3rex holds a token for.
     pub fn paired(&self) -> usize {
-        self.envs
-            .iter()
-            .filter(|e| self.store.credential(e.id()).is_some())
-            .count()
+        self.store
+            .count_credentials(self.envs.iter().map(|e| e.id()))
     }
 
     /// Every machine's shell subscription in one stream, each event with its machine's id.
     /// Each machine reconnects on its own; one that's out of reach holds up none of the rest.
+    /// The subscriptions last until the stream is dropped.
     pub fn watch_shells(&self) -> mpsc::UnboundedReceiver<(String, WatchEvent)> {
         let (tx, rx) = mpsc::unbounded_channel();
         for env in &self.envs {
-            Hub::forward(env.clone(), tx.clone());
+            spawn_forward(env.clone(), tx.clone());
         }
         rx
     }
 
-    /// Adds `env`'s shell subscription to a stream `watch_shells` made.
-    pub fn forward(env: Arc<Env>, tx: mpsc::UnboundedSender<(String, WatchEvent)>) {
-        let mut events = env.watch_shell(None);
-        let id = env.id().to_string();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    event = events.recv() => match event {
-                        Some(event) => if tx.send((id.clone(), event)).is_err() { return },
-                        None => return,
-                    },
-                    _ = tx.closed() => return,
-                }
-            }
-        });
+    /// Adds `env`'s shell subscription to a stream. It lasts as long as the `Forwarder`
+    /// returned, which the caller keeps for as long as it follows the machine.
+    pub fn forward(env: Arc<Env>, tx: mpsc::UnboundedSender<(String, WatchEvent)>) -> Forwarder {
+        Forwarder(spawn_forward(env, tx))
     }
+}
+
+/// One machine's shell subscription feeding a stream. Dropping it ends the subscription, and
+/// with it the reconnecting: a machine that's forgotten, or a stream nobody reads any more,
+/// isn't dialled for good. Replacing it with a new `forward` leaves one subscription, not two.
+pub struct Forwarder(tokio::task::JoinHandle<()>);
+
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        // The task owns the watch's receiver; dropping that tells the watch to stop.
+        self.0.abort();
+    }
+}
+
+fn spawn_forward(
+    env: Arc<Env>,
+    tx: mpsc::UnboundedSender<(String, WatchEvent)>,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = env.watch_shell(None);
+    let id = env.id().to_string();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Some(event) => if tx.send((id.clone(), event)).is_err() { return },
+                    None => return,
+                },
+                _ = tx.closed() => return,
+            }
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn paired_reads_the_credentials_once_however_many_machines() {
+        use crate::store::{CREDENTIAL_READS, Credential};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let machine = |id: &str| Machine {
+            id: id.into(),
+            label: id.into(),
+            alias: None,
+            origins: vec![format!("http://{id}:3773")],
+            ssh: None,
+            via: Via::Link,
+            version: String::new(),
+        };
+        let mut registry = Registry::default();
+        for id in ["a", "b", "c", "d"] {
+            registry.upsert(machine(id));
+        }
+        store.save_registry(&registry).unwrap();
+        let _lock = store.lock().await.unwrap();
+        for id in ["a", "c", "orphan"] {
+            let credential = Credential {
+                token: id.into(),
+                scopes: Vec::new(),
+                issued_at: 1,
+                expires_at: 2,
+            };
+            store.save_credential(id, credential).unwrap();
+        }
+        let hub = Hub::load(dir.path());
+        CREDENTIAL_READS.with(|n| n.set(0));
+        assert_eq!(hub.paired(), 2);
+        assert_eq!(CREDENTIAL_READS.with(std::cell::Cell::get), 1);
+    }
+
+    /// A forwarded subscription ends when its `Forwarder` is dropped: the fake T3 is told the
+    /// stream is interrupted, and nothing dials it again. Held, it stays subscribed.
+    #[tokio::test]
+    async fn dropping_a_forwarder_ends_its_machines_subscription() {
+        use std::time::Duration;
+
+        use serde_json::json;
+        use tokio::net::TcpListener;
+
+        use crate::env::tests::{client_at, open, recv};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let forwarder = Hub::forward(client_at(&origin), tx);
+
+        let mut tickets = 0;
+        let (_, mut socket) = open(&listener, &mut tickets).await;
+        let request = loop {
+            let frame = recv(&mut socket).await;
+            if frame["tag"] == "orchestration.subscribeShell" {
+                break frame;
+            }
+        };
+        // Held, the subscription is quiet: no interrupt arrives.
+        let quiet = tokio::time::timeout(Duration::from_millis(300), recv(&mut socket)).await;
+        assert!(quiet.is_err(), "interrupted while held: {quiet:?}");
+
+        drop(forwarder);
+        let interrupt =
+            json!({"_tag": "Interrupt", "requestId": request["id"], "interruptors": []});
+        assert_eq!(recv(&mut socket).await, interrupt);
+        // And it stays ended: nothing reconnects, and the stream hears no more from the machine.
+        drop(socket);
+        let again = tokio::time::timeout(Duration::from_millis(900), open(&listener, &mut tickets));
+        assert!(again.await.is_err(), "dialled again after the drop");
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                matches!(
+                    event,
+                    (_, WatchEvent::Item(_) | WatchEvent::Reconnecting { .. })
+                ),
+                "{event:?}"
+            );
+        }
+    }
 
     #[test]
     fn thread_refs_round_trip_and_bare_ids_are_home() {

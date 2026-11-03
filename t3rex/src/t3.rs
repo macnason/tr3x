@@ -55,12 +55,7 @@ pub fn capabilities(env: &Env) -> Capabilities {
     Capabilities::of(&env.capabilities())
 }
 
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+pub use t3client::auth::now_ms;
 
 pub fn iso(ms: i64) -> String {
     // Civil-from-days, so no date crate is needed for one timestamp format.

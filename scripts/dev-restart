@@ -11,7 +11,8 @@ case "$T3REX_STATE_DIR" in
 esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 REX=${T3REX_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
-cargo build --release -p t3rex --manifest-path "$HERE/Cargo.toml" 2>&1 | grep -E '^(error|warning: unused)' -A5 || true
+# A build that fails stops here, with cargo's own output: nothing is killed or deleted below.
+cargo build --release --quiet -p t3rex --manifest-path "$HERE/Cargo.toml"
 pkill -f "$HERE/target/release/t3rex sync" || true
 if [ -f "$T3REX_STATE_DIR/state.json" ]; then
   /usr/bin/python3 -I -c "

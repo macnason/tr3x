@@ -6,7 +6,7 @@
 //! Mac; `migrate` moves it over.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,37 @@ fn path() -> PathBuf {
     dir().join("state.json")
 }
 
+/// The state file, and the state that last reached it. Sync reconciles every few seconds and
+/// on every burst of events, and almost always finds nothing to change: `save` then writes
+/// nothing.
+pub struct Disk {
+    path: PathBuf,
+    saved: State,
+}
+
+impl Disk {
+    /// `found` is what `State::load` read from the file, before any change of ours.
+    pub fn new(found: State) -> Disk {
+        Disk::at(path(), found)
+    }
+
+    pub fn at(path: PathBuf, found: State) -> Disk {
+        Disk { path, saved: found }
+    }
+
+    /// Writes `state` unless the file already holds it. What counts as held moves only when a
+    /// write works, so one that failed is tried again by the next call. A file that has gone
+    /// missing is written again. Returns whether it wrote.
+    pub fn save(&mut self, state: &State) -> Result<bool> {
+        if *state == self.saved && self.path.exists() {
+            return Ok(false);
+        }
+        state.save_to(&self.path)?;
+        self.saved = state.clone();
+        Ok(true)
+    }
+}
+
 /// Version 1's whole file.
 #[derive(Deserialize)]
 struct V1 {
@@ -79,7 +110,11 @@ struct V1 {
 
 impl State {
     pub fn load() -> State {
-        std::fs::read(path())
+        State::load_from(&path())
+    }
+
+    fn load_from(path: &Path) -> State {
+        std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .map(State::read)
@@ -135,8 +170,7 @@ impl State {
     }
 
     /// Writes through a temporary file, so a reader never sees half a file.
-    pub fn save(&self) -> Result<()> {
-        let path = path();
+    fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -180,6 +214,93 @@ impl State {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn group_with(thread: &str, window: &str) -> State {
+        let mut state = State {
+            version: 2,
+            ..State::default()
+        };
+        let mut group = Group::default();
+        group.windows.insert(
+            thread.into(),
+            Window {
+                window_id: window.into(),
+                label: "A".into(),
+            },
+        );
+        state.groups.insert(String::new(), group);
+        state
+    }
+
+    #[test]
+    fn unchanged_state_is_not_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let state = group_with("e/a", "w1");
+        let mut disk = Disk::at(file.clone(), State::default());
+        assert!(disk.save(&state).unwrap());
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(State::read(serde_json::from_str(&written).unwrap()), state);
+
+        // A write would replace this; a skipped one leaves it alone.
+        std::fs::write(&file, "untouched").unwrap();
+        assert!(!disk.save(&state).unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "untouched");
+
+        let mut changed = state.clone();
+        changed
+            .groups
+            .get_mut("")
+            .unwrap()
+            .dismissed
+            .insert("e/b".into(), "u1".into());
+        assert!(disk.save(&changed).unwrap());
+        assert_eq!(State::load_from(&file), changed);
+        assert!(!disk.save(&changed).unwrap());
+
+        // Found as it is on disk (a restart), nothing to do; found as it was before a
+        // migration, the migrated state is written.
+        let mut restarted = Disk::at(file.clone(), State::load_from(&file));
+        assert!(!restarted.save(&changed).unwrap());
+        let mut migrating = Disk::at(
+            file.clone(),
+            State {
+                version: 1,
+                ..changed.clone()
+            },
+        );
+        assert!(migrating.save(&changed).unwrap());
+    }
+
+    #[test]
+    fn a_missing_file_is_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let state = group_with("e/a", "w1");
+        let mut disk = Disk::at(file.clone(), State::default());
+        disk.save(&state).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(disk.save(&state).unwrap());
+        assert_eq!(State::load_from(&file), state);
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        // The state file's folder is a file: nothing can be written there.
+        let blocked = dir.path().join("dir");
+        std::fs::write(&blocked, "in the way").unwrap();
+        let file = blocked.join("state.json");
+        let state = group_with("e/a", "w1");
+        let mut disk = Disk::at(file.clone(), State::default());
+        assert!(disk.save(&state).is_err());
+        assert!(disk.save(&state).is_err());
+
+        std::fs::remove_file(&blocked).unwrap();
+        assert!(disk.save(&state).unwrap());
+        assert_eq!(State::load_from(&file), state);
+        assert!(!disk.save(&state).unwrap());
+    }
 
     #[test]
     fn version_one_moves_to_this_mac() {

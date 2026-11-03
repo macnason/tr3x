@@ -3,7 +3,8 @@
 //! access and workspace chips. The project chip also adds a folder as a project, and with no
 //! projects yet the composer opens on that. Enter launches the thread through T3's
 //! `orchestration.launchThread`, and the window becomes that thread's: this pane turns into the
-//! conversation and the Reply pane opens under it.
+//! conversation, with Reply under it, in the same pane or, with the `reply` setting at `pane`,
+//! a pane of its own.
 //!
 //! With more than one machine to choose from, a machine chip comes first: each paired machine,
 //! and the ones on the tailnet that run T3 and aren't paired, which pair from there. Choosing
@@ -15,7 +16,6 @@
 //! sync takes the window as the thread's as soon as T3 reports the thread.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -36,25 +36,20 @@ use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
 use crate::compose::{Editor, Escape, edit, wrap};
 use crate::icons::{self, Icon, Painter};
 use crate::paste::{self, Got, Image};
+use crate::pick;
 use crate::picker::{self, Chip, Item, Menu, MenuKey, Settings};
 use crate::picture::{self, Tray};
 use crate::rex::{Rex, lua_str};
 use crate::slash::{self, Slash};
 use crate::t3;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Field {
     Machine,
     Project,
-    Model,
-    Effort,
-    Access,
+    /// Model, effort or access: the same three a running thread's picker offers.
+    Setting(pick::Field),
     Workspace,
     Branch,
 }
@@ -281,11 +276,11 @@ impl NewThread {
         if self.machines.len() > 1 || !self.candidates.is_empty() {
             out.push(Field::Machine);
         }
-        out.extend([Field::Project, Field::Model]);
+        out.extend([Field::Project, Field::Setting(pick::Field::Model)]);
         if !picker::effort_items(&self.config, &self.settings).is_empty() {
-            out.push(Field::Effort);
+            out.push(Field::Setting(pick::Field::Effort));
         }
-        out.push(Field::Access);
+        out.push(Field::Setting(pick::Field::Access));
         if self.is_repo() {
             out.push(Field::Workspace);
             if self.worktree {
@@ -313,15 +308,7 @@ impl NewThread {
                         .to_string(),
                 )
             }
-            Field::Model => (
-                self.logos.get(&self.settings.instance).cloned(),
-                self.settings.model_label(&self.config),
-            ),
-            Field::Effort => (
-                None,
-                self.settings.effort_label(&self.config).unwrap_or_default(),
-            ),
-            Field::Access => (None, self.settings.mode_label()),
+            Field::Setting(f) => return self.settings.chip(f, &self.config, &self.logos),
             Field::Workspace => (
                 None,
                 if self.worktree {
@@ -386,21 +373,7 @@ impl NewThread {
                     .collect(),
                 Some(self.project.clone()),
             ),
-            Field::Model => (
-                picker::model_items(&self.config, &self.logos),
-                Some(format!(
-                    "{}/{}",
-                    self.settings.instance, self.settings.model
-                )),
-            ),
-            Field::Effort => (
-                picker::effort_items(&self.config, &self.settings),
-                picker::effort_now(&self.config, &self.settings),
-            ),
-            Field::Access => (
-                picker::mode_items(&self.config, &self.settings),
-                Some(self.settings.mode.clone()),
-            ),
+            Field::Setting(f) => self.settings.menu(f, &self.config, &self.logos),
             Field::Workspace => (
                 vec![
                     Item::new("local", "Local"),
@@ -439,9 +412,7 @@ impl NewThread {
             },
             Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
-            Field::Model => self.settings.set_model(&self.config, &id),
-            Field::Effort => self.settings.effort = Some(id),
-            Field::Access => self.settings.mode = id,
+            Field::Setting(f) => self.settings.choose(f, &self.config, id),
             Field::Workspace => self.worktree = id == "worktree",
             Field::Branch => self.base = Some(id),
         }
@@ -1138,7 +1109,8 @@ async fn set_label(label: &str) -> Result<()> {
     Rex::find().lua(&session, &script).await.map(drop)
 }
 
-/// The Reply pane under this one, for `thread`, run as `program`.
+/// The Reply pane under this one, for `thread`, run as `program`, when Reply has a pane of
+/// its own.
 async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) -> Result<()> {
     let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
     else {
@@ -1149,17 +1121,14 @@ async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) 
     let script = format!(
         r#"local d = rex.json.decode({})
 local r, err = rex.session.new_split{{ anchor_id = d.block, direction = "vertical", side = "after",
-  ratio = 0.86, focus = true,
+  ratio = {split}, focus = true,
   layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = "Reply",
     options = {{ shell = "none", login = false, command = d.argv, cwd = d.cwd, exit = {{ on_completion = false }} }} }} }} }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
--- The app evens out a new split when its Autobalance setting is on; set the ratio again after.
-rex.sleep(0.5)
-rex.session.resize_pane{{ before_block_id = d.block, after_block_id = r.block_ids[1],
-  direction = "vertical", ratio = 0.86 }}
 return {{}}"#,
-        lua_str(&data.to_string())
+        lua_str(&data.to_string()),
+        split = crate::reply::SPLIT,
     );
     Rex::find().lua(&session, &script).await.map(drop)
 }
@@ -1314,7 +1283,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         welcome,
         cols: cols as usize,
         rows: rows as usize,
-        painter: Painter,
+        painter: Painter::default(),
         chip_spans: Vec::new(),
         chip_row: 0,
         chat_width: crate::width::current().0,
@@ -1474,10 +1443,12 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         .and_then(|p| p["workspaceRoot"].as_str())
         .filter(|_| ui.client.is_local())
         .map(str::to_string);
-    // Both panes run under the provider's name, so Rex's sidebar shows its glyph.
+    // The pane runs under the provider's name, so Rex's sidebar shows its glyph.
     let driver = icons::driver_of(Some(&ui.config), &ui.settings.instance).to_string();
     let program = icons::as_program(&icons::real_exe(), &driver);
-    if let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await {
+    if crate::reply::own_pane()
+        && let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await
+    {
         eprintln!("t3rex: couldn't open the Reply pane: {e:#}");
     }
     if let Some(dir) = &cwd {

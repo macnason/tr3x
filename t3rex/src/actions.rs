@@ -223,6 +223,14 @@ pub const ALL: &[Action] = &[
         ),
         ..NONE
     },
+    Action {
+        slash: slash(
+            "reply",
+            "Reply inline or in its own pane",
+            Some("inline, pane"),
+        ),
+        ..NONE
+    },
 ];
 
 /// The `/` commands Reply runs itself.

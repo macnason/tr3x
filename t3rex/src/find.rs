@@ -13,7 +13,6 @@
 //! `orchestration.getArchivedShellSnapshot`.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,12 +32,7 @@ use crate::picker::{Item, Menu, MenuKey};
 use crate::rex::Rex;
 use crate::state::State;
 use crate::t3::{self, Lifecycle};
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 /// Where a thread is, as the finder groups them, in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,36 +108,7 @@ impl Found {
 
 /// `until 3pm`, `until tomorrow 9am`, `until Tue 9am` or `until 12 Nov`, in local time.
 fn until(at: i64, now: i64, offset_minutes: i64) -> String {
-    let local = |ms: i64| ms + offset_minutes * 60_000;
-    let day = 86_400_000;
-    let days = local(at).div_euclid(day) - local(now).div_euclid(day);
-    let minutes = local(at).rem_euclid(day) / 60_000;
-    let (h, m) = (minutes / 60, minutes % 60);
-    let hour = match h % 12 {
-        0 => 12,
-        h => h,
-    };
-    let half = if h < 12 { "am" } else { "pm" };
-    let clock = if m == 0 {
-        format!("{hour}{half}")
-    } else {
-        format!("{hour}:{m:02}{half}")
-    };
-    // 1970-01-01 was a Thursday.
-    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
-        [local(at).div_euclid(day).rem_euclid(7) as usize];
-    match days {
-        ..=0 => format!("until {clock}"),
-        1 => format!("until tomorrow {clock}"),
-        2..=6 => format!("until {weekday} {clock}"),
-        _ => {
-            let date = t3::iso(local(at));
-            let month = [
-                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-            ][date[5..7].parse::<usize>().unwrap_or(1) - 1];
-            format!("until {} {month}", date[8..10].trim_start_matches('0'))
-        }
-    }
+    format!("until {}", crate::chat::when(at, now, offset_minutes))
 }
 
 /// `just now`, `5m ago`, `3h ago`, `2d ago`, `6w ago`, `1y ago`.
@@ -363,7 +328,7 @@ pub async fn run(client: Option<String>) -> Result<()> {
     let mut projects: HashMap<(String, String), String> = HashMap::new();
     let mut menu = Menu::default();
     (menu.fuzzy, menu.details_right, menu.hide_filter) = (true, true, true);
-    let mut painter = Painter;
+    let mut painter = Painter::default();
     let mut note: Option<(String, bool)> = None;
     let mut busy = false;
     let (done_tx, mut done) = mpsc::unbounded_channel::<Outcome>();
@@ -569,6 +534,8 @@ mod tests {
         assert_eq!(until(now + 12 * 24 * h + 9 * h, now, 0), "until 12 Nov");
         // Local time: ten hours ahead, 3pm UTC is 1am the next day.
         assert_eq!(until(now + 15 * h, now, 600), "until tomorrow 1am");
+        // A wake that passed while the list was open, on an earlier day.
+        assert_eq!(until(now - 9 * h, now, 0), "until yesterday 3pm");
         assert_eq!(ago(now - 30_000, now), "just now");
         assert_eq!(ago(now - 5 * 60_000, now), "5m ago");
         assert_eq!(ago(now - 3 * h, now), "3h ago");

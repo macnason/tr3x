@@ -11,18 +11,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use t3client::env::WatchEvent;
-use t3client::hub::{Hub, ThreadRef};
+use t3client::env::{Env, WatchEvent};
+use t3client::hub::{Forwarder, Hub, ThreadRef};
 use t3client::inbox::{Capabilities, Inbox, Place};
 use t3client::projection::ShellState;
 
 use crate::machines::Sessions;
 use crate::rex::{Rex, lua_str};
-use crate::state::{Group, Next, State, Window};
+use crate::state::{Disk, Group, Next, State, Window};
 use crate::t3;
 
 pub const SESSION_LABEL: &str = "T3 Code";
@@ -279,6 +280,17 @@ pub struct Plan {
     pub order: Vec<Slot>,
     /// Threads whose window the user closed, to settle in T3.
     pub settle: Vec<ThreadRef>,
+    /// Windows whose panes don't match the `reply` setting, to reshape in place.
+    pub rebuild: Vec<Rebuild>,
+}
+
+/// A thread's window with the panes it has, `blocks`, which the shape the setting asks for
+/// replaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rebuild {
+    pub window: String,
+    pub blocks: Vec<String>,
+    pub want: Want,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +305,7 @@ impl Plan {
             && self.create.is_empty()
             && self.relabel.is_empty()
             && self.order.is_empty()
+            && self.rebuild.is_empty()
     }
 }
 
@@ -531,28 +544,71 @@ fn adopt(
     extra
 }
 
+/// The windows in `group` whose shape isn't the one the setting asks for, Reply in a pane of
+/// its own or not, with what to run in their place.
+fn reshape(windows: &[Value], group: &Group, wants: &[Want], own_pane: bool) -> Vec<Rebuild> {
+    group
+        .windows
+        .iter()
+        .filter_map(|(key, w)| {
+            let window = windows
+                .iter()
+                .find(|x| x["window_id"] == w.window_id.as_str())?;
+            let blocks: Vec<&Value> = window["layers"]
+                .as_array()?
+                .iter()
+                .filter(|l| l["kind"] != "floating")
+                .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
+                .collect();
+            if crate::reply::shaped(window, own_pane) {
+                return None;
+            }
+            Some(Rebuild {
+                window: w.window_id.clone(),
+                blocks: blocks
+                    .iter()
+                    .filter_map(|b| b["block_id"].as_str().map(str::to_string))
+                    .collect(),
+                want: wants.iter().find(|want| &want.key() == key)?.clone(),
+            })
+        })
+        .collect()
+}
+
 /// The Lua that carries out `plan` in one connection, so the blocks it starts are disowned by
 /// the client that made them and size to whoever views them.
 /// Each pane runs t3rex under the name of the thread's provider, so Rex's sidebar shows that
 /// provider's glyph for the window.
-pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Value>) -> String {
-    let create: Vec<Value> = plan
-        .create
+/// With `own_pane`, each window has Reply in a pane of its own under the conversation.
+pub fn script(
+    plan: &Plan,
+    exe: &std::path::Path,
+    configs: &HashMap<String, Value>,
+    own_pane: bool,
+) -> String {
+    let pane = |want: &Want| {
+        let config = configs.get(&want.thread.env);
+        let program =
+            crate::icons::as_program(exe, crate::icons::driver_of(config, &want.instance));
+        let program = program.to_string_lossy();
+        let key = want.key();
+        json!({
+            "thread": key,
+            "tag": tag(&want.thread),
+            "label": want.label,
+            "cwd": want.cwd,
+            "chat": chat_argv(&program, &["chat", &key]),
+            "compose": chat_argv(&program, &["compose", &key]),
+        })
+    };
+    let create: Vec<Value> = plan.create.iter().map(pane).collect();
+    let rebuild: Vec<Value> = plan
+        .rebuild
         .iter()
-        .map(|want| {
-            let config = configs.get(&want.thread.env);
-            let program =
-                crate::icons::as_program(exe, crate::icons::driver_of(config, &want.instance));
-            let program = program.to_string_lossy();
-            let key = want.key();
-            json!({
-                "thread": key,
-                "tag": tag(&want.thread),
-                "label": want.label,
-                "cwd": want.cwd,
-                "chat": chat_argv(&program, &key),
-                "compose": crate::rex::pane_argv(&program, &["compose", &key]),
-            })
+        .map(|r| {
+            let mut pane = pane(&r.want);
+            pane["blocks"] = json!(r.blocks);
+            pane
         })
         .collect();
     let order: Vec<Value> = plan
@@ -566,8 +622,10 @@ pub fn script(plan: &Plan, exe: &std::path::Path, configs: &HashMap<String, Valu
     let data = json!({
         "close": plan.close,
         "create": create,
+        "rebuild": rebuild,
         "relabel": plan.relabel.iter().map(|(w, l)| json!({"window": w, "label": l})).collect::<Vec<_>>(),
         "order": order,
+        "split": own_pane.then_some(crate::reply::SPLIT),
     });
     format!(
         r#"local plan = rex.json.decode({data})
@@ -577,6 +635,13 @@ local out = {{ created = {{}}, errors = {{}} }}
 local function pane(argv, cwd, label)
   return {{ block = {{ flavor = term, label = label, options = {{ shell = "none", login = false, command = argv, cwd = cwd, exit = {{ on_completion = false }} }} }} }}
 end
+-- A thread's window: the conversation, and Reply under it when it has a pane of its own.
+local function shape(c)
+  if plan.split then
+    return rex.layout.vertical(plan.split, pane(c.chat, c.cwd, c.tag), pane(c.compose, c.cwd, "Reply"))
+  end
+  return pane(c.chat, c.cwd, c.tag)
+end
 for _, id in ipairs(plan.close or {{}}) do
   local _, err = rex.session.close_window{{ window_id = id }}
   if err then table.insert(out.errors, err) end
@@ -585,12 +650,24 @@ for _, c in ipairs(plan.create or {{}}) do
   local w, err = rex.session.new_window{{
     window_label = c.label,
     focus = false,
-    layout = rex.layout.vertical(0.86, pane(c.chat, c.cwd, c.tag), pane(c.compose, c.cwd, "Reply")),
+    layout = shape(c),
   }}
   if w then
     out.created[c.thread] = w.window_id
   else
     table.insert(out.errors, err)
+  end
+end
+-- The new panes go in beside the old ones, which then close, so the window keeps its place.
+for _, r in ipairs(plan.rebuild or {{}}) do
+  local _, err = rex.session.new_split{{ anchor_id = r.blocks[1], direction = "vertical",
+    side = "after", ratio = 0.5, focus = false, layout = shape(r) }}
+  if err then
+    table.insert(out.errors, err)
+  else
+    for _, b in ipairs(r.blocks) do
+      rex.call("block.close", {{ block_id = b, session_id = rex.session_id }})
+    end
   end
 end
 for _, r in ipairs(plan.relabel or {{}}) do
@@ -607,10 +684,10 @@ return out
     )
 }
 
-/// A conversation pane's command line. A development sync (`T3REX_PASSIVE`) starts panes that
-/// only read, beside an installed one.
-fn chat_argv(program: &str, key: &str) -> Value {
-    let mut argv = crate::rex::pane_argv(program, &["chat", key]);
+/// A thread pane's command line, `args` after the program. A development sync
+/// (`T3REX_PASSIVE`) starts panes that only read, beside an installed one.
+fn chat_argv(program: &str, args: &[&str]) -> Value {
+    let mut argv = crate::rex::pane_argv(program, args);
     if std::env::var_os("T3REX_PASSIVE").is_some() {
         argv.push("--passive".into());
     }
@@ -681,6 +758,8 @@ pub struct Syncer {
     pub rex: Rex,
     pub exe: PathBuf,
     pub state: State,
+    /// The state file, written only when `state` differs from what it holds.
+    pub disk: Disk,
     /// Put the merged session, or this Mac's, first in Rex's list when it's made.
     pub first: bool,
     /// The `rex do` scripts that turn a New Tab in each session into a new thread, by session.
@@ -703,6 +782,11 @@ pub struct SessionSpec {
 }
 
 impl Syncer {
+    /// Makes the state file hold `state`, writing only if it doesn't already.
+    pub fn persist(&mut self) -> Result<()> {
+        self.disk.save(&self.state).map(drop)
+    }
+
     /// The group's session, made if it is gone.
     async fn session(&mut self, spec: &SessionSpec) -> Result<String> {
         let sessions = self.rex.sessions().await?;
@@ -720,7 +804,7 @@ impl Syncer {
             session_id: Some(id.clone()),
             ..Group::default()
         };
-        self.state.save()?;
+        self.persist()?;
         if self.first
             && spec.first
             && let Err(e) = self.rex.move_session(&id, 1).await
@@ -767,7 +851,7 @@ impl Syncer {
         let Some(group) = self.state.groups.remove(key) else {
             return Ok(());
         };
-        self.state.save()?;
+        self.persist()?;
         if let Some(id) = group.session_id {
             self.watchers.remove(&id);
             let args = json!({ "session_id": id }).to_string();
@@ -818,13 +902,17 @@ impl Syncer {
         let mut plan = plan(wants, &present, group, health);
         self.closed.append(&mut plan.settle);
         plan.close.append(&mut extra);
+        let closing = plan.close.clone();
+        let own_pane = crate::reply::own_pane();
+        plan.rebuild = reshape(windows, group, wants, own_pane);
+        plan.rebuild.retain(|r| !closing.contains(&r.window));
         if plan.is_empty() {
-            self.state.save()?;
+            self.persist()?;
             return Ok(false);
         }
         let result = self
             .rex
-            .lua(&session, &script(&plan, &self.exe, &self.configs))
+            .lua(&session, &script(&plan, &self.exe, &self.configs, own_pane))
             .await?;
         let group = self.state.groups.entry(spec.key.clone()).or_default();
         for (key, id) in result["created"].as_object().into_iter().flatten() {
@@ -843,7 +931,7 @@ impl Syncer {
         for error in result["errors"].as_array().into_iter().flatten() {
             eprintln!("t3rex: rex: {error}");
         }
-        self.state.save()?;
+        self.persist()?;
         Ok(true)
     }
 }
@@ -864,6 +952,9 @@ struct Track {
     configured: bool,
     /// When to subscribe again after T3 refused the subscription.
     retry_at: Option<Instant>,
+    /// The machine's shell subscription. The track owns it: forgetting the machine, or sync
+    /// ending, drops the track and with it the subscription.
+    forwarder: Option<Forwarder>,
 }
 
 impl Track {
@@ -1020,6 +1111,36 @@ fn machines_stamp(hub: &Hub) -> Option<std::time::SystemTime> {
         .ok()
 }
 
+type Shells = tokio::sync::mpsc::UnboundedSender<(String, WatchEvent)>;
+
+/// Gives each of `envs` not followed yet a track and a shell subscription, and lets go of the
+/// tracks of machines no longer among them, subscriptions with them. A machine that's only out
+/// of reach stays among `envs` and keeps reconnecting on its own. Returns the names of the
+/// machines newly followed.
+fn follow_machines(
+    tracks: &mut BTreeMap<String, Track>,
+    envs: &[Arc<Env>],
+    tx: &Shells,
+    now: Instant,
+) -> Vec<String> {
+    let mut followed = Vec::new();
+    for env in envs {
+        if !tracks.contains_key(env.id()) {
+            followed.push(env.name().to_string());
+            tracks.insert(
+                env.id().to_string(),
+                Track {
+                    down_since: Some(now),
+                    forwarder: Some(Hub::forward(env.clone(), tx.clone())),
+                    ..Track::default()
+                },
+            );
+        }
+    }
+    tracks.retain(|id, _| envs.iter().any(|e| e.id() == id));
+    followed
+}
+
 /// Every machine's shell, reconciling the session after each burst of changes and every few
 /// seconds, which picks up snoozes that end, windows closed in Rex and machines that go quiet.
 /// Each machine connects and reconnects on its own. Returns only when it fails.
@@ -1035,34 +1156,29 @@ async fn follow(
             "T3 Code isn't set up on this Mac, and Rex isn't paired with another machine"
         );
     }
-    let mut state = State::load();
+    let found = State::load();
+    let mut state = found.clone();
     if !home.is_empty() {
         state.migrate(&home);
-        state.save()?;
     }
     let mut syncer = Syncer {
         rex: Rex::find(),
         exe: crate::icons::real_exe(),
         state,
+        disk: Disk::new(found),
         first,
         watchers: HashMap::new(),
         configs: HashMap::new(),
         closed: Vec::new(),
     };
+    if !home.is_empty() {
+        syncer.persist()?;
+    }
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     let (config_tx, mut configs) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
     let mut tracks: BTreeMap<String, Track> = BTreeMap::new();
     let started = Instant::now();
-    for env in hub.envs() {
-        Hub::forward(env.clone(), tx.clone());
-        tracks.insert(
-            env.id().to_string(),
-            Track {
-                down_since: Some(started),
-                ..Track::default()
-            },
-        );
-    }
+    follow_machines(&mut tracks, hub.envs(), &tx, started);
     let mut stamp = machines_stamp(&hub);
     let mut inbox = Inbox::default();
     let mut dirty = false;
@@ -1140,20 +1256,9 @@ async fn follow(
         if machines_stamp(&hub) != stamp {
             stamp = machines_stamp(&hub);
             hub = t3::hub();
-            for env in hub.envs() {
-                if !tracks.contains_key(env.id()) {
-                    eprintln!("t3rex: following {}", env.name());
-                    Hub::forward(env.clone(), tx.clone());
-                    tracks.insert(
-                        env.id().to_string(),
-                        Track {
-                            down_since: Some(now),
-                            ..Track::default()
-                        },
-                    );
-                }
+            for name in follow_machines(&mut tracks, hub.envs(), &tx, now) {
+                eprintln!("t3rex: following {name}");
             }
-            tracks.retain(|id, _| hub.envs().iter().any(|e| e.id() == id));
         }
         for env in hub.envs() {
             let Some(track) = tracks.get_mut(env.id()) else {
@@ -1161,7 +1266,8 @@ async fn follow(
             };
             if track.retry_at.is_some_and(|at| at <= now) {
                 track.retry_at = None;
-                Hub::forward(env.clone(), tx.clone());
+                // The refused subscription is over; this replaces it.
+                track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
             }
             if track.shell.synchronized && !track.configured {
                 track.configured = true;
@@ -1320,7 +1426,7 @@ async fn follow(
         });
         if next != syncer.state.next {
             syncer.state.next = next;
-            syncer.state.save()?;
+            syncer.persist()?;
         }
         // A plain settle, never stopping a run: a thread that started again since stays hidden
         // until it changes.
@@ -1542,6 +1648,39 @@ mod tests {
     }
 
     #[test]
+    fn windows_take_the_shape_the_setting_asks_for() {
+        let mut group = Group::default();
+        group.windows.insert("home-env/a".into(), win("w-a", "A"));
+        group.windows.insert("home-env/b".into(), win("w-b", "B"));
+        let windows = vec![
+            tagged_window("w-a", "home-env/a"),
+            json!({"window_id": "w-b", "label": "B", "layers": [{"blocks": [
+                {"block_id": "b9", "label": "t3:home-env/b"}]}]}),
+        ];
+        let wants: Vec<Want> = ["a", "b"]
+            .iter()
+            .map(|t| Want {
+                thread: ThreadRef::new("home-env", *t),
+                label: t.to_string(),
+                cwd: None,
+                updated_at: String::new(),
+                place: Place::Open,
+                instance: String::new(),
+                settles: true,
+            })
+            .collect();
+        let rebuild = reshape(&windows, &group, &wants, false);
+        assert_eq!(rebuild.len(), 1);
+        assert_eq!(rebuild[0].window, "w-a");
+        assert_eq!(rebuild[0].blocks, vec!["b1".to_string(), "b2".to_string()]);
+        assert_eq!(rebuild[0].want.key(), "home-env/a");
+        let rebuild = reshape(&windows, &group, &wants, true);
+        assert_eq!(rebuild.len(), 1);
+        assert_eq!(rebuild[0].window, "w-b");
+        assert_eq!(rebuild[0].blocks, vec!["b9".to_string()]);
+    }
+
+    #[test]
     fn lost_windows_are_adopted_and_duplicates_closed() {
         let mut group = Group::default();
         group.windows.insert("home-env/a".into(), win("w-a", "A"));
@@ -1754,5 +1893,278 @@ mod tests {
         assert_eq!(label("  fix\tthe\nthing "), "fix the thing");
         assert_eq!(label(""), "Untitled");
         assert_eq!(label(&"x".repeat(300)).chars().count(), 120);
+    }
+
+    /// A fake T3 that holds every connection open and counts them, whole and still open.
+    struct Fake {
+        origin: String,
+        total: Arc<std::sync::atomic::AtomicUsize>,
+        live: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Fake {
+        /// Answers nothing: a machine that is subscribing but hasn't been heard from. With
+        /// `hang_up`, closes each connection as soon as it opens: a machine that's out of reach.
+        async fn start(hang_up: bool) -> Fake {
+            use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+            use tokio::io::AsyncReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let (total, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (t, l) = (total.clone(), live.clone());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    t.fetch_add(1, SeqCst);
+                    if hang_up {
+                        continue;
+                    }
+                    l.fetch_add(1, SeqCst);
+                    let l = l.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+                        l.fetch_sub(1, SeqCst);
+                    });
+                }
+            });
+            Fake {
+                origin,
+                total,
+                live,
+            }
+        }
+
+        fn total(&self) -> usize {
+            self.total.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Waits until `count` connections are open, and fails if that doesn't happen.
+        async fn live(&self, count: usize) {
+            for _ in 0..100 {
+                if self.live.load(std::sync::atomic::Ordering::SeqCst) == count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!(
+                "{} open connections, wanted {count}",
+                self.live.load(std::sync::atomic::Ordering::SeqCst)
+            );
+        }
+    }
+
+    fn env_at(id: &str, origin: &str) -> Arc<Env> {
+        use t3client::store::{Machine, Store, Via};
+        let machine = Machine {
+            id: id.into(),
+            label: id.into(),
+            alias: None,
+            origins: vec![origin.into()],
+            ssh: None,
+            via: Via::Link,
+            version: String::new(),
+        };
+        Arc::new(Env::new(Store::new(std::env::temp_dir()), machine))
+    }
+
+    /// Each machine gets one subscription for as long as it's followed. Forgetting it ends that
+    /// one alone, pairing it again makes one new one rather than a second beside the old, and a
+    /// machine that is merely out of reach keeps reconnecting on its own.
+    #[tokio::test]
+    async fn a_followed_machine_has_one_subscription_until_it_is_forgotten() {
+        let (a, b, c) = (
+            Fake::start(false).await,
+            Fake::start(false).await,
+            Fake::start(true).await,
+        );
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let mut tracks = BTreeMap::new();
+        let (env_a, env_b, env_c) = (
+            env_at("a", &a.origin),
+            env_at("b", &b.origin),
+            env_at("c", &c.origin),
+        );
+
+        let followed = follow_machines(
+            &mut tracks,
+            &[env_a.clone(), env_b.clone(), env_c.clone()],
+            &tx,
+            Instant::now(),
+        );
+        assert_eq!(followed, ["a", "b", "c"]);
+        a.live(1).await;
+        b.live(1).await;
+        // Out of reach: it hangs up on each try, and sync tries again.
+        for _ in 0..100 {
+            if c.total() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(c.total() >= 2, "{} tries", c.total());
+
+        // Nothing changed: nobody subscribes twice.
+        let envs = [env_a.clone(), env_b, env_c.clone()];
+        assert!(follow_machines(&mut tracks, &envs, &tx, Instant::now()).is_empty());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!((a.total(), b.total()), (1, 1));
+
+        // b is forgotten: its subscription goes, the others stay.
+        let envs = [env_a.clone(), env_c.clone()];
+        assert!(follow_machines(&mut tracks, &envs, &tx, Instant::now()).is_empty());
+        assert_eq!(tracks.keys().collect::<Vec<_>>(), ["a", "c"]);
+        b.live(0).await;
+        a.live(1).await;
+
+        // b is paired again: one subscription, though the old one's machine had the same id.
+        let envs = [env_a, env_at("b", &b.origin), env_c];
+        assert_eq!(
+            follow_machines(&mut tracks, &envs, &tx, Instant::now()),
+            ["b"]
+        );
+        b.live(1).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            (b.total(), b.live.load(std::sync::atomic::Ordering::SeqCst)),
+            (2, 1)
+        );
+        assert_eq!(a.total(), 1);
+
+        // Sync ends: every subscription with it.
+        drop(tracks);
+        a.live(0).await;
+        b.live(0).await;
+    }
+
+    /// A Rex that answers `ls` and `session inspect` from files and records what it was asked.
+    struct FakeRex {
+        dir: tempfile::TempDir,
+    }
+
+    impl FakeRex {
+        fn new(windows: Value) -> FakeRex {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("rex");
+            std::fs::write(
+                &bin,
+                "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$*\" >> \"$d/calls\"\n\
+                 case \"$2\" in\n ls) cat \"$d/ls.json\";;\n session) cat \"$d/inspect.json\";;\n \
+                 do) cat > /dev/null;;\nesac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let rex = FakeRex { dir };
+            std::fs::write(
+                rex.dir.path().join("ls.json"),
+                json!({"sessions": [{"session_id": "s1", "label": "T3 Code"}]}).to_string(),
+            )
+            .unwrap();
+            rex.show(windows);
+            rex
+        }
+
+        /// What `session inspect` shows from now on.
+        fn show(&self, windows: Value) {
+            let view = json!({"session_id": "s1", "windows": windows});
+            std::fs::write(self.dir.path().join("inspect.json"), view.to_string()).unwrap();
+        }
+
+        fn bin(&self) -> Rex {
+            Rex {
+                bin: self.dir.path().join("rex"),
+            }
+        }
+
+        /// The window of `tag`: its conversation, and Reply in a pane of its own if that's the
+        /// setting, so t3rex has nothing to reshape.
+        fn window(id: &str, tag: &str) -> Value {
+            let mut blocks = vec![json!({"block_id": "b1", "label": format!("t3:{tag}")})];
+            if crate::reply::own_pane() {
+                blocks.push(json!({"block_id": "b2", "label": "Reply"}));
+            }
+            json!({"window_id": id, "label": "A", "layers": [{"blocks": blocks}]})
+        }
+    }
+
+    /// Reconciles session `s1` once, wanting thread `e/a`.
+    async fn reconcile_once(syncer: &mut Syncer) -> bool {
+        let a = want("e/a", "A");
+        let known: HashSet<String> = [a.key()].into();
+        let spec = SessionSpec {
+            key: String::new(),
+            label: "T3 Code".into(),
+            env: None,
+            first: false,
+        };
+        syncer
+            .reconcile(&spec, &[a], &known, &["e".to_string()], "e", &|_| {
+                Health::READY
+            })
+            .await
+            .unwrap()
+    }
+
+    fn saved_windows(file: &std::path::Path) -> Vec<String> {
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        on_disk["groups"][""]["windows"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A pass that has nothing to ask Rex for leaves the file alone, but not when it still
+    /// changed what t3rex knows: a window it takes back, or one the user closed.
+    #[tokio::test]
+    async fn a_pass_with_nothing_to_do_writes_only_what_it_learned() {
+        let rex = FakeRex::new(json!([]));
+        let file = rex.dir.path().join("state.json");
+        let mut state = State {
+            version: 2,
+            ..State::default()
+        };
+        state.groups.insert(
+            String::new(),
+            Group {
+                session_id: Some("s1".into()),
+                ..Group::default()
+            },
+        );
+        let mut syncer = Syncer {
+            rex: rex.bin(),
+            exe: PathBuf::from("t3rex"),
+            disk: Disk::at(file.clone(), State::default()),
+            state,
+            first: false,
+            watchers: HashMap::new(),
+            configs: HashMap::new(),
+            closed: Vec::new(),
+        };
+        syncer.persist().unwrap();
+        assert!(saved_windows(&file).is_empty());
+
+        // Rex shows a window for the thread that the state doesn't have. The plan is empty, and
+        // the window is taken back and saved all the same.
+        rex.show(json!([FakeRex::window("w9", "e/a")]));
+        assert!(!reconcile_once(&mut syncer).await);
+        assert_eq!(saved_windows(&file), ["e/a"]);
+
+        // The same again: no change, no write.
+        std::fs::write(&file, "untouched").unwrap();
+        assert!(!reconcile_once(&mut syncer).await);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "untouched");
+
+        // The user closes the window: nothing to ask Rex for, and the thread is remembered as
+        // dismissed.
+        rex.show(json!([FakeRex::window("w1", "e/other")]));
+        assert!(!reconcile_once(&mut syncer).await);
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["groups"][""]["dismissed"]["e/a"], "u1");
+        assert_eq!(syncer.closed.len(), 1);
     }
 }
