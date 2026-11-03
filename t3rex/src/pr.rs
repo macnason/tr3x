@@ -205,15 +205,22 @@ fn reference(project: &str, link: Option<&Value>, url: &str) -> Option<Value> {
 }
 
 /// How often the drawer asks T3 to look at the pull request again while sup is open.
-const RECHECK: Duration = Duration::from_secs(15);
+const RECHECK: Duration = Duration::from_secs(5);
 
-/// Asks T3 to read the pull request fresh. A merge in sup goes straight to GitHub, so T3
-/// would only see it on its own sweep, a minute or two later; this settles the thread as soon
-/// as T3 reads it merged.
-async fn recheck(client: &t3client::env::Env, reference: &Value) {
-    let _ = client
+/// Asks T3 to read the pull request fresh, and whether it's merged. A merge in sup goes
+/// straight to GitHub, so T3 would only see it on its own sweep, a minute or two later; this
+/// settles the thread as soon as T3 reads it merged.
+/// None when T3 couldn't say.
+async fn recheck(client: &t3client::env::Env, reference: &Value) -> Option<bool> {
+    client
         .call("pullRequests.invalidate", json!({"reference": reference}))
-        .await;
+        .await
+        .ok()?;
+    let summary = client
+        .call("pullRequests.summary", reference.clone())
+        .await
+        .ok()?;
+    Some(summary["state"] == "merged")
 }
 
 /// Commits, pushes and opens the pull request through T3, with each step as it goes. On the
@@ -288,7 +295,8 @@ async fn make(
 }
 
 /// Runs sup on `url`, asking T3 to look at the pull request again while it's open and once it
-/// closes. Without sup, `gh pr view`, else the link.
+/// closes. Once the pull request is merged, the drawer closes. Without sup, `gh pr view`, else
+/// the link.
 async fn show(
     url: &str,
     cwd: &Path,
@@ -311,14 +319,22 @@ async fn show(
             .kill_on_drop(true)
             .spawn()
             .context("couldn't start sup")?;
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
+        // The first tick reads the pull request as the drawer opens.
+        let mut tick = tokio::time::interval(RECHECK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Merged already, as when the drawer opens on an old pull request: stays open.
+        let mut was_merged = None;
         loop {
             tokio::select! {
                 _ = child.wait() => break,
                 _ = tick.tick() => {
-                    if let Some(reference) = &reference {
-                        recheck(client, reference).await;
+                    let Some(reference) = &reference else { continue };
+                    let Some(merged) = recheck(client, reference).await else { continue };
+                    if merged && was_merged == Some(false) {
+                        let _ = child.kill().await;
+                        return Ok(());
                     }
+                    was_merged.get_or_insert(merged);
                 }
             }
         }
