@@ -81,4 +81,3 @@ Agents use your own provider logins.
 To finish, stop the sync, run `rex kill <session>`, then stop the second T3. Killing the
 session closes any Rex window still showing it.
 
-`docs/assets/hero.png` was made this way, on Rex's gradient.

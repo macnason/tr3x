@@ -6,7 +6,7 @@ T3 runs the agents. Rex is where you read and reply. Each open thread is a tab i
 session, **T3 Code**, sorted the way T3's sidebar sorts them: whatever needs you on top. That
 goes for every machine you run T3 on, without the T3 app.
 
-![Rex showing the T3 Code session: an approval and a question waiting at the top of the sidebar, two threads working on Claude and Codex, and a chart an agent drew in the conversation](docs/assets/hero.png)
+![Rex in dark mode with the T3 Code session: a thread that needs you at the top, threads working on Claude, Codex and Gemini, another machine's threads under it, and an agent's HTML preview inline in the conversation](docs/assets/hero.png)
 
 ## Install
 
