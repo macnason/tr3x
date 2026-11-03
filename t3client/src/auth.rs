@@ -169,14 +169,30 @@ fn form_encode(text: &str) -> String {
 
 /// How t3rex names itself in T3 → Connections: "Rex on Mac mini".
 pub fn client_label() -> String {
-    let name = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "this Mac".into());
+    let name = computer_name().unwrap_or_else(|| {
+        if cfg!(target_os = "macos") {
+            "this Mac".into()
+        } else {
+            "this machine".into()
+        }
+    });
     format!("Rex on {}", device_name(&name))
+}
+
+/// The name the computer has: its Mac name, else the host name Linux keeps.
+fn computer_name() -> Option<String> {
+    let text = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok())?
+    };
+    Some(text.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// "Alex’s Mac mini" as "Mac mini": a computer name without its owner.
@@ -477,19 +493,29 @@ fn shell_words(args: &[String]) -> String {
 
 /// A script for another machine that finds its `t3` as T3's desktop app looks for it, or the
 /// CLI inside the T3 Code app, then runs `body` with it as `t3run` and its T3 home as `$H`.
+/// A `t3` that doesn't know `--scope` is a stale one left on the `PATH` (an old symlink, say),
+/// and can't make the pairing code, so the first that does wins; with none, the first found.
 fn ssh_script(body: &str) -> String {
     format!(
         r#"set -u
 H="${{T3CODE_HOME:-$HOME/.t3}}"
-T3="$(command -v t3 2>/dev/null || true)"
-[ -n "$T3" ] || [ ! -x "$HOME/.local/bin/t3" ] || T3="$HOME/.local/bin/t3"
-APP=""
+T3=""; APP=""; FIRST=""; FIRSTAPP=""
+for c in "$(command -v t3 2>/dev/null || true)" "$HOME/.local/bin/t3"; do
+  [ -n "$c" ] && [ -x "$c" ] || continue
+  [ -n "$FIRST" ] || FIRST="$c"
+  if "$c" auth pairing create --help 2>&1 | grep -q -- --scope; then T3="$c"; break; fi
+done
 if [ -z "$T3" ]; then
   for a in "/Applications/T3 Code"*.app "$HOME/Applications/T3 Code"*.app; do
-    if [ -x "$a/Contents/MacOS/$(basename "$a" .app)" ]; then APP="$a"; break; fi
+    exe="$a/Contents/MacOS/$(basename "$a" .app)"
+    [ -x "$exe" ] || continue
+    [ -n "$FIRSTAPP" ] || FIRSTAPP="$a"
+    if ELECTRON_RUN_AS_NODE=1 "$exe" "$a/Contents/Resources/app.asar/{SERVER_ENTRY_SUFFIX}" auth pairing create --help 2>&1 | grep -q -- --scope; then APP="$a"; break; fi
   done
 fi
 [ -n "$T3$APP" ] || T3="$(ls -1d "$H"/runtime/versions/*/t3 2>/dev/null | sort | tail -n 1)"
+[ -n "$T3$APP" ] || T3="$FIRST"
+[ -n "$T3$APP" ] || APP="$FIRSTAPP"
 [ -n "$T3$APP" ] || {{ echo "t3rex: no t3 on this machine" >&2; exit 3; }}
 t3run() {{
   if [ -n "$T3" ]; then "$T3" "$@"

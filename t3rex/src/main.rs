@@ -20,6 +20,7 @@ mod perf;
 mod pick;
 mod picker;
 mod picture;
+mod platform;
 mod pr;
 mod prompt;
 mod render;

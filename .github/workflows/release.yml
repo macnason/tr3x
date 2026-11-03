@@ -1,7 +1,7 @@
 name: release
 
-# A tag like v0.2.0 builds a universal macOS binary and attaches it to that tag's release,
-# where install.sh downloads the latest from.
+# A tag like v0.2.0 builds a universal macOS binary and Linux binaries and attaches them to
+# that tag's release, where install.sh downloads the latest from.
 on:
   push:
     tags: ["v*"]
@@ -41,5 +41,41 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null  # another job made it first
+          gh release upload "$GITHUB_REF_NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            name: t3rex-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            name: t3rex-linux-aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      NAME: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p t3rex
+      - name: Package
+        run: |
+          mkdir -p "dist/$NAME"
+          cp target/release/t3rex "dist/$NAME/t3rex"
+          # The updater refuses a binary that doesn't say its release's version.
+          test "$("dist/$NAME/t3rex" --version)" = "t3rex ${GITHUB_REF_NAME#v}" \
+            || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
+          cp README.md LICENSE "dist/$NAME/"
+          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          cat "dist/$NAME.tar.gz.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null  # another job made it first
           gh release upload "$GITHUB_REF_NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber

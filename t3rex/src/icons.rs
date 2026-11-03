@@ -127,10 +127,7 @@ pub fn fallback(project: &Value) -> Icon {
 }
 
 fn cache() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Library/Caches/t3rex/icons")
+    crate::platform::cache().join("icons")
 }
 
 /// `name` made safe as a file name.
@@ -146,26 +143,94 @@ fn file_name(name: &str) -> String {
         .collect()
 }
 
-/// A PNG of `src`: the file itself when it is one, else a copy `sips` converts, which reads
-/// SVG, ICO, GIF, WebP and the rest with transparency kept.
+/// A PNG of `src`: the file itself when it is one, else a copy converted. A Mac's `sips` reads
+/// SVG, ICO, GIF, WebP and the rest with transparency kept; elsewhere the common raster
+/// formats are decoded here, and ImageMagick or `rsvg-convert` take the rest when installed.
 async fn as_png(src: &Path, dest: &Path) -> Option<PathBuf> {
     let head = tokio::fs::read(src).await.ok()?;
     if head.starts_with(b"\x89PNG") {
         tokio::fs::rename(src, dest).await.ok()?;
         return Some(dest.to_path_buf());
     }
-    let ok = tokio::process::Command::new("/usr/bin/sips")
-        .args(["-s", "format", "png", "-Z", "64"])
-        .arg(src)
-        .arg("--out")
-        .arg(dest)
+    let ok = convert(src, dest).await;
+    let _ = tokio::fs::remove_file(src).await;
+    (ok && dest.is_file()).then(|| dest.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+async fn convert(src: &Path, dest: &Path) -> bool {
+    run_quiet(
+        "/usr/bin/sips",
+        &["-s", "format", "png", "-Z", "64"],
+        src,
+        &["--out"],
+        dest,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn convert(src: &Path, dest: &Path) -> bool {
+    let (s, d) = (src.to_path_buf(), dest.to_path_buf());
+    let decoded = tokio::task::spawn_blocking(move || {
+        let image = image::open(&s).ok()?;
+        image
+            .resize(64, 64, image::imageops::FilterType::Triangle)
+            .save_with_format(&d, image::ImageFormat::Png)
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+    if decoded && dest.is_file() {
+        return true;
+    }
+    // SVG, and anything the decoder doesn't read.
+    run_quiet(
+        "magick",
+        &["-background", "none"],
+        src,
+        &["-resize", "64x64"],
+        dest,
+    )
+    .await
+        || run_quiet(
+            "convert",
+            &["-background", "none"],
+            src,
+            &["-resize", "64x64"],
+            dest,
+        )
+        .await
+        || run_quiet(
+            "rsvg-convert",
+            &["-w", "64", "-h", "64", "-o"],
+            dest,
+            &[],
+            src,
+        )
+        .await
+}
+
+/// `program before… first after… second`, quietly; whether it succeeded.
+async fn run_quiet(
+    program: &str,
+    before: &[&str],
+    first: &Path,
+    after: &[&str],
+    second: &Path,
+) -> bool {
+    tokio::process::Command::new(program)
+        .args(before)
+        .arg(first)
+        .args(after)
+        .arg(second)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .await
-        .is_ok_and(|s| s.success());
-    let _ = tokio::fs::remove_file(src).await;
-    (ok && dest.is_file()).then(|| dest.to_path_buf())
+        .is_ok_and(|s| s.success())
 }
 
 /// The project's icon as T3 would draw it. Fetches and caches its favicon when it has one.

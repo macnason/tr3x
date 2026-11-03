@@ -11,8 +11,12 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+#[cfg(target_os = "macos")]
 const BUNDLED: &str =
     "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex";
+/// On Linux, Rex's package puts `rex` on the `PATH`.
+#[cfg(not(target_os = "macos"))]
+const BUNDLED: &str = "/usr/bin/rex";
 
 /// Never start a Rex server of our own: one that has stopped is Rex quitting, and sync waits
 /// for the app's to come back.

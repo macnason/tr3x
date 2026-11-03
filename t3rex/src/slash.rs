@@ -771,7 +771,9 @@ mod tests {
         for q in ["s", "sk", "skn", "number-29", "agent"] {
             assert!(!rank(&e, q).is_empty());
         }
-        assert!(start.elapsed() < std::time::Duration::from_millis(50));
+        // 50ms in a release build; a debug build on a busy machine is several times slower.
+        let limit = if cfg!(debug_assertions) { 500 } else { 50 };
+        assert!(start.elapsed() < std::time::Duration::from_millis(limit));
     }
 
     fn typed(text: &str) -> Editor {

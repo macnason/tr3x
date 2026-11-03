@@ -10,8 +10,8 @@ goes for every machine you run T3 on, without the T3 app.
 
 ## Install
 
-Needs macOS, [Rex Beta](https://www.superlogical.com/rex), and T3 Code running with at least one
-project.
+Needs a Mac or a Linux machine, [Rex](https://www.superlogical.com/rex), and T3 Code running with
+at least one project.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
@@ -58,6 +58,16 @@ carries on once it is.
 T3 Code runs this Mac's agents, so they stop when it quits (⌘Q, an update, a restart). Closing
 its window doesn't quit it. To keep agents going with the app quit, run T3 on a machine that
 stays on (`t3 service install` there) and pair it: threads you start on it keep running.
+
+**A machine that stays on.** Run the installer on a Linux box or a Mac you leave running, with
+T3 as a service (`t3 service install`). It keeps Rex's server running there as a service and
+syncs next to T3, so the session and its agents don't depend on any one screen. It prints the
+command that adds the machine as a host in Rex on your other devices (`rex hosts add NAME
+https://<machine>-rex.<tailnet>.ts.net`). The first time, approve the new device it asks for in
+your Tailscale account; the address is yours alone. The host shows in Rex's sidebar once it's
+ticked in **Filter Hosts** and has a session open, which t3rex's **T3 Code** is. Those devices need only Rex: the
+panes run on the host. On Linux the Reply input sits between two rules instead of on a fill,
+since there's no Rex app to read a theme from.
 
 **Another machine.** Run `t3rex pair`. It finds the machines on your tailnet that run T3 and
 pairs each one: from here where `ssh` reaches it, else with one command to run there.
@@ -116,6 +126,8 @@ to "set up t3rex", or "why isn't my new thread showing in Rex?".
 ## Docs
 
 - [Using t3rex](docs/usage.md): every key, command and setting, chat width, and known limits.
+- [Choosing the host](docs/hosting.md): which machine runs Rex and sync, attaching clients,
+  moving the host.
 - [How it works](docs/how-it-works.md): sync, machines, pairing, the panes, and install in
   detail.
 - [Contributing](CONTRIBUTING.md): building, testing, and taking screenshots without your own
