@@ -28,7 +28,14 @@ paired with. That's the job, so it's worth knowing exactly what it holds and who
   A tailnet host's first key is accepted, since Tailscale has already checked the machine.
 - **GitHub**, for the install script's download, checked against the release's SHA-256;
   once a day for t3rex's latest release, which it installs the same way; and through your own
-  `gh` login when you open a pull request drawer.
+  `gh` login when you open a pull request drawer. The drawer can also download
+  [sup](https://github.com/superultrainc/sup) from its releases, checked against their
+  checksums, when you press Enter on its offer.
+- **Taildrop**, while sync runs: `tailscale file get --wait --loop` receives files your own
+  devices send over the tailnet, so a picture can reach a pane on another machine. A picture
+  goes to the active thread's Reply as if pasted; anything else is kept aside and never sent.
+- **Rex's tailnet device**, on a Linux host: the installer runs Rex's server as a systemd user
+  service and, where Tailscale is there, as its own HTTPS device on your tailnet.
 
 Nothing else. No telemetry, no analytics, no other servers.
 

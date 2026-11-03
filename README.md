@@ -4,14 +4,16 @@ Your [T3 Code](https://github.com/pingdotgg/t3code) threads, as tabs in [Rex](ht
 
 T3 runs the agents. Rex is where you read and reply. Each open thread is a tab in one Rex
 session, **T3 Code**, sorted the way T3's sidebar sorts them: whatever needs you on top. That
-goes for every machine you run T3 on, without the T3 app.
+goes for every machine you run T3 on, without the T3 app. t3rex runs no agent of its own: every
+message, approval and setting goes to T3.
 
 ![Rex in dark mode with the T3 Code session: a thread that needs you at the top, threads working on Claude, Codex and Gemini, another machine's threads under it, and an agent's HTML preview inline in the conversation](docs/assets/hero.png)
 
 ## Install
 
-Needs a Mac or a Linux machine, [Rex](https://www.superlogical.com/rex), and T3 Code running with
-at least one project.
+Needs [Rex](https://www.superlogical.com/rex) (Rex Beta on a Mac), on a Mac or Linux, and T3 Code
+running with at least one project. HTML previews use Chrome or Chromium when it's installed.
+Pull requests open in [sup](https://github.com/superultrainc/sup); the drawer offers to add it.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
@@ -48,8 +50,6 @@ t3rex keeps itself up to date; `t3rex updates notify` or `off` changes that.
 5. **Go to what needs you.** ⌃⌘I jumps to the thread that most needs you, on any machine.
 6. **Settle it.** Close the tab when you're done. A thread that's still working only hides
    until it changes. **Find Thread…** in the palette (⌘⇧P) brings anything back.
-
-![The New Thread tab a session with no threads opens on](docs/frames/onboarding-welcome-light.png)
 
 With no open threads you get a **New Thread** tab with the keys that matter. With no projects
 in T3 yet, it opens on a folder to add as one. If T3 Code isn't running, the tab says so and
@@ -108,8 +108,6 @@ palette on the phone, and the tabs take its size.
 - **Close to settle.** Closing a tab settles the thread. A thread that's still working only
   hides until it changes, so nothing gets stopped by accident.
 
-Nothing runs an agent of its own. Every message, approval and setting goes to T3.
-
 ## Let your agent drive it
 
 t3rex comes with a [skill](skills/t3rex/SKILL.md) for coding agents: install and check t3rex,
@@ -142,9 +140,11 @@ changes.
 ## Credits
 
 - [Rex](https://www.superlogical.com/rex) by Superlogical.
-- [T3 Code](https://github.com/pingdotgg/t3code), which does the actual work.
+- [T3 Code](https://github.com/pingdotgg/t3code) by Ping, which does the actual work.
 - [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), which t3rex's T3 client
   started from.
+
+t3rex is an independent project. It isn't affiliated with Superlogical or Ping.
 
 ## License
 

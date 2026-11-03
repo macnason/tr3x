@@ -1,0 +1,9 @@
+name: Something's missing
+description: A thing t3rex could do, that T3 or Rex already offers.
+body:
+  - type: textarea
+    attributes:
+      label: What you'd like
+      description: What you were doing, and what you wanted to happen.
+    validations:
+      required: true
