@@ -7,7 +7,8 @@
 //! Enter sends. To a running turn it steers or queues, as T3's Follow-up behavior says, and
 //! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
-//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3, /reply inline|pane.
+//! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3, /reply inline|pane,
+//! /details on|off.
 //! `/` first opens a menu of those, the provider's commands and skills (`slash`).
 //!
 //! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
@@ -417,6 +418,8 @@ pub(crate) struct Composer {
     escape: Escape,
     /// A width `/width` chose, for the pane to take up.
     pub(crate) width_set: Option<ChatWidth>,
+    /// Whether `/details` just showed or folded finished turns' work, for the pane to take up.
+    pub(crate) details_set: Option<bool>,
     /// What puts the cursor back in the input after the conversation draws.
     pub(crate) parked: String,
     /// Reply's rows at most, as a share of its pane: all of it when it has a pane of its own.
@@ -1189,6 +1192,13 @@ impl Composer {
                 }),
                 Err(_) => self.note("Run this in Rex, or `t3rex update` in a terminal", true),
             },
+            "details" => match crate::width::apply_details(arg) {
+                Ok(note) => {
+                    self.details_set = Some(crate::width::details());
+                    self.note(note, false);
+                }
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
             "reply" => match crate::reply::apply(arg) {
                 Ok(note) => self.note(note, false),
                 Err(e) => self.note(format!("{e:#}"), true),
@@ -1684,6 +1694,7 @@ impl Composer {
             deleting: false,
             escape: Escape::default(),
             width_set: None,
+            details_set: None,
             parked: String::new(),
             drawn: String::new(),
             share: MOST_SHARE,

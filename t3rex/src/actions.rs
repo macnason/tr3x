@@ -224,6 +224,10 @@ pub const ALL: &[Action] = &[
         ..NONE
     },
     Action {
+        slash: slash("details", "Show or fold each turn's work", Some("on, off")),
+        ..NONE
+    },
+    Action {
         slash: slash(
             "reply",
             "Reply inline or in its own pane",

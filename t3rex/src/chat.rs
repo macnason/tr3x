@@ -99,6 +99,8 @@ struct Pane {
 
 struct Display {
     sequence: u64,
+    /// The details setting the blocks were folded for.
+    open: bool,
     blocks: Vec<Block>,
     embeds: HashMap<String, Embed>,
 }
@@ -953,19 +955,19 @@ impl Pane {
 
     /// The thread's blocks: what's new and finished for good, then the live tail.
     fn draw(&mut self, state: &ThreadState, shell_thread: Option<&Value>) -> String {
-        let display = self.display.get_or_insert_with(|| {
+        let open = self.chat_width.details;
+        let build = || {
+            let embeds = media::embeds(state);
             std::sync::Arc::new(Display {
                 sequence: state.sequence,
-                blocks: transcript::blocks(state),
-                embeds: media::embeds(state),
+                open,
+                blocks: crate::fold::fold(transcript::blocks(state), state, &embeds, open),
+                embeds,
             })
-        });
-        if display.sequence != state.sequence {
-            *display = std::sync::Arc::new(Display {
-                sequence: state.sequence,
-                blocks: transcript::blocks(state),
-                embeds: media::embeds(state),
-            });
+        };
+        let display = self.display.get_or_insert_with(build);
+        if display.sequence != state.sequence || display.open != open {
+            *display = build();
         }
         let display = display.clone();
         let blocks = &display.blocks;
@@ -1191,6 +1193,8 @@ impl Pane {
         let mark = match run["status"].as_str() {
             Some("failed") => format!("{RED}✗{RESET} {DIM}Failed"),
             Some("interrupted" | "cancelled") => format!("{DIM}■ Stopped"),
+            // A folded turn says how long it took on its fold line.
+            _ if crate::fold::folds(run, self.chat_width.details) => format!("{DIM}{at}"),
             _ => format!("{DIM}{at} · {}", duration(took)),
         };
         Some(format!("{}{mark}{RESET}", " ".repeat(self.column().0)))
@@ -1586,6 +1590,11 @@ async fn event_loop(
             continue;
         }
         let started = std::time::Instant::now();
+        if let Some(details) = composer.details_set.take() {
+            pane.chat_width.details = details;
+            pane.reflow = true;
+            dirty = true;
+        }
         if let Some(width) = composer.width_set.take() {
             pane.chat_width.width = width;
             pane.reflow = true;

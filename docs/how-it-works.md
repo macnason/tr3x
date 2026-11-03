@@ -97,6 +97,12 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - Reply grows one row per input line, up to 8, within half the pane.
 - A run of tool calls folds past the first three into one "more" line, but an HTML embed
   always shows.
+- A finished turn folds to `▸ Worked for 2m 14s` above its last reply, by the rule T3 Code's
+  timeline uses: tool calls, thinking, approvals and the messages between them fold; your
+  messages, the last reply, questions, plans, errors and embeds stay. A failed or running turn
+  stays open. A stopped one reads `You stopped after …`. The fold happens as the turn finishes,
+  by printing the thread again. Scrollback can't open one fold in place, so `/details` (or
+  `t3rex details on`) prints every turn open under `▾ Worked for …`.
 - A window whose panes don't match the `reply` setting gets the right ones in place on sync's
   next pass: the new panes split in beside the old ones, which close, so the window keeps its
   spot.
