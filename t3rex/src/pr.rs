@@ -159,7 +159,8 @@ async fn run(key: &str, create: bool) -> Result<()> {
         "\r\n {BOLD}{LABEL}{RESET}\r\n {DIM}{branch}{RESET}\r\n\r\n"
     ));
     // The PR linked to the thread, open or not; else the branch's.
-    let known = linked(found)
+    let link = linked(found);
+    let known = link
         .and_then(|pr| pr["url"].as_str())
         .or(status["pr"]["url"].as_str());
     let url = match (known, create) {
@@ -176,7 +177,43 @@ async fn run(key: &str, create: bool) -> Result<()> {
         }
         (_, true) => make(&client, &cwd, &project, &thread.thread, &status).await?,
     };
-    show(&url, Path::new(&cwd)).await
+    let reference = reference(&project, link.filter(|l| l["url"] == url.as_str()), &url);
+    show(&url, Path::new(&cwd), &client, reference).await
+}
+
+/// The pull request as T3's `pullRequests` methods name it: the thread's link, else read from
+/// its URL (`https://host/owner/repo/pull/N`).
+fn reference(project: &str, link: Option<&Value>, url: &str) -> Option<Value> {
+    if let Some(link) = link
+        && let (Some(repository), Some(number)) =
+            (link["repository"].as_str(), link["number"].as_u64())
+    {
+        let mut reference =
+            json!({"projectId": project, "repository": repository, "number": number});
+        if let Some(host) = link["host"].as_str() {
+            reference["host"] = json!(host);
+        }
+        return Some(reference);
+    }
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    let mut parts = path.split('/');
+    let (owner, repo, pull, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let number: u64 = number.parse().ok()?;
+    (pull == "pull" && !owner.is_empty() && !repo.is_empty()).then(
+        || json!({"projectId": project, "repository": format!("{owner}/{repo}"), "number": number}),
+    )
+}
+
+/// How often the drawer asks T3 to look at the pull request again while sup is open.
+const RECHECK: Duration = Duration::from_secs(15);
+
+/// Asks T3 to read the pull request fresh. A merge in sup goes straight to GitHub, so T3
+/// would only see it on its own sweep, a minute or two later; this settles the thread as soon
+/// as T3 reads it merged.
+async fn recheck(client: &t3client::env::Env, reference: &Value) {
+    let _ = client
+        .call("pullRequests.invalidate", json!({"reference": reference}))
+        .await;
 }
 
 /// Commits, pushes and opens the pull request through T3, with each step as it goes. On the
@@ -250,9 +287,14 @@ async fn make(
     Ok(url.to_string())
 }
 
-/// Becomes sup on `url`. Without sup, `gh pr view`, else the link.
-async fn show(url: &str, cwd: &Path) -> Result<()> {
-    use std::os::unix::process::CommandExt;
+/// Runs sup on `url`, asking T3 to look at the pull request again while it's open and once it
+/// closes. Without sup, `gh pr view`, else the link.
+async fn show(
+    url: &str,
+    cwd: &Path,
+    client: &t3client::env::Env,
+    reference: Option<Value>,
+) -> Result<()> {
     // Rex starts panes with its own PATH; sup runs gh for its token.
     let path = search_path();
     let find = |name: &str| {
@@ -262,12 +304,28 @@ async fn show(url: &str, cwd: &Path) -> Result<()> {
     };
     let cwd = if cwd.is_dir() { cwd } else { Path::new("/") };
     if let Some(sup) = find("sup") {
-        let error = std::process::Command::new(sup)
+        let mut child = tokio::process::Command::new(sup)
             .arg(url)
             .env("PATH", &path)
             .current_dir(cwd)
-            .exec();
-        bail!("couldn't start sup: {error}");
+            .kill_on_drop(true)
+            .spawn()
+            .context("couldn't start sup")?;
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
+        loop {
+            tokio::select! {
+                _ = child.wait() => break,
+                _ = tick.tick() => {
+                    if let Some(reference) = &reference {
+                        recheck(client, reference).await;
+                    }
+                }
+            }
+        }
+        if let Some(reference) = &reference {
+            recheck(client, reference).await;
+        }
+        return Ok(());
     }
     if let Some(gh) = find("gh") {
         out("\r\n");
@@ -391,6 +449,24 @@ mod tests {
             Some(json!(3))
         );
         assert!(linked(&json!({})).is_none());
+    }
+
+    #[test]
+    fn a_reference_from_the_link_else_the_url() {
+        let link = json!({"host": "github.com", "repository": "o/r", "number": 7, "url": "x"});
+        assert_eq!(
+            reference("p", Some(&link), "x"),
+            Some(json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7}))
+        );
+        assert_eq!(
+            reference("p", None, "https://github.com/o/r/pull/12"),
+            Some(json!({"projectId": "p", "repository": "o/r", "number": 12}))
+        );
+        assert_eq!(
+            reference("p", None, "https://github.com/o/r/issues/12"),
+            None
+        );
+        assert_eq!(reference("p", None, "nope"), None);
     }
 
     #[test]
