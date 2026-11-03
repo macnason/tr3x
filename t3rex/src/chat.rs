@@ -516,52 +516,154 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
     lines
 }
 
-/// Tool calls shown in a row before the rest of the run folds into one "more" line.
-const TOOLS_SHOWN: usize = 3;
-
-/// For each block, whether it shows. A run of tool calls (reasoning between them doesn't
-/// break it) shows its first few calls and folds the rest into one "more" line, when that
-/// hides at least two. Running and failed calls always show.
-fn visible_tools(blocks: &[Block]) -> Vec<bool> {
-    let mut shown = vec![true; blocks.len()];
-    let mut i = 0;
-    while i < blocks.len() {
-        if blocks[i].kind != BlockKind::Tool {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < blocks.len() && matches!(blocks[i].kind, BlockKind::Tool | BlockKind::Reasoning) {
-            i += 1;
-        }
-        let tools: Vec<usize> = (start..i)
-            .filter(|&j| blocks[j].kind == BlockKind::Tool)
-            .collect();
-        if tools.len() >= TOOLS_SHOWN + 2 {
-            for &j in &tools[TOOLS_SHOWN..] {
-                shown[j] = is_running(&blocks[j]) || failed(&blocks[j]);
-            }
-        }
-    }
-    shown
+/// What T3's work log counts a tool call as, when it folds a run into one line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Command,
+    Edit,
+    Read,
+    WebSearch,
+    CodeSearch,
+    Other,
 }
 
-/// Block `i`'s lines, after one "more" line when it ends a run with folded tool calls.
-fn lines_at(blocks: &[Block], shown: &[bool], i: usize, ctx: &Ctx) -> Vec<String> {
-    let mut lines = Vec::new();
-    let ends_run = !matches!(blocks[i].kind, BlockKind::Tool | BlockKind::Reasoning);
-    if ends_run {
-        let hidden = (0..i)
-            .rev()
-            .take_while(|&j| matches!(blocks[j].kind, BlockKind::Tool | BlockKind::Reasoning))
-            .filter(|&j| blocks[j].kind == BlockKind::Tool && !shown[j])
-            .count();
-        if hidden > 0 {
-            lines.push(format!("  {DIM}⋯ {hidden} more tool calls{RESET}"));
+/// T3's classifier (`session-logic`): the item type first, then the provider's tool name.
+fn action(block: &Block) -> Action {
+    match block.item_type.as_str() {
+        "command_execution" => return Action::Command,
+        "file_change" => return Action::Edit,
+        "web_search" => return Action::WebSearch,
+        "file_search" => return Action::CodeSearch,
+        "image_view" | "file_read" | "read" => return Action::Read,
+        _ => {}
+    }
+    match block.tool_name.to_ascii_lowercase().as_str() {
+        "bash" | "terminal" | "shell" => Action::Command,
+        "edit" | "write" | "multiedit" | "notebookedit" => Action::Edit,
+        "read" | "readfile" => Action::Read,
+        "grep" | "glob" | "find" | "rg" | "ls" => Action::CodeSearch,
+        "websearch" => Action::WebSearch,
+        _ => Action::Other,
+    }
+}
+
+fn action_label(action: Action, n: usize) -> String {
+    let (one, many) = match action {
+        Action::Command => ("Ran 1 command", "commands"),
+        Action::Edit => ("Changed 1 file", "files"),
+        Action::Read => ("Read 1 file", "files"),
+        Action::WebSearch => ("Searched the web 1 time", "times"),
+        Action::CodeSearch => ("Searched code 1 time", "times"),
+        Action::Other => ("Used 1 tool", "tools"),
+    };
+    if n == 1 {
+        return one.to_string();
+    }
+    let verb = one.rsplitn(3, ' ').last().unwrap_or(one);
+    format!("{verb} {n} {many}")
+}
+
+/// A run of tool calls as T3 sums it up: its two most telling kinds, in the order they came,
+/// and the rest as other actions. "Ran 3 commands and read 1 file".
+fn run_summary(run: &[&Block]) -> String {
+    let mut groups: Vec<(Action, Vec<&Block>)> = Vec::new();
+    for block in run {
+        let a = action(block);
+        match groups.iter_mut().find(|(g, _)| *g == a) {
+            Some((_, list)) => list.push(block),
+            None => groups.push((a, vec![block])),
         }
     }
-    if shown[i] {
-        lines.extend(block_lines(&blocks[i], ctx));
+    let priority = |a: Action| match a {
+        Action::Command | Action::Edit => 0,
+        Action::Other => 2,
+        _ => 1,
+    };
+    let mut top: Vec<usize> = (0..groups.len()).collect();
+    top.sort_by_key(|&i| (priority(groups[i].0), i));
+    top.truncate(2);
+    top.sort();
+    let mut parts: Vec<String> = top
+        .iter()
+        .map(|&i| {
+            let (a, list) = &groups[i];
+            // Edits count files, not calls.
+            let n = if *a == Action::Edit {
+                let mut files: Vec<&str> = list.iter().map(|b| b.detail.as_str()).collect();
+                let unnamed = files.iter().filter(|f| f.is_empty()).count();
+                files.retain(|f| !f.is_empty());
+                files.sort();
+                files.dedup();
+                files.len() + unnamed
+            } else {
+                list.len()
+            };
+            action_label(*a, n)
+        })
+        .collect();
+    let rest = run.len() - top.iter().map(|&i| groups[i].1.len()).sum::<usize>();
+    if rest > 0 {
+        let s = if rest == 1 { "action" } else { "actions" };
+        parts.push(format!("Performed {rest} other {s}"));
+    }
+    for part in parts.iter_mut().skip(1) {
+        *part = part[..1].to_lowercase() + &part[1..];
+    }
+    match parts.len() {
+        0..=2 => parts.join(" and "),
+        n => format!("{}, and {}", parts[..n - 1].join(", "), parts[n - 1]),
+    }
+}
+
+/// Whether a block belongs to a run of tool calls. Reasoning between calls doesn't break one.
+fn in_run(block: &Block) -> bool {
+    matches!(block.kind, BlockKind::Tool | BlockKind::Reasoning)
+}
+
+/// The finished calls in a run, as one line. None when nothing in it has finished.
+fn run_line(run: &[Block], width: usize) -> Option<String> {
+    let done: Vec<&Block> = run
+        .iter()
+        .filter(|b| b.kind == BlockKind::Tool && b.tool_name != "AskUserQuestion")
+        .filter(|b| !is_running(b))
+        .collect();
+    if done.is_empty() {
+        return None;
+    }
+    let failures = done.iter().filter(|b| failed(b)).count();
+    let mark = if failures > 0 {
+        format!("  {RED}✗ {failures} failed{RESET}")
+    } else {
+        String::new()
+    };
+    let room = width.saturating_sub(6 + visible_width(&mark));
+    Some(format!(
+        "  {DIM}{}{RESET}{mark}",
+        fit(&run_summary(&done), room)
+    ))
+}
+
+/// Where the run of tool calls that ends just before `end` starts.
+fn run_start(blocks: &[Block], end: usize) -> usize {
+    (0..end)
+        .rev()
+        .take_while(|&j| in_run(&blocks[j]))
+        .last()
+        .unwrap_or(end)
+}
+
+/// Block `i`'s lines, after the line summing up the run of tool calls it ends. A call
+/// draws a row of its own only while it runs, as T3's work log does.
+fn lines_at(blocks: &[Block], i: usize, ctx: &Ctx) -> Vec<String> {
+    let mut lines = Vec::new();
+    let block = &blocks[i];
+    if !in_run(block)
+        && let Some(line) = run_line(&blocks[run_start(blocks, i)..i], ctx.width)
+    {
+        lines.push(line);
+    }
+    if block.kind != BlockKind::Tool || is_running(block) {
+        lines.extend(block_lines(block, ctx));
     }
     lines
 }
@@ -714,7 +816,6 @@ impl Pane {
             self.header = true;
         }
         let (left, width) = self.column();
-        let shown = visible_tools(&blocks);
         let embeds = media::embeds(state);
         if self.media.can_snapshot() {
             for embed in embeds.values() {
@@ -738,7 +839,7 @@ impl Pane {
         while index < blocks.len() && settled(&blocks[index], index + 1 == blocks.len(), run_active)
         {
             let block = &blocks[index];
-            let lines = pad(lines_at(&blocks, &shown, index, &fixed), left);
+            let lines = pad(lines_at(&blocks, index, &fixed), left);
             // The top of this block may already be on screen, printed while it was live.
             let skip = self.spilled.min(lines.len());
             self.spilled -= skip;
@@ -754,8 +855,18 @@ impl Pane {
             self.spilled = 0;
         }
         let mut live: Vec<String> = Vec::new();
+        // A run still going sums up what it has done so far, above what it's doing now.
+        let open = run_start(&blocks, blocks.len());
+        let summary = run_line(&blocks[open..], width).map(|l| pad(vec![l], left));
+        let summary_at = open.max(index);
         for i in index..blocks.len() {
-            live.extend(pad(lines_at(&blocks, &shown, i, &moving), left));
+            if i == summary_at {
+                live.extend(summary.iter().flatten().cloned());
+            }
+            live.extend(pad(lines_at(&blocks, i, &moving), left));
+        }
+        if summary_at == blocks.len() {
+            live.extend(summary.into_iter().flatten());
         }
         // Lines that already printed for good stay where they are.
         let skip = self.spilled.min(live.len());
@@ -1211,15 +1322,65 @@ mod tests {
         assert_eq!(short_path("/usr/bin/env"), "/usr/bin/env");
     }
 
+    fn dynamic(name: &str, detail: &str) -> Block {
+        Block {
+            tool_name: name.into(),
+            ..tool("dynamic_tool", name, detail, "")
+        }
+    }
+
     #[test]
-    fn long_runs_of_tools_fold() {
-        let blocks: Vec<Block> = (0..6)
-            .map(|_| tool("command_execution", "$ ls", "ls", ""))
-            .collect();
-        let shown = visible_tools(&blocks);
-        assert_eq!(shown, vec![true, true, true, false, false, false]);
-        // Folding one call saves nothing, so a run of four shows all four.
-        assert!(visible_tools(&blocks[..4]).iter().all(|s| *s));
+    fn runs_of_tools_sum_up_as_t3_does() {
+        let cmd = || tool("command_execution", "$ ls", "ls", "");
+        let (a, b, c) = (cmd(), cmd(), cmd());
+        assert_eq!(run_summary(&[&a]), "Ran 1 command");
+        let read = dynamic("Read", "/x/a.rs");
+        assert_eq!(
+            run_summary(&[&a, &b, &read]),
+            "Ran 2 commands and read 1 file"
+        );
+        let (t1, t2) = (dynamic("ToolSearch", ""), dynamic("TaskStop", ""));
+        assert_eq!(
+            run_summary(&[&a, &b, &t1, &t2]),
+            "Ran 2 commands and used 2 tools"
+        );
+        // Past two kinds: the two most telling, then the rest.
+        assert_eq!(
+            run_summary(&[&t1, &read, &a, &c]),
+            "Read 1 file, ran 2 commands, and performed 1 other action"
+        );
+        // Edits count files.
+        let (e1, e2) = (dynamic("Edit", "a.rs"), dynamic("Edit", "a.rs"));
+        assert_eq!(run_summary(&[&e1, &e2]), "Changed 1 file");
+    }
+
+    #[test]
+    fn a_run_shows_one_line_and_only_running_calls_draw_rows() {
+        let mut running = tool("command_execution", "$ sleep 9", "sleep 9", "");
+        running.status = "inProgress".into();
+        let mut blocks = vec![
+            tool("command_execution", "$ ls", "ls", ""),
+            tool("command_execution", "$ ls", "ls", ""),
+            running,
+        ];
+        let embeds = HashMap::new();
+        let ctx = Ctx {
+            width: 80,
+            frame: 0,
+            offset: 0,
+            embeds: &embeds,
+            media: None,
+            link: "",
+        };
+        assert!(lines_at(&blocks, 0, &ctx).is_empty());
+        assert_eq!(lines_at(&blocks, 2, &ctx).len(), 1);
+        assert!(run_line(&blocks, 80).unwrap().contains("Ran 2 commands"));
+        blocks[2].status = "completed".into();
+        let mut reply = tool("", "", "", "");
+        reply.kind = BlockKind::Assistant;
+        reply.body = "done".into();
+        blocks.push(reply);
+        assert!(lines_at(&blocks, 3, &ctx)[0].contains("Ran 3 commands"));
     }
 
     #[test]
