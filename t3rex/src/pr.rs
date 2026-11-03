@@ -5,8 +5,8 @@
 //! comments from the keyboard.
 //!
 //! The drawer floats over the thread's pane: down its right side, full height, when the window
-//! has room for both, else over nearly all of it, as on a phone. A floating layer, not a split,
-//! so a phone looking at the same session never gets it as a window of its own. `q` in sup
+//! has room for both, else over nearly all of it, as on a phone. A floating layer, not a split;
+//! Rex's iPhone app shows it as a tab of its own, which a phone looking is taken to. `q` in sup
 //! closes it.
 
 use std::path::{Path, PathBuf};
@@ -62,7 +62,8 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
     if let Some(drawer) = drawer {
         if !create {
             let args = json!({"session_id": session, "block_id": drawer}).to_string();
-            return rex.call("session.focus_block", &args).await.map(drop);
+            rex.call("session.focus_block", &args).await?;
+            return rex.show_on_phones(&session).await;
         }
         let args = json!({"session_id": session, "block_id": drawer}).to_string();
         rex.call("block.close", &args).await?;
@@ -102,7 +103,8 @@ if err then error(err, 0) end
 return {{}}"#,
         lua_str(&data.to_string())
     );
-    rex.lua(&session, &script).await.map(drop)
+    rex.lua(&session, &script).await?;
+    rex.show_on_phones(&session).await
 }
 
 /// The fraction of the window's width `block` takes in `node`'s layout.

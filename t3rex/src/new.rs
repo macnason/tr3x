@@ -466,7 +466,10 @@ return {{}}"#,
             lua_str(&data.to_string())
         );
         tokio::spawn(async move {
-            let _ = Rex::find().lua(&session, &script).await;
+            let rex = Rex::find();
+            if rex.lua(&session, &script).await.is_ok() {
+                let _ = rex.show_on_phones(&session).await;
+            }
         });
     }
 

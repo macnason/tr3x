@@ -752,7 +752,8 @@ if err then error(err, 0) end
 return {{}}"#,
         crate::rex::lua_str(&data.to_string())
     );
-    rex.lua(&session, &script).await.map(drop)
+    rex.lua(&session, &script).await?;
+    rex.show_on_phones(&session).await
 }
 
 /// Enter answers yes, Esc or q no.

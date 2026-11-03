@@ -136,6 +136,37 @@ impl Rex {
         self.json(&["do", "-s", session, "-"], Some(script)).await
     }
 
+    /// Shows a layer just opened with `focus = true` on the phones looking at `session`. A Mac
+    /// follows the session's focus; Rex's iPhone app shows each pane as a tab of its own and
+    /// keeps the tab it's on, so a layer opened there would land in a tab nobody goes to.
+    /// Selecting the window takes the phone to its focused block, the layer's.
+    pub async fn show_on_phones(&self, session: &str) -> Result<()> {
+        let view = self.inspect(session).await?;
+        let Some(window) = view["active_window_id"].as_str() else {
+            return Ok(());
+        };
+        let phones = view["clients"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| {
+                c["info"]["kind"] == "app"
+                    && c["info"]["platform"] == "ios"
+                    && c["connection_state"] != "lost"
+            });
+        for phone in phones {
+            let Some(id) = phone["client_id"].as_str() else {
+                continue;
+            };
+            let session = format!("session_id={session}");
+            let window = format!("window_id={window}");
+            let _ = self
+                .run(&["-C", id, "do", "session.select", &session, &window], None)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Asks the app clients to do one of their actions, such as `session.select`. A missing
     /// client is not an error: nothing is looking.
     pub async fn client_do(&self, action: &str, pairs: &[(&str, &str)]) -> Result<()> {

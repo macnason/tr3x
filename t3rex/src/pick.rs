@@ -46,7 +46,9 @@ if err then error(err, 0) end
 return {{}}"#,
         lua_str(&data.to_string())
     );
-    Rex::find().lua(session, &script).await.map(drop)
+    let rex = Rex::find();
+    rex.lua(session, &script).await?;
+    rex.show_on_phones(session).await
 }
 
 /// While the thread works, a model or effort waits for the next message, as in T3. Access
