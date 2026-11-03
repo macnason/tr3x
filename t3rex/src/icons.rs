@@ -370,6 +370,43 @@ pub fn become_program(driver: &str) {
         .exec();
 }
 
+/// The file this process started from, as device and inode, so a binary swapped in by an
+/// update shows as a different file at the same path.
+static STARTED_ON: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Notes the binary this process runs, before an update can replace it.
+pub fn note_binary() {
+    STARTED_ON.get_or_init(|| identity(&real_exe()));
+}
+
+/// Whether the binary at the path this process started from is no longer the one it runs.
+pub fn replaced() -> bool {
+    match (STARTED_ON.get().copied().flatten(), identity(&real_exe())) {
+        (Some(started), Some(now)) => started != now,
+        _ => false,
+    }
+}
+
+/// Starts this pane's program again, as it was started, on whatever binary is there now.
+/// Returns only if it couldn't.
+pub fn start_again() {
+    let mut args = std::env::args_os();
+    let Some(program) = args.next() else {
+        return;
+    };
+    crate::scheme::stop();
+    use std::os::unix::process::CommandExt;
+    let _ = std::process::Command::new(&program)
+        .arg0(&program)
+        .args(args)
+        .exec();
+}
+
 /// Draws icons with kitty graphics. Each frame sends each picture again as a file path, which
 /// the terminal reads itself, the way the conversation pane draws pictures; `clear` removes
 /// the last frame's. In a pane that also shows the conversation's pictures, a `tagged` painter
@@ -444,8 +481,8 @@ mod tests {
     #[test]
     fn monograms_match_t3() {
         assert_eq!(monogram("t3rex"), "T3");
-        assert_eq!(monogram("MacStack"), "MK");
-        assert_eq!(monogram("Up Bank web"), "UW");
+        assert_eq!(monogram("Notebook"), "NK");
+        assert_eq!(monogram("Acme storefront web"), "AW");
         assert_eq!(monogram("  "), "PR");
     }
 

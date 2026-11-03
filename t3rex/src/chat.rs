@@ -1373,6 +1373,8 @@ async fn event_loop(
     let mut reply = true;
     let mut focused = true;
     let mut renamed = false;
+    // The binary was replaced by an update: start again on it once nothing is typed.
+    let mut stale = false;
     // Whether clicks are on, and when the wheel last turned them off for the scrollback.
     let mut clicking = false;
     let mut wheeled: Option<tokio::time::Instant> = None;
@@ -1575,6 +1577,9 @@ async fn event_loop(
                 if ticks.is_multiple_of(8) && role != Role::Conversation && composer.usage_moved() {
                     reply = true;
                 }
+                if ticks.is_multiple_of(40) && !stale && crate::icons::replaced() {
+                    stale = true;
+                }
             }
         }
         if content_event && tokio::time::Instant::now() < next_frame {
@@ -1586,13 +1591,24 @@ async fn event_loop(
             pane.reflow = true;
             dirty = true;
         }
+        if stale && composer.idle() {
+            stale = false;
+            out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
+            if role == Role::Reply {
+                out("\x1b[?1049l");
+            }
+            let _ = crossterm::terminal::disable_raw_mode();
+            crate::icons::start_again();
+            // Still here: it couldn't start again, so it carries on as it was.
+            let _ = crossterm::terminal::enable_raw_mode();
+            pane.reflow = true;
+            dirty = true;
+            reply = true;
+        }
         // A thread that moved to another provider: once nothing is typed, start again under
         // that provider's name, so Rex's sidebar shows its glyph. The thread prints again from
         // the top.
-        if !renamed
-            && composer.idle()
-            && composer.state.is_some()
-        {
+        if !renamed && composer.idle() && composer.state.is_some() {
             // The provider the next message goes to: the thread's, or the one picked for it
             // while it worked.
             let instance = composer.next_instance();

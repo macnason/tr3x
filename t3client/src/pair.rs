@@ -471,7 +471,7 @@ mod tests {
         assert!(short_name("studio"));
         assert!(!short_name("box.example-tailnet.ts.net"));
         assert!(!short_name("mac@host"));
-        assert!(!short_name("100.97.217.14"));
+        assert!(!short_name("100.64.0.7"));
     }
 
     /// A pasted link pairs with the machine its address answers as, and saves the token

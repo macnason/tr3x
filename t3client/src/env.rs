@@ -288,6 +288,25 @@ impl Env {
         }
     }
 
+    /// Whether Rex's token for the machine was granted `scope`. A token keeps the scopes it was
+    /// paired with when it renews, so a scope t3rex asks for later needs pairing again.
+    pub fn holds(&self, scope: &str) -> bool {
+        self.store
+            .credential(&self.machine.id)
+            .is_some_and(|c| c.scopes.iter().any(|s| s == scope))
+    }
+
+    /// Pairs again the way the machine was paired, for a token with every scope t3rex asks for
+    /// now. Only this Mac and machines paired over SSH can; the rest say how to.
+    pub async fn pair_fresh(&self) -> Result<()> {
+        let _lock = self.store.lock().await?;
+        crate::pair::again_locked(&self.store, &self.machine).await?;
+        if let Some(rpc) = self.rpc.lock().await.take() {
+            drop(rpc);
+        }
+        Ok(())
+    }
+
     /// The shared RPC connection, reopened if it dropped. Each opening checks the address
     /// still answers as this machine before the token goes out.
     pub async fn rpc(&self) -> Result<RpcClient> {

@@ -608,9 +608,8 @@ fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
 /// The provider's models as T3's picker lists them: the ones hidden in T3's settings left
 /// out, and the rest in the order set there, then as the provider lists them.
 fn shown_models<'a>(config: &Value, provider: &'a Value) -> Vec<&'a Value> {
-    let prefs = &config["settings"]["providerModelPreferences"][provider["instanceId"]
-        .as_str()
-        .unwrap_or_default()];
+    let prefs = &config["settings"]["providerModelPreferences"]
+        [provider["instanceId"].as_str().unwrap_or_default()];
     let names = |key: &str| -> Vec<&str> {
         prefs[key]
             .as_array()
@@ -710,11 +709,17 @@ mod tests {
             "settings": {"providerModelPreferences":
                 {"claudeAgent": {"hiddenModels": ["a"], "modelOrder": ["c"]}}}});
         let ids = |c: &Value| -> Vec<String> {
-            model_items(c, &HashMap::new()).into_iter().map(|i| i.id).collect()
+            model_items(c, &HashMap::new())
+                .into_iter()
+                .map(|i| i.id)
+                .collect()
         };
         assert_eq!(ids(&config), ["claudeAgent/c", "claudeAgent/b"]);
         config["settings"] = json!({});
-        assert_eq!(ids(&config), ["claudeAgent/a", "claudeAgent/b", "claudeAgent/c"]);
+        assert_eq!(
+            ids(&config),
+            ["claudeAgent/a", "claudeAgent/b", "claudeAgent/c"]
+        );
     }
 
     #[test]

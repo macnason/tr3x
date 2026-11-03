@@ -231,6 +231,18 @@ pub const ALL: &[Action] = &[
         ),
         ..NONE
     },
+    Action {
+        slash: slash("update", "Update t3rex and T3", None),
+        ..NONE
+    },
+    Action {
+        slash: slash(
+            "updates",
+            "How t3rex updates itself",
+            Some("auto, notify, off"),
+        ),
+        ..NONE
+    },
 ];
 
 /// The `/` commands Reply runs itself.

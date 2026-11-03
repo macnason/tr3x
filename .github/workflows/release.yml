@@ -29,7 +29,9 @@ jobs:
             target/x86_64-apple-darwin/release/t3rex
           codesign --force --sign - "dist/$NAME/t3rex"
           lipo -info "dist/$NAME/t3rex"
-          "dist/$NAME/t3rex" --version
+          # The updater refuses a binary that doesn't say its release's version.
+          test "$("dist/$NAME/t3rex" --version)" = "t3rex ${GITHUB_REF_NAME#v}" \
+            || { echo "t3rex/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")

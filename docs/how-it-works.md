@@ -179,6 +179,39 @@ offer next, what it removed, and whether t3rex's tests pass against it.
 isn't in the surface, so a nightly that drops one shows there. Merging the branch moves the
 baseline.
 
+## Updates
+
+`update.rs`. Sync checks once a day, a minute and a half after it starts when the last check is
+a day old, and writes what it found to `updates.json` in the state directory, which Reply reads
+for its notice.
+
+- **t3rex**: the latest release from GitHub's API for the repository the binary was built from
+  (`T3REX_RELEASES` points it at another, `file://` too). On `auto`, the default, sync starts
+  `t3rex update --auto` in a process group of its own, since installing stops sync: it downloads
+  `t3rex-macos-universal.tar.gz`, checks it against the release's `.sha256`, checks the binary
+  inside says that version, and runs the new binary's `install --update`. That copies it over
+  `~/.local/bin/t3rex` beside-and-rename, rewrites `t3rex.lua`, stops the old sync and reloads
+  Rex's config, which starts sync on the new one, without selecting the session or asking about
+  machines. A t3rex that runs from anywhere else, such as a build, is never replaced.
+- **Panes** note the binary they started from (device and inode). Every few seconds each one
+  looks again; once the file at that path is a different one and nothing is typed, the pane
+  `exec`s itself with its own arguments, in place, so Rex keeps the block and the tab. Reply's
+  draft, pictures and answers hold it back until they're empty; New Thread waits while its
+  folder picker is open.
+- **T3**: each machine's version from its descriptor, and the newest on its track from
+  `server.getNpmRelease` with `spec` `nightly`, `preview` or `latest`, from the version's
+  suffix. T3's `serverSelfUpdate` capability says how it can update: `desktop-managed` (the T3
+  Code app runs it), `boot-service` or `respawn` (`t3 service install`), or nothing, for a plain
+  `t3 serve`, which t3rex leaves alone. `t3rex update` calls `server.updateServer` with the
+  exact `targetVersion`. The desktop app answers once it has downloaded its own update, with a
+  `desktopUpdateToken`; `server.commitDesktopUpdate` with that token has it quit and install, so
+  the connection dropping is the success, and t3rex waits for it to come back. With threads
+  running there it asks first, since a restart stops them until T3 continues them
+  (`threadRestartContinuation`). A background service hands the version to its launcher.
+  Both need `environment:maintain`, which Rex asks for when it pairs. A token from before then
+  pairs again on its own where t3rex can (this Mac, SSH); a joined or linked machine is told
+  to pair again.
+
 ## Find Thread
 
 **Find Thread…** opens `t3rex find` in a floating layer. It reads each machine's shell, its
@@ -260,7 +293,7 @@ joined or linked machine needs joining again. Either way it happens under `pair.
 panes that find it at once pair only once, and a failed renewal waits 10 minutes before the
 next try. `t3rex env forget` revokes Rex's session through the machine's CLI where t3rex can
 run it. Rex asks for `orchestration:read`, `orchestration:operate`, `access:read`,
-`access:write`, `filesystem:read` and `source-control:write`.
+`access:write`, `filesystem:read`, `source-control:write` and `environment:maintain`.
 
 Panes Rex starts get the Rex server's environment, not their starter's, so sync and the panes
 hand on t3rex's own settings (`T3REX_STATE_DIR`, `T3CODE_HOME`, `XDG_CONFIG_HOME`) on the
@@ -320,7 +353,8 @@ the open question; the app only links the in-process change notification for its
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `t3rex install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `t3rex/t3-surface.json`. `release.yml` builds a universal binary for a `v*` tag and attaches `t3rex-macos-universal.tar.gz` and its SHA-256 to the release. |
 | `scripts/dev-restart` | A sync of your own build, with its own state, for development. |
-| `docs/` | This file, screenshots (`screens/`) and frames drawn from Rex's screen data (`frames/`). |
+| `docs/` | This file, [usage](usage.md), the README's pictures (`assets/`) and frames drawn from Rex's screen data (`frames/`). |
+| `skills/t3rex/` | The skill that teaches coding agents to install, check and drive t3rex. |
 
 ## Development
 

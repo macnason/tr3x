@@ -543,9 +543,6 @@ impl Composer {
             .into_iter()
             .filter(|window| window.left <= 20)
             .collect();
-        if windows.is_empty() {
-            return None;
-        }
         // The chip as the chips would draw it, with its logo and ` ▾`, and two columns apart.
         let chip = unicode_width::UnicodeWidthStr::width(settings.summary(config, 1000).as_str())
             + if self.logos.contains_key(&settings.instance) {
@@ -554,6 +551,12 @@ impl Composer {
                 2
             };
         let room = width.checked_sub(chip + 2)?;
+        // Without a limit to warn about, an update waiting for you.
+        if windows.is_empty() {
+            let note = crate::update::notice(self.client.id())?;
+            return (unicode_width::UnicodeWidthStr::width(note.as_str()) <= room)
+                .then(|| format!("{}{note}{}", crate::chat::DIM, crate::chat::RESET));
+        }
         crate::usage::line(&windows, t3::now_ms(), self.offset_minutes, room)
     }
 
@@ -1169,6 +1172,17 @@ impl Composer {
                 self.note("Deleting can't be undone. /delete again to delete", true);
             }
             "delete" => self.spawn(lifecycle(Lifecycle::Delete, "Deleted")),
+            "updates" => match crate::update::apply_mode(arg) {
+                Ok(note) => self.note(note, false),
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
+            "update" => match std::env::var("REX_BLOCK") {
+                Ok(block) => self.spawn(async move {
+                    crate::update::open_layer(&block).await?;
+                    Ok(String::new())
+                }),
+                Err(_) => self.note("Run this in Rex, or `t3rex update` in a terminal", true),
+            },
             "reply" => match crate::reply::apply(arg) {
                 Ok(note) => self.note(note, false),
                 Err(e) => self.note(format!("{e:#}"), true),

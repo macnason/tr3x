@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(registry.find("studio").unwrap().name(), "studio");
         // Pairing again keeps the alias and adds the new address after the old.
         let mut again = machine("ddf826b2-3408", "mac");
-        again.origins = vec!["http://100.97.217.14:3773".into()];
+        again.origins = vec!["http://100.64.0.7:3773".into()];
         registry.upsert(again);
         let m = registry.get("ddf826b2-3408").unwrap();
         assert_eq!(m.alias.as_deref(), Some("studio"));

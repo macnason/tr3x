@@ -204,6 +204,22 @@ rex.action{
   end,
 }
 
+-- What's new for t3rex and for T3 on each machine, in a floating window that asks before it
+-- installs anything.
+rex.action{
+  name = "t3_update",
+  title = "Update t3rex and T3…",
+  category = "T3 Code",
+  keywords = "t3 update upgrade version release new install",
+  run = function(ctx)
+    local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.15, 0.2, 0.7, 0.5 }, focus = true,
+      layout = { block = { flavor = "com.superlogical.terminal.shell", label = "Updates",
+        options = { shell = "none", login = false, command = pane({ "update", "--wait" }) } } } }
+    rex.session.disown_block{ session_id = ctx.session_id }
+    if err then error(err, 0) end
+  end,
+}
+
 -- One T3 Code session for every machine, or a session for each.
 local function sessions_action(name, title, split)
   rex.action{
