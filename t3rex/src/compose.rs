@@ -1672,6 +1672,19 @@ impl Composer {
         }
     }
 
+    /// The provider instance the next message goes to: the thread's, unless a model picked for
+    /// the next message says otherwise. Empty until the thread and config are known.
+    pub(crate) fn next_instance(&self) -> String {
+        let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
+            return String::new();
+        };
+        let mut settings = Settings::of_thread(config, state.thread());
+        if let Some(draft) = &self.draft {
+            draft.over(config, &mut settings);
+        }
+        settings.instance
+    }
+
     /// Whether nothing is typed or half-answered, so the pane can start again.
     pub(crate) fn idle(&self) -> bool {
         self.editor.text.is_empty() && self.answers.is_empty() && self.images.is_empty()

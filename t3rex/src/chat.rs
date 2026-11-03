@@ -1490,12 +1490,12 @@ async fn event_loop(
         // the top.
         if !renamed
             && composer.idle()
-            && let Some(s) = composer.state.as_ref()
+            && composer.state.is_some()
         {
-            let instance = s.thread()["modelSelection"]["instanceId"]
-                .as_str()
-                .unwrap_or_default();
-            let driver = crate::icons::driver_of(composer.config.as_ref(), instance);
+            // The provider the next message goes to: the thread's, or the one picked for it
+            // while it worked.
+            let instance = composer.next_instance();
+            let driver = crate::icons::driver_of(composer.config.as_ref(), &instance);
             let want = crate::icons::program_name(driver).unwrap_or("t3rex");
             if !instance.is_empty()
                 && composer.config.is_some()
@@ -1505,6 +1505,11 @@ async fn event_loop(
                 out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
                 let _ = crossterm::terminal::disable_raw_mode();
                 crate::icons::become_program(driver);
+                // Still here: the pane couldn't start again, so it carries on as it was.
+                let _ = crossterm::terminal::enable_raw_mode();
+                pane.reflow = true;
+                dirty = true;
+                reply = true;
             }
         }
         // Reply's rows at the bottom, and the conversation's above them.

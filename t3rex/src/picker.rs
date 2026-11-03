@@ -577,7 +577,7 @@ fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
     let mut items = Vec::new();
     for provider in models::providers(config)
         .iter()
-        .filter(|p| models::enabled(p))
+        .filter(|p| models::enabled(p) && p["status"].as_str() != Some("disabled"))
     {
         let name = provider["displayName"]
             .as_str()
@@ -587,7 +587,7 @@ fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
             .as_str()
             .and_then(|i| logos.get(i))
             .cloned();
-        for model in models::models(provider) {
+        for model in shown_models(config, provider) {
             let mut item = Item::new(
                 models::qualified(provider, model),
                 short_model_name(
@@ -603,6 +603,36 @@ fn model_items(config: &Value, logos: &HashMap<String, Icon>) -> Vec<Item> {
         }
     }
     items
+}
+
+/// The provider's models as T3's picker lists them: the ones hidden in T3's settings left
+/// out, and the rest in the order set there, then as the provider lists them.
+fn shown_models<'a>(config: &Value, provider: &'a Value) -> Vec<&'a Value> {
+    let prefs = &config["settings"]["providerModelPreferences"][provider["instanceId"]
+        .as_str()
+        .unwrap_or_default()];
+    let names = |key: &str| -> Vec<&str> {
+        prefs[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    };
+    let (hidden, order) = (names("hiddenModels"), names("modelOrder"));
+    let mut shown: Vec<&Value> = models::models(provider)
+        .iter()
+        .filter(|m| {
+            m["isCustom"] == true || !m["slug"].as_str().is_some_and(|s| hidden.contains(&s))
+        })
+        .collect();
+    shown.sort_by_key(|m| {
+        m["slug"]
+            .as_str()
+            .and_then(|s| order.iter().position(|o| *o == s))
+            .unwrap_or(usize::MAX)
+    });
+    shown
 }
 
 pub fn effort_items(config: &Value, settings: &Settings) -> Vec<Item> {
@@ -668,6 +698,23 @@ mod tests {
         }
         assert_eq!(menu.shown(), vec![1]);
         assert!(matches!(menu.key(key(KeyCode::Enter)), MenuKey::Chose(id) if id == "b"));
+    }
+
+    #[test]
+    fn the_model_list_follows_t3s_hidden_and_ordered_models() {
+        let mut config = json!({"providers": [
+            {"instanceId": "claudeAgent", "displayName": "Claude", "models": [
+                {"slug": "a", "name": "A"}, {"slug": "b", "name": "B"}, {"slug": "c", "name": "C"}]},
+            {"instanceId": "off", "displayName": "Off", "status": "disabled",
+             "models": [{"slug": "x", "name": "X"}]}],
+            "settings": {"providerModelPreferences":
+                {"claudeAgent": {"hiddenModels": ["a"], "modelOrder": ["c"]}}}});
+        let ids = |c: &Value| -> Vec<String> {
+            model_items(c, &HashMap::new()).into_iter().map(|i| i.id).collect()
+        };
+        assert_eq!(ids(&config), ["claudeAgent/c", "claudeAgent/b"]);
+        config["settings"] = json!({});
+        assert_eq!(ids(&config), ["claudeAgent/a", "claudeAgent/b", "claudeAgent/c"]);
     }
 
     #[test]
