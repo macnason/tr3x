@@ -264,7 +264,7 @@ fn releases_url() -> String {
     })
 }
 
-async fn curl(args: &[&str]) -> Result<Vec<u8>> {
+pub(crate) async fn curl(args: &[&str]) -> Result<Vec<u8>> {
     let out = tokio::process::Command::new("/usr/bin/curl")
         .args(["-fsSL", "--max-time", "120"])
         .args(args)
@@ -364,7 +364,7 @@ async fn fetch_into(release: &Release, dir: &Path) -> Result<PathBuf> {
     Ok(bin)
 }
 
-async fn sha256(path: &Path) -> Result<String> {
+pub(crate) async fn sha256(path: &Path) -> Result<String> {
     // macOS has `shasum`; most Linux machines have `sha256sum`, and some only `shasum`.
     let (program, args): (&str, &[&str]) = if crate::platform::MAC || !on_path("sha256sum") {
         ("shasum", &["-a", "256"])

@@ -174,39 +174,6 @@ fi
 [ -n "$BIN" ] && [ -x "$BIN" ] || { no "Couldn't find t3rex in the download"; exit 1; }
 ok "t3rex $("$BIN" --version | cut -d' ' -f2)"
 
-# sup shows a thread's pull request, with reviews and merging. Fetched from its releases when
-# it's missing, checked against the release's checksums; t3rex works without it.
-get_sup() {
-  command -v sup >/dev/null 2>&1 && return 0
-  [ -x "$HOME/.local/bin/sup" ] && return 0
-  case "$OS" in Darwin) sos=darwin ;; *) sos=linux ;; esac
-  case "$(uname -m)" in x86_64|amd64) sarch=amd64 ;; aarch64|arm64) sarch=arm64 ;; *) return 0 ;; esac
-  sasset="sup_${sos}_${sarch}.tar.gz"
-  sbase=https://github.com/superultrainc/sup/releases/latest/download
-  mkdir "$WORK/sup"
-  if ! $CURL -fsSL -o "$WORK/sup/$sasset" "$sbase/$sasset" \
-    || ! $CURL -fsSL -o "$WORK/sup/checksums.txt" "$sbase/checksums.txt"; then
-    say "  Couldn't download sup; pull requests fall back to gh. https://github.com/superultrainc/sup#install"
-    return 0
-  fi
-  swant=$(grep " $sasset\$" "$WORK/sup/checksums.txt" | cut -d' ' -f1)
-  if command -v sha256sum >/dev/null 2>&1; then
-    sgot=$(sha256sum "$WORK/sup/$sasset" | cut -d' ' -f1)
-  else
-    sgot=$(shasum -a 256 "$WORK/sup/$sasset" | cut -d' ' -f1)
-  fi
-  if [ -z "$swant" ] || [ "$swant" != "$sgot" ]; then
-    no "sup's download doesn't match its checksum; not installing it"
-    return 0
-  fi
-  tar -xzf "$WORK/sup/$sasset" -C "$WORK/sup" sup 2>/dev/null || return 0
-  mkdir -p "$HOME/.local/bin"
-  install -m 0755 "$WORK/sup/sup" "$HOME/.local/bin/sup"
-  if [ "$OS" = Darwin ]; then xattr -d com.apple.quarantine "$HOME/.local/bin/sup" 2>/dev/null || true; fi
-  ok "sup, for pull requests"
-}
-get_sup
-
 # Copies itself to ~/.local/bin when it runs from a build or a download.
 # Piped into sh, stdin is this script: install asks about other machines on the terminal.
 if [ -r /dev/tty ] && [ -t 1 ]; then

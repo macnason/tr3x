@@ -29,6 +29,7 @@ mod rex;
 mod scheme;
 mod slash;
 mod state;
+mod sup;
 mod surface;
 mod sync;
 mod t3;
