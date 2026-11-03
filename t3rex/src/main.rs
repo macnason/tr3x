@@ -5,6 +5,7 @@ mod actions;
 mod ask;
 mod chat;
 mod compose;
+mod draft;
 mod fade;
 mod find;
 mod icons;
@@ -20,6 +21,7 @@ mod picture;
 mod pr;
 mod prompt;
 mod render;
+mod reply;
 mod rex;
 mod scheme;
 mod slash;
@@ -27,6 +29,8 @@ mod state;
 mod surface;
 mod sync;
 mod t3;
+mod term;
+mod usage;
 mod width;
 
 use std::time::Duration;
@@ -48,8 +52,8 @@ struct Cli {
     command: Command,
 }
 
-// What a user runs is install, uninstall, doctor, width, pair, envs, env and sessions. The rest is what Rex's actions,
-// panes and config run, so `--help` leaves it out.
+// What a user runs is install, uninstall, doctor, width, pair, envs, env, sessions and reply.
+// The rest is what Rex's actions, panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
 enum Command {
     /// Keep the "T3 Code" Rex session in step with T3. Runs until stopped; Rex starts it.
@@ -68,6 +72,13 @@ enum Command {
         thread: String,
         /// Only read: never mark the thread visited. For a development sync beside an
         /// installed one.
+        #[arg(long)]
+        passive: bool,
+    },
+    /// The Reply pane of a thread's window, when Reply has a pane of its own.
+    #[command(hide = true)]
+    Compose {
+        thread: String,
         #[arg(long)]
         passive: bool,
     },
@@ -105,9 +116,6 @@ enum Command {
         #[arg(long)]
         client: Option<String>,
     },
-    /// The reply pane of a thread's window.
-    #[command(hide = true)]
-    Compose { thread: String },
     /// Print a thread's transcript blocks, for working on the chat pane.
     #[command(hide = true)]
     Blocks { thread: String },
@@ -254,6 +262,8 @@ enum Command {
     },
     /// Show or set how the T3 Code session holds your machines: merged or per-machine.
     Sessions { split: Option<String> },
+    /// Show or set where Reply goes: inline, under the conversation, or a pane of its own.
+    Reply { mode: Option<String> },
     /// Set up t3rex: the Rex config that runs it, and a first sync.
     Install,
     /// Undo `install`: stop sync, remove the config, close t3rex's session.
@@ -460,8 +470,15 @@ fn interactive() -> bool {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Sync { no_first, log } => sync::run(!no_first, log).await,
-        Command::Chat { thread, passive } => chat::run(thread, passive).await,
-        Command::Compose { thread } => compose::run(thread).await,
+        Command::Chat { thread, passive } => {
+            let role = if reply::own_pane() {
+                chat::Role::Conversation
+            } else {
+                chat::Role::Inline
+            };
+            chat::run(thread, passive, role).await
+        }
+        Command::Compose { thread, passive } => chat::run(thread, passive, chat::Role::Reply).await,
         Command::Find { client } => find::run(client).await,
         Command::Reopen { client } => find::reopen_last(client).await,
         Command::New { welcome, env } => new::run(welcome, env).await,
@@ -668,6 +685,10 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Command::Sessions { split } => {
             println!("{}", machines::set_sessions(split.as_deref())?);
+            Ok(())
+        }
+        Command::Reply { mode } => {
+            println!("{}", reply::apply(mode.as_deref().unwrap_or_default())?);
             Ok(())
         }
         Command::Install => install::install().await,

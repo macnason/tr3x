@@ -4,10 +4,11 @@
 //! description, conversation, review threads, checks and files, and merges, approves and
 //! comments from the keyboard.
 //!
-//! The drawer runs the thread's full height beside the conversation and Reply when the window
-//! has room for both, else floats over them, as on a phone. `q` in sup closes it.
+//! The drawer floats over the thread's pane: down its right side, full height, when the window
+//! has room for both, else over nearly all of it, as on a phone. A floating layer, not a split,
+//! so a phone looking at the same session never gets it as a window of its own. `q` in sup
+//! closes it.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,19 +20,14 @@ use serde_json::{Value, json};
 use crate::chat::{BOLD, DIM, GREEN, RED, RESET};
 use crate::rex::{Rex, lua_str};
 use crate::t3;
+use crate::term::out;
 
 /// The drawer's block label, which finds it again.
 const LABEL: &str = "Pull Request";
 /// The window width, in columns, that holds the conversation and the drawer side by side.
 const ROOM: u64 = 140;
 /// The conversation's share of the window beside the drawer.
-const RATIO: f64 = 0.55;
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+const RATIO: f64 = 0.45;
 
 /// Opens the drawer for `thread` in the window holding `block`, or goes to the one already
 /// open there. `create` makes the pull request first, replacing an open drawer.
@@ -71,15 +67,6 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
         let args = json!({"session_id": session, "block_id": drawer}).to_string();
         rex.call("block.close", &args).await?;
     }
-    // The tiled layer's top split, or its one block: the drawer goes beside all of it.
-    let root = window["layers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|l| l["kind"] == "tiled")
-        .map(|l| &l["layout"])
-        .and_then(|n| n["split"]["split_id"].as_str().or(n["block_id"].as_str()))
-        .context("that window has no panes")?;
     // The window's width: the pane's columns over its share of the window, as the layout has it
     // now. A pane's size follows a change of layout a moment later.
     let size = rex.block_method(&session, block, "size").await?;
@@ -97,7 +84,6 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
     }
     let data = json!({
         "argv": crate::rex::pane_argv(&exe, &args),
-        "root": root,
         "window": window["window_id"],
         "wide": wide,
         "ratio": RATIO,
@@ -107,14 +93,10 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
         r#"local d = rex.json.decode({})
 local layout = {{ block = {{ flavor = "com.superlogical.terminal.shell", label = d.label,
   options = {{ shell = "none", login = false, command = d.argv }} }} }}
-local _, err
-if d.wide then
-  _, err = rex.session.new_split{{ anchor_id = d.root, direction = "horizontal", side = "after",
-    ratio = d.ratio, focus = true, layout = layout }}
-else
-  _, err = rex.session.new_layer{{ window_id = d.window, bounds = {{ 0.03, 0.03, 0.94, 0.94 }},
-    focus = true, layout = layout }}
-end
+local bounds = {{ 0.03, 0.03, 0.94, 0.94 }}
+if d.wide then bounds = {{ d.ratio, 0, 1 - d.ratio, 1 }} end
+local _, err = rex.session.new_layer{{ window_id = d.window, bounds = bounds, focus = true,
+  layout = layout }}
 rex.session.disown_block{{}}
 if err then error(err, 0) end
 return {{}}"#,
@@ -176,10 +158,11 @@ async fn run(key: &str, create: bool) -> Result<()> {
     out(&format!(
         "\r\n {BOLD}{LABEL}{RESET}\r\n {DIM}{branch}{RESET}\r\n\r\n"
     ));
-    let open = status["pr"]["url"]
-        .as_str()
-        .filter(|_| status["pr"]["state"] == "open");
-    let url = match (open, create) {
+    // The PR linked to the thread, open or not; else the branch's.
+    let known = linked(found)
+        .and_then(|pr| pr["url"].as_str())
+        .or(status["pr"]["url"].as_str());
+    let url = match (known, create) {
         (Some(url), false) => url.to_string(),
         (_, false) => {
             out(&format!(
@@ -354,6 +337,20 @@ async fn confirm() -> bool {
     yes
 }
 
+/// The pull request a thread is linked to: an open one, else the one linked last.
+fn linked(thread: &Value) -> Option<&Value> {
+    let prs = thread["pullRequests"].as_array()?;
+    prs.iter()
+        .filter(|pr| pr["snapshot"]["state"] == "open")
+        .chain(prs.iter())
+        .max_by_key(|pr| {
+            (
+                pr["snapshot"]["state"] == "open",
+                pr["linkedAt"].as_str().unwrap_or_default(),
+            )
+        })
+}
+
 /// Holds the pane open on what it says until a key, or a minute.
 async fn wait_key() {
     let _ = crossterm::terminal::enable_raw_mode();
@@ -372,6 +369,29 @@ async fn wait_key() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_open_pull_request_else_the_last_linked() {
+        let pr = |n: u64, state: &str, at: &str| json!({"number": n, "linkedAt": at, "snapshot": {"state": state}});
+        let thread = json!({"pullRequests": [
+            pr(1, "merged", "2026-11-01T00:00:00Z"),
+            pr(2, "open", "2026-10-01T00:00:00Z"),
+            pr(3, "closed", "2026-11-02T00:00:00Z"),
+        ]});
+        assert_eq!(
+            linked(&thread).map(|pr| pr["number"].clone()),
+            Some(json!(2))
+        );
+        let thread = json!({"pullRequests": [
+            pr(1, "merged", "2026-11-01T00:00:00Z"),
+            pr(3, "merged", "2026-11-02T00:00:00Z"),
+        ]});
+        assert_eq!(
+            linked(&thread).map(|pr| pr["number"].clone()),
+            Some(json!(3))
+        );
+        assert!(linked(&json!({})).is_none());
+    }
 
     #[test]
     fn share_of_a_pane_in_a_split() {

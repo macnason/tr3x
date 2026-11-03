@@ -16,13 +16,17 @@ goes for every machine you run T3 on, without the T3 app.
 - **Read like a terminal.** The conversation is plain terminal output, so Rex's scrollback,
   find, selection and links all work. Markdown, tables, highlighted code and inline images
   render in a centred column at T3's chat width.
-- **Reply where you read.** One input under the conversation, with T3's chips for model,
-  effort and access. Approvals and questions get buttons right there: one click on a Mac, one
+- **Reply where you read.** One input at the bottom of the conversation, in the same pane, with
+  T3's chips for model, effort and access. Or in a pane of its own under the conversation, with
+  `/reply pane`. Approvals and questions get buttons right there: one click on a Mac, one
   tap on a phone.
 - **Rex's markers are T3's.** Each tab reports its thread's status to Rex, so the dot on a tab
   means what it means in T3, and a waiting tab says what it's waiting on: the command, the file
   or the question. The tab's glyph is the thread's provider, and its label starts with what T3
   is waiting on you for: `●` an approval, `?` a question, `✕` failed, `✓` done and unread.
+- **Usage limits.** A thread stopped on its provider's usage limit says so, in the
+  conversation and under its tab: when the limit resets, and that T3 picks it up then if
+  auto-resume is on. Reply shows what the model's provider has left, `Session 62% left`.
 - **Any screen.** Rex's Mac and iPhone apps can watch the same session from another device.
   **Fit to This Device** sizes it to the one you're on, the thread's title opens it in T3 there,
   and pictures follow that screen's light or dark.
@@ -82,7 +86,7 @@ stays on (`t3 service install` there) and pair it: threads you start on it keep 
 | | |
 |---|---|
 | New thread | ⌘T or + in the T3 Code session, or ⌃⌘N anywhere. Type the first message; the chips under it pick the project, model, effort, access, and Local or New worktree and its base branch. **Add folder…** in the project chip adds a project: type a path, Tab completes it. Tab moves to the chips, Enter or a click opens one, typing filters. Enter sends. The tab becomes the thread's. |
-| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access. A message to a running thread steers it or queues behind it, as T3's Follow-up behavior setting says; ⌘Enter does the other for one message, as in T3. Shift+Enter, Alt+Enter or Ctrl+J for a new line; Reply grows with the text, up to 8 lines or 35% of the window, and shrinks back once sent. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
+| Reply | Type in Reply, Enter to send. One chip under it shows the model, effort and access, and beside it what that provider has left of its usage limits, yellow at 20% and red at 10%. A message to a running thread steers it or queues behind it, as T3's Follow-up behavior setting says; ⌘Enter does the other for one message, as in T3. Shift+Enter, Alt+Enter or Ctrl+J for a new line; Reply grows with the text, up to 8 lines or 35% of the window, and shrinks back once sent. Typing in the conversation moves you to Reply. A send that fails keeps your text. |
 | Typing keys | As in Claude Code and Codex: Esc twice clears the input and its pictures, and ⌘Z brings the text back; Esc on an empty input stops a running thread; ↑ at the start brings back what you sent before, ↓ goes forward again and back to what you'd typed. As in any Mac text field: ↑ ↓ and ⌘← ⌘→ by the rows on screen, ⌥← ⌥→ by word, ⌥↑ ⌥↓ by paragraph, ⌘↑ ⌘↓ to the start and end; ⌘⌫ ⌥⌫ ⌘⌦ ⌥⌦ delete to the row's start, a word, to the row's end, the next word; ⌘Z ⌘⇧Z undo and redo; ⌃A ⌃E ⌃B ⌃F ⌃P ⌃N ⌃D ⌃H ⌃K ⌃Y ⌃T ⌃O, with ⌃U and ⌃W as in a shell. The same keys work in New Thread and Rename. |
 | Pictures | Paste a picture or screenshot (⌘V), or drop an image file, into Reply. It shows as a chip above the input and goes with the next message; click its ✕, or Backspace at the start of the input, to take it off. Pictures you send show in the conversation. |
 | Model | Click the chip under Reply, press Tab there, or type `/model`. One picker: every enabled provider's models, then the model's efforts and access; ← → switch between them. The choice applies to the next message. |
@@ -91,9 +95,10 @@ stays on (`t3 service install` there) and pair it: threads you start on it keep 
 | Another machine | On it, run `curl -fsSL http://<this Mac>:3779/join \| sh`; `t3rex pair` prints the exact command. That's all: it pairs that machine's T3 with Rex over your tailnet, and only your own machines can. Where `ssh <host>` already works, `t3rex pair` does it from here with one confirm instead. A link from T3 → Settings → Connections there works too (`t3rex pair 'https://…/pair#token=…'`). **Pair Another Machine…** in the palette does the same from any device. `t3rex envs` lists them, `t3rex env rename box studio` names one, `t3rex env forget studio` unpairs it. |
 | Machine | In a new thread, the first chip picks the machine, once there's more than one. It loads that machine's projects, models and branches; **Pair…** pairs one that isn't yet. |
 | Sessions | One **T3 Code** session for every machine, or `t3rex sessions per-machine` for a session each (**Sessions: One per Machine** in the palette). ⌃⌘I still goes to whatever needs you, on any machine. Switching opens the tabs again in their new sessions and settles nothing. |
+| Reply pane | `/reply pane` in Reply, or `t3rex reply pane`, gives Reply a pane of its own under the conversation, sized to fit it; `/reply inline` puts it back. Open windows change within a few seconds. Rex's iPhone app shows each pane as a window of its own, so inline suits a phone. |
 | Open in T3 | Click the thread's title at the top of the conversation. It opens T3's web app on the device you click it on, at the address T3 serves on your tailnet, or T3 Code itself when there's none. `/open` opens T3 Code on the Mac running it. |
 | Another device | Run **Fit to This Device** from the palette on the laptop or phone you're using. The session's panes take its size until another device runs it. |
-| Pull request | **Create Pull Request** in the palette, or `/pr create` in Reply: T3 commits, pushes and opens one with the title and body it writes, as its own Create PR does, on a new branch if the thread is on the default one. **Show Pull Request** or `/pr` opens the thread's. Either way it opens in a drawer on the right of the thread, full height when the window is wide enough, else floating over it. [sup](https://github.com/superultrainc/sup) shows it there: description, conversation, review threads, checks and files; `m` merges, `A` approves, `M` comments, `q` steps back to sup's list of your pull requests and again closes the drawer. Without sup, the drawer shows `gh pr view`. |
+| Pull request | **Create Pull Request** in the palette, or `/pr create` in Reply: T3 commits, pushes and opens one with the title and body it writes, as its own Create PR does, on a new branch if the thread is on the default one. **Show Pull Request** or `/pr` opens the thread's. Either way it opens in a drawer floating over the right of the thread, full height when the window is wide enough, else over nearly all of it. [sup](https://github.com/superultrainc/sup) shows it there: description, conversation, review threads, checks and files; `m` merges, `A` approves, `M` comments, `q` steps back to sup's list of your pull requests and again closes the drawer. Without sup, the drawer shows `gh pr view`. |
 | Settle | Close the tab. A thread that's working or waiting on you only hides until it changes. `/settle` settles it whatever it's doing. **Reopen Last Settled** in the palette undoes a tab closed by accident. |
 | Find | **Find Thread…** in the palette lists every thread on every machine, grouped Open, Snoozed, Settled and Archived, newest first. Typing filters. Enter brings one back to its tab, unsettling, waking or unarchiving it as needed; ⌥Enter opens it in T3. |
 | Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |

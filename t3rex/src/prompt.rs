@@ -1,20 +1,13 @@
 //! One question in a floating layer, for the palette's actions that ask before they act:
 //! Rename Thread… edits the title in place, Delete Thread… asks to be sure.
 
-use std::io::Write;
-
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 
 use crate::chat::{BLUE, BOLD, DIM, RED, RESET, fit};
 use crate::compose::{Editor, edit};
-
-fn out(text: &str) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
+use crate::term::out;
 
 /// What came of the question.
 pub enum Answer {
