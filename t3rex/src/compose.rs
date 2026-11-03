@@ -1504,7 +1504,12 @@ pub async fn run(thread: String) -> Result<()> {
                         composer.offline = None;
                     }
                     Some(WatchEvent::Reconnecting { reason, retry_in }) => {
-                        composer.offline = Some(crate::chat::offline_line(composer.client.name(), &reason, retry_in));
+                        composer.offline = Some(crate::chat::offline_line(
+                            composer.client.name(),
+                            composer.client.is_local(),
+                            &reason,
+                            retry_in,
+                        ));
                     }
                     Some(WatchEvent::Failed(m)) => anyhow::bail!("T3 refused the thread: {m}"),
                     None => anyhow::bail!("the thread's subscription ended"),

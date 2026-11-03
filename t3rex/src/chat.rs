@@ -615,13 +615,21 @@ fn status_sequence(word: Option<&str>, ask: Option<&str>, title: &str) -> String
 }
 
 /// What a pane says while its machine is out of reach: that it is, or that it needs pairing.
-pub fn offline_line(machine: &str, reason: &str, retry_in: Duration) -> String {
+/// This Mac's T3 runs inside T3 Code, so when it's gone the app was quit (or is restarting),
+/// and its agents stopped with it. Saying so beats a retry count nobody can act on.
+pub fn offline_line(machine: &str, local: bool, reason: &str, retry_in: Duration) -> String {
     if let Some(at) = reason.find("Run `t3rex pair") {
         return reason[at..].trim_end_matches('.').to_string();
+    }
+    if local {
+        return LOCAL_OFFLINE.to_string();
     }
     let secs = retry_in.as_secs().max(1);
     format!("{machine} is offline · retrying in {secs}s")
 }
+
+const LOCAL_OFFLINE: &str =
+    "T3 Code isn't running · agents stop when it quits · open T3 Code to carry on";
 
 impl Pane {
     /// Before the thread has loaded: the offline line alone, at the top.
@@ -1006,7 +1014,7 @@ async fn event_loop(
                     dirty = true;
                 }
                 Some(WatchEvent::Reconnecting { reason, retry_in }) => {
-                    let said = offline_line(client.name(), &reason, retry_in);
+                    let said = offline_line(client.name(), client.is_local(), &reason, retry_in);
                     if pane.offline.as_deref() != Some(said.as_str()) {
                         pane.offline = Some(said);
                         dirty = true;
@@ -1166,6 +1174,22 @@ mod tests {
             change: None,
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_lost_mac_says_t3_quit_and_a_lost_machine_says_offline() {
+        let lost = "T3 connection lost: the server closed the connection";
+        let wait = Duration::from_secs(4);
+        assert_eq!(offline_line("Mac mini", true, lost, wait), LOCAL_OFFLINE);
+        assert_eq!(
+            offline_line("studio", false, lost, wait),
+            "studio is offline · retrying in 4s"
+        );
+        let unpaired = "Rex isn't paired. Run `t3rex pair studio`.";
+        assert_eq!(
+            offline_line("studio", true, unpaired, wait),
+            "Run `t3rex pair studio`"
+        );
     }
 
     #[test]
