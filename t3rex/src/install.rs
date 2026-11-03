@@ -450,6 +450,7 @@ pub async fn doctor() -> Result<()> {
     };
     let reinstall = "Run `t3rex install`.";
 
+    step(true, "t3rex", env!("CARGO_PKG_VERSION"));
     let rex = Rex::find();
     let sessions = rex.sessions().await;
     match &sessions {

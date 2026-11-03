@@ -4,9 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/macnason/t3rex/master/install.sh | sh
 #   sh install.sh                        # from a clone, building with cargo
 #
-# On a Mac or on Linux. Checks that Rex and T3 Code are installed and running, gets the t3rex binary (a build when
-# run from a clone with Rust installed, else the latest release, checked against its SHA-256),
-# and runs `t3rex install`. T3REX_URL (and T3REX_SHA256) pick another tarball. Nothing needs
+# On a Mac or on Linux. Checks that Rex and T3 Code are installed and running, gets the t3rex
+# binary (a build when run from a clone with Rust installed, else the latest release, checked
+# against its SHA-256), and runs `t3rex install`. T3REX_URL (and T3REX_SHA256) pick another tarball. Nothing needs
 # sudo. `t3rex uninstall` undoes it.
 set -eu
 
@@ -71,7 +71,7 @@ UNIT
 }
 
 if [ "$OS" = Darwin ]; then
-  CURL=/usr/bin/curl PY=/usr/bin/python3
+  CURL=/usr/bin/curl
   REX_APP=${T3REX_REX_APP:-"/Applications/Rex Beta.app"}
   REX="$REX_APP/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
   T3_APP=${T3REX_T3_APP:-}
@@ -81,7 +81,7 @@ if [ "$OS" = Darwin ]; then
     done
   fi
 else
-  CURL=curl PY=python3 T3_APP=
+  CURL=curl T3_APP=
   REX=${T3REX_REX:-$(command -v rex || true)}
 fi
 
@@ -114,7 +114,9 @@ ok "Rex"
 RUNTIME=${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json
 t3_up() {
   [ -f "$RUNTIME" ] || return 1
-  ORIGIN=$($PY -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["origin"])' "$RUNTIME" 2>/dev/null) || return 1
+  # No python3: a Mac without the Command Line Tools answers it with an install dialog.
+  ORIGIN=$(sed -n 's/.*"origin"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RUNTIME" | head -1)
+  [ -n "$ORIGIN" ] || return 1
   $CURL -fsS --max-time 3 -o /dev/null "$ORIGIN/" 2>/dev/null
 }
 if ! t3_up; then
