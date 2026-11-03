@@ -122,19 +122,13 @@ pub fn mac_is_dark() -> bool {
 
 impl Media {
     pub fn new(state_dir: Option<&Path>) -> Media {
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let ratio = crossterm::terminal::window_size()
-            .ok()
-            .filter(|w| w.width > 0 && w.height > 0 && cols > 0 && rows > 0)
-            .map(|w| (w.width as f64 / cols as f64) / (w.height as f64 / rows as f64))
-            .unwrap_or(0.5);
         Media {
             attachments: state_dir
                 .map(|d| d.join("attachments"))
                 .filter(|d| d.is_dir()),
             cache: home().join("Library/Caches/t3rex"),
             dark: crate::scheme::dark(),
-            cell_ratio: ratio,
+            cell_ratio: current_cell_ratio().unwrap_or(0.5),
             snapshots: HashMap::new(),
             asked: HashSet::new(),
             chrome: find_chrome(),
@@ -272,9 +266,14 @@ impl Media {
         held.bytes += bytes;
         // Never wider than the picture is at 2x, so small ones stay small.
         let cell_px = 8.0 * 2.0;
+        let ratio = current_cell_ratio().unwrap_or(self.cell_ratio);
         let cols = cols.min(((w as f64 / cell_px).ceil() as usize).max(8));
-        let rows =
-            ((cols as f64 * self.cell_ratio * h as f64 / w as f64).round() as usize).clamp(1, 60);
+        // Kitty stretches to both requested dimensions. Fit the width to the row budget
+        // before rounding the height, rather than truncating the height alone.
+        let cols = cols.min((60.0 * w as f64 / (ratio * h as f64)).floor().max(1.0) as usize);
+        let rows = (cols as f64 * ratio * h as f64 / w as f64)
+            .round()
+            .clamp(1.0, 60.0) as usize;
         let name =
             base64::engine::general_purpose::STANDARD.encode(path.to_string_lossy().as_bytes());
         // i= its own id, so it can be freed. f=100 PNG (the terminal sniffs JPEG too), t=f a
@@ -284,6 +283,18 @@ impl Media {
         ));
         Some((seq, rows))
     }
+}
+
+/// Rex may not have an attached client when the pane starts. Its pixel dimensions arrive
+/// later, and can change when the client changes font size or another device takes over.
+fn current_cell_ratio() -> Option<f64> {
+    let window = crossterm::terminal::window_size().ok()?;
+    if window.width == 0 || window.height == 0 || window.columns == 0 || window.rows == 0 {
+        return None;
+    }
+    Some(
+        (window.width as f64 / window.columns as f64) / (window.height as f64 / window.rows as f64),
+    )
 }
 
 /// The page with T3's theme variables, which embeds use for their colours.
@@ -361,6 +372,30 @@ mod tests {
         head.extend(h.to_be_bytes());
         std::fs::write(&path, head).unwrap();
         path
+    }
+
+    #[test]
+    fn tall_pictures_keep_their_aspect_ratio_at_the_row_limit() {
+        let media = Media::new(None);
+        let tall = png("tall", 728, 4000);
+        let (seq, rows) = media.picture(&tall, 90).unwrap();
+        let cols: usize = seq
+            .split("c=")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected_rows =
+            cols as f64 * current_cell_ratio().unwrap_or(media.cell_ratio) * 4000.0 / 728.0;
+        assert!(
+            (rows as f64 - expected_rows).abs() <= 0.5,
+            "{cols} columns require {expected_rows} rows, got {rows}"
+        );
+        assert!(rows <= 60);
+        std::fs::remove_file(tall).unwrap();
     }
 
     #[test]

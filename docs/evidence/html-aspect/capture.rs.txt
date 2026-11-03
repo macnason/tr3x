@@ -1,0 +1,22 @@
+    #[test]
+    #[ignore]
+    fn capture_aspect_evidence() {
+        let dir = std::path::Path::new("/tmp/t3rex-aspect");
+        std::fs::create_dir_all(dir).unwrap();
+        let mut img = image::RgbImage::from_pixel(728, 2400, image::Rgb([18, 24, 32]));
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            let dx = x as i32 - 364;
+            let dy = (y % 480) as i32 - 240;
+            let d = dx * dx + dy * dy;
+            if (170*170..190*190).contains(&d) { *pixel = image::Rgb([80, 210, 170]); }
+            if x % 120 < 2 || y % 120 < 2 { *pixel = image::Rgb([55, 65, 80]); }
+        }
+        let path = dir.join("circles.png");
+        img.save(&path).unwrap();
+        let mut media = Media::new(None);
+        media.cell_ratio = 16.0 / 36.0;
+        let (seq, rows) = media.picture(&path, 46).unwrap();
+        let label = std::env::var("EVIDENCE_VERSION").unwrap();
+        std::fs::write(dir.join(format!("{label}.vt")), format!("\x1b[2J\x1b[H{label}: 728 x 2400 PNG / 16 x 36 cells\r\n{seq}{}", "\r\n".repeat(rows + 1))).unwrap();
+    }
+
