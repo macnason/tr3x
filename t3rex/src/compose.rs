@@ -554,6 +554,10 @@ impl Composer {
                 2
             };
         let room = width.checked_sub(chip + 2)?;
+        // A provider that isn't ready says so in place of its limits, wherever it runs.
+        if let Some((text, tone)) = crate::usage::problem(config, &settings.instance) {
+            return Some(format!("{tone}{}{RESET}", fit(&text, room)));
+        }
         // Without a limit to warn about, an update waiting for you.
         if windows.is_empty() {
             let note = crate::update::notice(self.client.id())?;
