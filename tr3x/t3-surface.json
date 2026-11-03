@@ -1,5 +1,5 @@
 {
-  "t3": "0.1.6-nightly.20261031.3977",
+  "t3": "0.1.7-nightly.20261103.4119",
   "capabilities": [
     "agentActivityPublishing",
     "attachmentUploads",
@@ -17,6 +17,7 @@
     "localServerStop",
     "mcpModeLimitHeader",
     "npmReleaseLookup",
+    "oneTimeSchedules",
     "otlpEndpointCheck",
     "peerLinks",
     "projectCloneTracking",
@@ -116,6 +117,7 @@
     "thread.settle",
     "thread.snooze",
     "thread.stop",
+    "thread.tag.set",
     "thread.title.regeneration.complete",
     "thread.unarchive",
     "thread.unpin",
@@ -157,6 +159,7 @@
     "orchestration.forceStopThread",
     "orchestration.getArchivedShellSnapshot",
     "orchestration.getFullThreadDiff",
+    "orchestration.getNativeChildWork",
     "orchestration.getOlderSettledThreads",
     "orchestration.getThreadFamily",
     "orchestration.getThreadProjection",
@@ -305,6 +308,7 @@
     "sourceControl.signInCancel",
     "sourceControl.signInStart",
     "sourceControl.signInWait",
+    "sourceControl.star",
     "sourceControl.starred",
     "subscribeAuthAccess",
     "subscribeDeviceState",
