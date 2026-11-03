@@ -222,13 +222,15 @@ fn is_error(line: &str) -> bool {
         || line.contains(": following "))
 }
 
-/// Waits for a sync that started after `since` to save the session.
+/// Waits for a sync that started after `since` to have the session. A session that hasn't
+/// changed isn't written again, so a sync that has logged since is as good as a fresh save.
 async fn first_sync(since: SystemTime) -> Option<State> {
-    let saved = || {
-        std::fs::metadata(state::dir().join("state.json"))
+    let after = |path: PathBuf| {
+        std::fs::metadata(path)
             .and_then(|m| m.modified())
             .is_ok_and(|t| t >= since)
     };
+    let saved = || after(state::dir().join("state.json")) || after(sync::log_path());
     for i in 0..40 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if sync::running().is_none() || !saved() {
