@@ -77,6 +77,10 @@ tab instead, with the keys that matter. New Tab (⌘T or +) in the session alway
 another. No projects in T3 yet: it opens on a folder to add as one. If T3 Code isn't running,
 the tab says so and carries on once it is.
 
+T3 Code runs this Mac's agents, so they stop when it quits (⌘Q, an update, a restart). Closing
+its window doesn't quit it. To keep agents going with the app quit, run T3 on a machine that
+stays on (`t3 service install` there) and pair it: threads you start on it keep running.
+
 ## Using it
 
 | | |
