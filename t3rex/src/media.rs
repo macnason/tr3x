@@ -4,8 +4,13 @@
 //! link that opens the thread in T3 Code, where the page is interactive.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::os::fd::AsRawFd;
+use std::time::Duration;
+
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 
 use base64::Engine;
 use t3client::projection::ThreadState;
@@ -13,7 +18,20 @@ use t3client::projection::ThreadState;
 /// How much picture a pane holds at once. The terminal keeps each picture as RGBA pixels in
 /// the snapshot it sends when Rex's app connects, and the app shows a pane whose snapshot is
 /// past about 64 MiB as Stale. Past this the oldest pictures are freed.
-const PICTURE_BUDGET: u64 = 40 << 20;
+const PICTURE_BUDGET: u64 = 16 << 20;
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+const RETRY_AFTER: Duration = Duration::from_secs(10);
+
+pub enum Ready {
+    Snapshot {
+        attachment: String,
+        path: Option<PathBuf>,
+        generation: u64,
+    },
+    Picture {
+        path: PathBuf,
+    },
+}
 
 /// Frees every picture in the terminal, including ones scrolled into the scrollback, which
 /// `a=d,d=A` leaves in memory.
@@ -65,7 +83,10 @@ pub struct Media {
     /// A cell's width over its height, for working out how many rows a picture takes.
     pub cell_ratio: f64,
     pub snapshots: HashMap<String, PathBuf>,
-    asked: HashSet<String>,
+    asked: HashMap<String, Option<tokio::task::JoinHandle<()>>>,
+    pending_pictures: RefCell<HashMap<PathBuf, bool>>,
+    done: Option<mpsc::UnboundedSender<Ready>>,
+    generation: u64,
     chrome: Option<PathBuf>,
     held: RefCell<Held>,
 }
@@ -130,7 +151,10 @@ impl Media {
             dark: crate::scheme::dark(),
             cell_ratio: current_cell_ratio().unwrap_or(0.5),
             snapshots: HashMap::new(),
-            asked: HashSet::new(),
+            asked: HashMap::new(),
+            pending_pictures: RefCell::default(),
+            done: None,
+            generation: 0,
             chrome: find_chrome(),
             held: RefCell::default(),
         }
@@ -139,8 +163,9 @@ impl Media {
     /// Follows a screen that turned light or dark: snapshots are taken again in its scheme.
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
+        self.generation = self.generation.wrapping_add(1);
         self.snapshots.clear();
-        self.asked.clear();
+        self.cancel_captures();
     }
 
     /// Frees every picture, for printing the thread again from the top.
@@ -155,26 +180,60 @@ impl Media {
         self.chrome.is_some() && self.attachments.is_some()
     }
 
-    /// Starts a snapshot of `embed` unless one is cached or under way. `done` hears the
-    /// attachment and its PNG once it exists.
-    pub fn ask(
-        &mut self,
-        embed: &Embed,
-        done: tokio::sync::mpsc::UnboundedSender<(String, PathBuf)>,
-    ) {
-        // An attachment id names a file in T3's folder and nothing outside it.
+    pub fn listen(&mut self, done: mpsc::UnboundedSender<Ready>) {
+        self.done = Some(done);
+    }
+
+    fn cancel_captures(&mut self) {
+        for capture in self.asked.values_mut() {
+            if let Some(job) = capture.take() {
+                job.abort();
+            }
+        }
+        self.asked.clear();
+    }
+
+    /// Returns whether a completed job changes this pane's current pictures.
+    pub fn ready(&mut self, ready: Ready) -> bool {
+        match ready {
+            Ready::Snapshot {
+                attachment,
+                path,
+                generation,
+            } => {
+                if generation != self.generation {
+                    return false;
+                }
+                if let Some(capture) = self.asked.get_mut(&attachment) {
+                    *capture = None;
+                }
+                if let Some(path) = path {
+                    self.snapshots.insert(attachment, path);
+                }
+                true
+            }
+            Ready::Picture { path } => {
+                self.pending_pictures.borrow_mut().insert(path, false);
+                true
+            }
+        }
+    }
+
+    /// Starts a snapshot unless cached, queued, or tried twice in this scheme.
+    pub fn ask(&mut self, embed: &Embed, done: mpsc::UnboundedSender<Ready>) {
         let safe = !embed.attachment.is_empty()
             && embed
                 .attachment
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
             && !embed.attachment.contains("..");
-        if !safe {
+        if !safe || self.snapshots.contains_key(&embed.attachment) {
             return;
         }
-        if self.snapshots.contains_key(&embed.attachment)
-            || !self.asked.insert(embed.attachment.clone())
-        {
+        if self.asked.contains_key(&embed.attachment) {
+            return;
+        }
+        if self.asked.values().filter(|c| c.is_some()).count() >= 2 {
             return;
         }
         let (Some(chrome), Some(dir)) = (self.chrome.clone(), self.attachments.clone()) else {
@@ -186,60 +245,36 @@ impl Media {
             self.snapshots.insert(embed.attachment.clone(), png);
             return;
         }
+        let generation = self.generation;
         let (embed, dark, cache) = (embed.clone(), self.dark, self.cache.clone());
-        tokio::spawn(async move {
-            let Ok(html) =
-                tokio::fs::read_to_string(dir.join(format!("{}.html", embed.attachment))).await
-            else {
-                return;
-            };
-            let _ = tokio::fs::create_dir_all(&cache).await;
-            let page = cache.join(format!("{}-{theme}.html", embed.attachment));
-            if tokio::fs::write(&page, wrap(&html, dark)).await.is_err() {
-                return;
-            }
-            let ok = tokio::process::Command::new(chrome)
-                .args([
-                    "--headless",
-                    "--disable-gpu",
-                    "--hide-scrollbars",
-                    "--force-device-scale-factor=2",
-                ])
-                // Embeds that follow prefers-color-scheme follow the Mac too.
-                .args(if dark {
-                    [
-                        "--force-dark-mode",
-                        "--blink-settings=preferredColorScheme=0",
-                    ]
-                } else {
-                    [
-                        "--disable-features=WebContentsForceDark",
-                        "--blink-settings=preferredColorScheme=1",
-                    ]
-                })
-                .arg(format!("--window-size=728,{}", embed.height))
-                // Its own profile, so a running Chrome never takes the page as a new tab.
-                .arg(format!(
-                    "--user-data-dir={}",
-                    cache.join("chromium-profile").display()
-                ))
-                .arg("--no-first-run")
-                .arg(format!("--screenshot={}", png.display()))
-                .arg(format!(
-                    "file://{}",
-                    crate::chat::percent(&page.to_string_lossy())
-                ))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .status()
+        let attachment = embed.attachment.clone();
+        let job = tokio::spawn(async move {
+            let mut path = None;
+            for attempt in 0..2 {
+                if attempt > 0 {
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
+                let Some(_slot) = lock_slot(&cache).await else {
+                    continue;
+                };
+                path = tokio::time::timeout(
+                    CAPTURE_TIMEOUT,
+                    capture_locked(&chrome, &dir, &cache, &embed, dark, &png),
+                )
                 .await
-                .is_ok_and(|s| s.success());
-            let _ = tokio::fs::remove_file(&page).await;
-            if ok && png.is_file() {
-                let _ = done.send((embed.attachment, png));
+                .ok()
+                .flatten();
+                if path.is_some() {
+                    break;
+                }
             }
+            let _ = done.send(Ready::Snapshot {
+                attachment: embed.attachment,
+                path,
+                generation,
+            });
         });
+        self.asked.insert(attachment, Some(job));
     }
 
     /// A picture `cols` columns wide, as the kitty graphics sequence and the rows it takes.
@@ -247,8 +282,19 @@ impl Media {
     /// picture bigger than a pane holds.
     pub fn picture(&self, path: &Path, cols: usize) -> Option<(String, usize)> {
         let (w, h) = png_size(path).or_else(|| jpeg_size(path))?;
-        let bytes = w as u64 * h as u64 * 4;
-        if w == 0 || h == 0 || bytes > PICTURE_BUDGET {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        // Never wider than the original at 2x; fit tall pictures before rounding rows.
+        let ratio = current_cell_ratio().unwrap_or(self.cell_ratio);
+        let cols = cols.min(((w as f64 / 16.0).ceil() as usize).max(8));
+        let cols = cols.min((60.0 * w as f64 / (ratio * h as f64)).floor().max(1.0) as usize);
+        let rows = (cols as f64 * ratio * h as f64 / w as f64)
+            .round()
+            .clamp(1.0, 60.0) as usize;
+        let (path, pixels) = self.display_picture(path, w, h, cols)?;
+        let bytes = pixels.0 as u64 * pixels.1 as u64 * 4;
+        if bytes > PICTURE_BUDGET {
             return None;
         }
         // Room for it, freeing the oldest pictures. Their rows stay, blank.
@@ -264,16 +310,6 @@ impl Media {
         let id = held.next_id;
         held.pictures.push_back((id, bytes));
         held.bytes += bytes;
-        // Never wider than the picture is at 2x, so small ones stay small.
-        let cell_px = 8.0 * 2.0;
-        let ratio = current_cell_ratio().unwrap_or(self.cell_ratio);
-        let cols = cols.min(((w as f64 / cell_px).ceil() as usize).max(8));
-        // Kitty stretches to both requested dimensions. Fit the width to the row budget
-        // before rounding the height, rather than truncating the height alone.
-        let cols = cols.min((60.0 * w as f64 / (ratio * h as f64)).floor().max(1.0) as usize);
-        let rows = (cols as f64 * ratio * h as f64 / w as f64)
-            .round()
-            .clamp(1.0, 60.0) as usize;
         let name =
             base64::engine::general_purpose::STANDARD.encode(path.to_string_lossy().as_bytes());
         // i= its own id, so it can be freed. f=100 PNG (the terminal sniffs JPEG too), t=f a
@@ -283,6 +319,175 @@ impl Media {
         ));
         Some((seq, rows))
     }
+
+    fn display_picture(
+        &self,
+        path: &Path,
+        w: u32,
+        h: u32,
+        cols: usize,
+    ) -> Option<(PathBuf, (u32, u32))> {
+        let bounds = ((cols.saturating_mul(16) as u32).clamp(16, 1536), 1920);
+        if w <= bounds.0 && h <= bounds.1 {
+            return Some((path.to_path_buf(), (w, h)));
+        }
+        let meta = std::fs::metadata(path).ok()?;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hash);
+        meta.len().hash(&mut hash);
+        meta.modified().ok()?.hash(&mut hash);
+        let cached = self.cache.join(format!(
+            "display-{:x}-{}x{}.png",
+            hash.finish(),
+            bounds.0,
+            bounds.1
+        ));
+        if let Some(size) = png_size(&cached) {
+            return Some((cached, size));
+        }
+        let done = self.done.as_ref()?.clone();
+        let mut pending = self.pending_pictures.borrow_mut();
+        if pending.contains_key(&cached)
+            || pending.values().filter(|running| **running).count() >= 2
+        {
+            return None;
+        }
+        pending.insert(cached.clone(), true);
+        {
+            let source = path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let _ = display_derivative(&source, &cached, bounds);
+                let _ = done.send(Ready::Picture { path: cached });
+            });
+        }
+        None
+    }
+}
+
+impl Drop for Media {
+    fn drop(&mut self) {
+        self.cancel_captures();
+    }
+}
+
+fn display_derivative(source: &Path, destination: &Path, bounds: (u32, u32)) -> Option<()> {
+    let image =
+        image::open(source)
+            .ok()?
+            .resize(bounds.0, bounds.1, image::imageops::FilterType::Triangle);
+    std::fs::create_dir_all(destination.parent()?).ok()?;
+    let temporary = destination.with_extension(format!("{}.png", uuid::Uuid::new_v4()));
+    let result = image
+        .save(&temporary)
+        .ok()
+        .and_then(|_| std::fs::rename(&temporary, destination).ok());
+    let _ = std::fs::remove_file(temporary);
+    result
+}
+
+struct CaptureFiles(PathBuf);
+
+impl Drop for CaptureFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// One capture slot across all panes and processes. The OS drops the flock if a holder dies.
+async fn lock_slot(cache: &Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(cache).ok()?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cache.join("capture.lock"))
+        .ok()?;
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Some(lock);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+async fn capture(
+    chrome: &Path,
+    attachments: &Path,
+    cache: &Path,
+    embed: &Embed,
+    dark: bool,
+    png: &Path,
+) -> Option<PathBuf> {
+    let _slot = lock_slot(cache).await?;
+    capture_locked(chrome, attachments, cache, embed, dark, png).await
+}
+
+/// Runs with the slot held; the deadline covers Chromium only, not the wait in the queue.
+async fn capture_locked(
+    chrome: &Path,
+    attachments: &Path,
+    cache: &Path,
+    embed: &Embed,
+    dark: bool,
+    png: &Path,
+) -> Option<PathBuf> {
+    if png.is_file() {
+        return Some(png.to_path_buf());
+    }
+    let html = tokio::fs::read_to_string(attachments.join(format!("{}.html", embed.attachment)))
+        .await
+        .ok()?;
+    let files = CaptureFiles(cache.join(format!("capture-{}", uuid::Uuid::new_v4())));
+    tokio::fs::create_dir_all(&files.0).await.ok()?;
+    let page = files.0.join("page.html");
+    let screenshot = files.0.join("snapshot.png");
+    tokio::fs::write(&page, wrap(&html, dark)).await.ok()?;
+    let ok = tokio::process::Command::new(chrome)
+        .args([
+            "--headless",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            "--force-device-scale-factor=2",
+        ])
+        .args(if dark {
+            [
+                "--force-dark-mode",
+                "--blink-settings=preferredColorScheme=0",
+            ]
+        } else {
+            [
+                "--disable-features=WebContentsForceDark",
+                "--blink-settings=preferredColorScheme=1",
+            ]
+        })
+        .arg(format!("--window-size=728,{}", embed.height))
+        .arg(format!(
+            "--user-data-dir={}",
+            files.0.join("profile").display()
+        ))
+        .arg("--no-first-run")
+        .arg(format!("--screenshot={}", screenshot.display()))
+        .arg(format!(
+            "file://{}",
+            crate::chat::percent(&page.to_string_lossy())
+        ))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await
+        .ok()?
+        .success();
+    if !ok {
+        return None;
+    }
+    tokio::fs::rename(&screenshot, png).await.ok()?;
+    Some(png.to_path_buf())
 }
 
 /// Rex may not have an attached client when the pane starts. Its pixel dimensions arrive
@@ -327,25 +532,14 @@ fn png_size(path: &Path) -> Option<(u32, u32)> {
 }
 
 fn jpeg_size(path: &Path) -> Option<(u32, u32)> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.get(..2)? != [0xFF, 0xD8] {
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    if reader.format() != Some(image::ImageFormat::Jpeg) {
         return None;
     }
-    let mut at = 2;
-    while at + 9 < bytes.len() {
-        if bytes[at] != 0xFF {
-            return None;
-        }
-        let marker = bytes[at + 1];
-        let len = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
-        if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
-            let h = u16::from_be_bytes([bytes[at + 5], bytes[at + 6]]) as u32;
-            let w = u16::from_be_bytes([bytes[at + 7], bytes[at + 8]]) as u32;
-            return Some((w, h));
-        }
-        at += 2 + len;
-    }
-    None
+    reader.into_dimensions().ok()
 }
 
 /// A Markdown image line, `![alt](/path)`, that names a file on this Mac.
@@ -363,7 +557,6 @@ pub fn local_image(line: &str) -> Option<(String, PathBuf)> {
 mod tests {
     use super::*;
 
-    /// A file with just a PNG's header, which is all `picture` reads.
     fn png(name: &str, w: u32, h: u32) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("t3rex-test-{}-{name}.png", std::process::id()));
@@ -374,10 +567,39 @@ mod tests {
         path
     }
 
-    #[test]
-    fn tall_pictures_keep_their_aspect_ratio_at_the_row_limit() {
-        let media = Media::new(None);
-        let tall = png("tall", 728, 4000);
+    fn submitted_path(sequence: &str) -> PathBuf {
+        let encoded = sequence
+            .rsplit(';')
+            .next()
+            .unwrap()
+            .trim_end_matches("\x1b\\");
+        PathBuf::from(
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn tall_pictures_keep_aspect_and_use_a_cached_display_derivative() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut media = Media::new(None);
+        media.cache = dir.path().join("cache");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        media.listen(tx);
+        let tall = dir.path().join("tall.png");
+        image::RgbaImage::from_pixel(728, 4000, image::Rgba([10, 20, 30, 255]))
+            .save(&tall)
+            .unwrap();
+        assert!(media.picture(&tall, 90).is_none());
+        let ready = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(media.ready(ready));
         let (seq, rows) = media.picture(&tall, 90).unwrap();
         let cols: usize = seq
             .split("c=")
@@ -390,31 +612,130 @@ mod tests {
             .unwrap();
         let expected_rows =
             cols as f64 * current_cell_ratio().unwrap_or(media.cell_ratio) * 4000.0 / 728.0;
-        assert!(
-            (rows as f64 - expected_rows).abs() <= 0.5,
-            "{cols} columns require {expected_rows} rows, got {rows}"
-        );
+        assert!((rows as f64 - expected_rows).abs() <= 0.5);
         assert!(rows <= 60);
-        std::fs::remove_file(tall).unwrap();
+        let derivative = submitted_path(&seq);
+        let (w, h) = png_size(&derivative).unwrap();
+        assert!(w <= cols as u32 * 16 && h <= 1920);
+        assert!((w as f64 / h as f64 - 728.0 / 4000.0).abs() < 0.01);
+        assert_eq!(png_size(&tall), Some((728, 4000)), "original stays intact");
+        media.free_all();
+        assert_eq!(
+            submitted_path(&media.picture(&tall, 90).unwrap().0),
+            derivative
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a cached derivative needs no more work"
+        );
     }
 
     #[test]
     fn pictures_past_the_budget_free_the_oldest() {
         let media = Media::new(None);
-        // 24 MiB each, so the second frees the first.
-        let big = png("big", 3072, 2048);
-        let (first, _) = media.picture(&big, 80).unwrap();
-        assert!(first.starts_with("\x1b_Ga=T,i=1,"));
-        let (second, _) = media.picture(&big, 80).unwrap();
-        assert!(second.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b_Ga=T,i=2,"));
-        // Printing again from the top frees everything, so nothing is left to free.
+        // 3 MiB each; the sixth exceeds the 16 MiB budget.
+        let picture = png("budget", 1024, 768);
+        for id in 1..=5 {
+            let seq = media.picture(&picture, 80).unwrap().0;
+            assert!(seq.starts_with(&format!("\x1b_Ga=T,i={id},")));
+        }
+        let sixth = media.picture(&picture, 80).unwrap().0;
+        assert!(sixth.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b_Ga=T,i=6,"));
         assert_eq!(media.free_all(), FREE_ALL);
-        let (third, _) = media.picture(&big, 80).unwrap();
-        assert!(third.starts_with("\x1b_Ga=T,i=3,"));
-        // Bigger than a pane holds: no picture.
-        let huge = png("huge", 4096, 4096);
-        assert!(media.picture(&huge, 80).is_none());
-        let _ = std::fs::remove_file(big);
-        let _ = std::fs::remove_file(huge);
+        assert!(
+            media
+                .picture(&picture, 80)
+                .unwrap()
+                .0
+                .starts_with("\x1b_Ga=T,i=7,")
+        );
+        std::fs::remove_file(picture).unwrap();
+    }
+
+    #[test]
+    fn snapshots_from_an_old_theme_generation_are_rejected() {
+        let mut media = Media::new(None);
+        let generation = media.generation;
+        let dark = media.dark;
+        media.set_dark(!dark);
+        media.set_dark(dark);
+        assert!(!media.ready(Ready::Snapshot {
+            attachment: "html".into(),
+            path: Some(PathBuf::from("old.png")),
+            generation,
+        }));
+        assert!(media.snapshots.is_empty());
+        assert!(media.ready(Ready::Snapshot {
+            attachment: "html".into(),
+            path: Some(PathBuf::from("current.png")),
+            generation: media.generation,
+        }));
+        assert_eq!(media.snapshots["html"], PathBuf::from("current.png"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_hung_capture_cleans_its_profile_and_releases_the_slot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let chrome = dir.path().join("chromium");
+        std::fs::write(&chrome, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(dir.path().join("page.html"), "<html>test</html>").unwrap();
+        let embed = Embed {
+            attachment: "page".into(),
+            title: "Page".into(),
+            height: 800,
+        };
+        let cache = dir.path().join("cache");
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            capture(
+                &chrome,
+                dir.path(),
+                &cache,
+                &embed,
+                false,
+                &cache.join("result.png"),
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            !std::fs::read_dir(&cache)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.path().is_dir())
+        );
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(cache.join("capture.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_theme_change_cancels_queued_capture_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut media = Media::new(None);
+        media.attachments = Some(dir.path().to_path_buf());
+        media.cache = dir.path().join("cache");
+        media.chrome = Some(PathBuf::from("/nonexistent/chromium"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let embed = Embed {
+            attachment: "missing".into(),
+            title: "Missing".into(),
+            height: 800,
+        };
+        media.ask(&embed, tx.clone());
+        assert_eq!(media.asked.len(), 1);
+        let previous = media.asked["missing"].as_ref().unwrap().abort_handle();
+        media.set_dark(!media.dark);
+        assert!(media.asked.is_empty());
+        tokio::task::yield_now().await;
+        assert!(previous.is_finished());
+        assert!(rx.try_recv().is_err());
     }
 }

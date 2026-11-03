@@ -53,6 +53,11 @@ impl BoundedChunk {
         &self.values
     }
 
+    /// Moves values into another bounded stage while keeping this chunk charged and unacked.
+    pub(crate) fn take_values(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.values)
+    }
+
     /// The length of the whole `Chunk` message, `{"_tag":"Chunk","requestId":...,"values":[...]}`,
     /// as compact UTF-8 JSON. T3's terminal output window measures a chunk the same way, as
     /// `Buffer.byteLength(JSON.stringify(response))` in apps/server/src/terminal/

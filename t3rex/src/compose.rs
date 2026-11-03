@@ -1578,10 +1578,17 @@ pub(crate) fn wrap(text: &[char], cursor: usize, width: usize) -> (Vec<String>, 
 /// never opens.
 async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
     let config = loop {
-        if let Ok(config) = client.server_config().await {
+        let result = tokio::select! {
+            result = client.server_config() => result,
+            _ = tx.closed() => return,
+        };
+        if let Ok(config) = result {
             break config;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+            _ = tx.closed() => return,
+        }
     };
     let providers = models::providers(&config).to_vec();
     if tx.send(Done::Config(config.clone())).is_err() {
@@ -1594,11 +1601,15 @@ async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
 /// Follows T3's config subscription, `events`, from `config`: the whole config to Reply after
 /// each item that changes it, until the subscription stops or Reply goes.
 async fn follow(
-    mut events: mpsc::UnboundedReceiver<WatchEvent>,
+    mut events: mpsc::Receiver<WatchEvent>,
     mut config: Option<Value>,
     tx: &mpsc::UnboundedSender<Done>,
 ) {
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => match event { Some(event) => event, None => return },
+            _ = tx.closed() => return,
+        };
         match event {
             WatchEvent::Item(item) => {
                 if matches!(apply_config(&mut config, &item), Applied::Ignored) {
@@ -1764,7 +1775,7 @@ mod tests {
 
     #[tokio::test]
     async fn reply_follows_the_config_as_usage_moves() {
-        let (events_tx, events) = mpsc::unbounded_channel();
+        let (events_tx, events) = mpsc::channel(32);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let usage = |used: u32| {
             json!([{"instanceId": "claudeAgent", "usageLimits": {"checkedAt": "2026-10-31T00:00:00.000Z",
@@ -1775,26 +1786,34 @@ mod tests {
         // A change applies to the config `getConfig` gave, before the stream's snapshot.
         events_tx
             .send(item(json!({"version": 1, "type": "providerStatuses", "payload": {"providers": usage(20)}})))
+            .await
             .unwrap();
         events_tx
             .send(item(json!({"version": 1, "type": "snapshot", "config": {"providers": usage(40), "directEndpoints": []}})))
+            .await
             .unwrap();
         events_tx
             .send(WatchEvent::Reconnecting {
                 reason: "dropped".into(),
                 retry_in: std::time::Duration::from_secs(1),
             })
+            .await
             .unwrap();
         events_tx
             .send(item(json!({"version": 1, "type": "providerStatuses", "payload": {"providers": usage(85)}})))
+            .await
             .unwrap();
         // An event Reply didn't ask for changes nothing, and sends nothing.
         events_tx
             .send(item(
                 json!({"version": 1, "type": "environmentThemesUpdated", "payload": {}}),
             ))
+            .await
             .unwrap();
-        events_tx.send(WatchEvent::Failed("gone".into())).unwrap();
+        events_tx
+            .send(WatchEvent::Failed("gone".into()))
+            .await
+            .unwrap();
         follow(events, Some(first), &tx).await;
         let sent = configs(&mut rx);
         let with = |used: u32| json!({"providers": usage(used), "directEndpoints": []});
@@ -1871,10 +1890,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_subscription_that_ends_leaves_the_config_reply_has() {
-        let (events_tx, events) = mpsc::unbounded_channel();
+        let (events_tx, events) = mpsc::channel(32);
         let (tx, mut rx) = mpsc::unbounded_channel();
         events_tx
             .send(WatchEvent::Failed("unknown method".into()))
+            .await
             .unwrap();
         follow(events, Some(json!({"providers": []})), &tx).await;
         assert!(configs(&mut rx).is_empty());

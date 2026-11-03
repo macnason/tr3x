@@ -118,8 +118,8 @@ impl Hub {
     /// Every machine's shell subscription in one stream, each event with its machine's id.
     /// Each machine reconnects on its own; one that's out of reach holds up none of the rest.
     /// The subscriptions last until the stream is dropped.
-    pub fn watch_shells(&self) -> mpsc::UnboundedReceiver<(String, WatchEvent)> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn watch_shells(&self) -> mpsc::Receiver<(String, WatchEvent)> {
+        let (tx, rx) = mpsc::channel(32);
         for env in &self.envs {
             spawn_forward(env.clone(), tx.clone());
         }
@@ -128,7 +128,7 @@ impl Hub {
 
     /// Adds `env`'s shell subscription to a stream. It lasts as long as the `Forwarder`
     /// returned, which the caller keeps for as long as it follows the machine.
-    pub fn forward(env: Arc<Env>, tx: mpsc::UnboundedSender<(String, WatchEvent)>) -> Forwarder {
+    pub fn forward(env: Arc<Env>, tx: mpsc::Sender<(String, WatchEvent)>) -> Forwarder {
         Forwarder(spawn_forward(env, tx))
     }
 }
@@ -147,7 +147,7 @@ impl Drop for Forwarder {
 
 fn spawn_forward(
     env: Arc<Env>,
-    tx: mpsc::UnboundedSender<(String, WatchEvent)>,
+    tx: mpsc::Sender<(String, WatchEvent)>,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = env.watch_shell(None);
     let id = env.id().to_string();
@@ -155,7 +155,7 @@ fn spawn_forward(
         loop {
             tokio::select! {
                 event = events.recv() => match event {
-                    Some(event) => if tx.send((id.clone(), event)).is_err() { return },
+                    Some(event) => if tx.send((id.clone(), event)).await.is_err() { return },
                     None => return,
                 },
                 _ = tx.closed() => return,
@@ -217,7 +217,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let (tx, mut events) = mpsc::unbounded_channel();
+        let (tx, mut events) = mpsc::channel(32);
         let forwarder = Hub::forward(client_at(&origin), tx);
 
         let mut tickets = 0;

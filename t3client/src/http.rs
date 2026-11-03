@@ -1,5 +1,6 @@
 //! Authenticated HTTP calls to the T3 server.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -13,13 +14,17 @@ use crate::error::{err, err_exit, exit};
 /// on the tailnet stays on it. The WebSocket works the same way: tokio-tungstenite opens it
 /// straight to the origin and fails on any answer but 101. HTTPS goes through rustls.
 pub(crate) fn direct_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        // `reqwest::Client::new` panics on the same failure: a TLS backend or the system's
-        // resolver configuration that can't load.
-        .expect("an HTTP client")
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            // `reqwest::Client::new` panics on the same failure: a TLS backend or the system's
+            // resolver configuration that can't load.
+            .expect("an HTTP client")
+    })
+    .clone()
 }
 
 #[derive(Clone)]
@@ -239,5 +244,40 @@ pub(crate) mod fake {
         text.push_str("\r\n");
         text.push_str(body);
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn separate_api_handles_reuse_the_pool_without_reusing_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            for token in ["first", "second"] {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                assert!(head.contains(&format!("authorization: bearer {token}\r\n")));
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .await
+                    .unwrap();
+            }
+        });
+        for token in ["first", "second"] {
+            let response = Api::new(&origin, token).get("/example").await.unwrap();
+            assert_eq!(response, serde_json::json!({}));
+        }
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

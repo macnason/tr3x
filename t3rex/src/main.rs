@@ -15,6 +15,7 @@ mod machines;
 mod media;
 mod new;
 mod paste;
+mod perf;
 mod pick;
 mod picker;
 mod picture;
