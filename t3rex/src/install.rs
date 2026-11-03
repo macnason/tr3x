@@ -661,7 +661,9 @@ pub async fn doctor() -> Result<()> {
         step(true, "sup", "for pull requests");
     } else {
         mark(Mark::Warn, "No sup", "Show Pull Request falls back to gh");
-        println!("  For reviews and merging: https://github.com/superultrainc/sup#install");
+        println!(
+            "  Optional, for reviews and merging: Enter in a pull request's drawer installs it."
+        );
     }
 
     if failed > 0 {

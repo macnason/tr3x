@@ -251,7 +251,7 @@ pub struct Candidate {
     pub ssh: Option<String>,
 }
 
-pub(crate) fn tailscale_bin() -> Option<String> {
+pub fn tailscale_bin() -> Option<String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|d| d.join("tailscale"))

@@ -297,8 +297,8 @@ async fn make(
 }
 
 /// Runs sup on `url`, asking T3 to look at the pull request again while it's open and once it
-/// closes. Once the pull request is merged, the drawer closes. Without sup, `gh pr view`, else
-/// the link.
+/// closes. Once the pull request is merged, the drawer closes. Without sup, `gh pr view` and an
+/// offer to install sup, which then shows it.
 async fn show(
     url: &str,
     cwd: &Path,
@@ -313,52 +313,77 @@ async fn show(
             .find(|p| p.is_file())
     };
     let cwd = if cwd.is_dir() { cwd } else { Path::new("/") };
-    if let Some(sup) = find("sup") {
-        let mut child = tokio::process::Command::new(sup)
-            .arg(url)
-            .env("PATH", &path)
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .spawn()
-            .context("couldn't start sup")?;
-        // The first tick reads the pull request as the drawer opens.
-        let mut tick = tokio::time::interval(RECHECK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Merged already, as when the drawer opens on an old pull request: stays open.
-        let mut was_merged = None;
-        loop {
-            tokio::select! {
-                _ = child.wait() => break,
-                _ = tick.tick() => {
-                    let Some(reference) = &reference else { continue };
-                    let Some(merged) = recheck(client, reference).await else { continue };
-                    if merged && was_merged == Some(false) {
-                        let _ = child.kill().await;
-                        return Ok(());
+    // Without sup, the drawer shows what gh can and offers to install sup, then shows it.
+    let mut offered = false;
+    loop {
+        if let Some(sup) = find("sup") {
+            let mut child = tokio::process::Command::new(sup)
+                .arg(url)
+                .env("PATH", &path)
+                .current_dir(cwd)
+                .kill_on_drop(true)
+                .spawn()
+                .context("couldn't start sup")?;
+            // The first tick reads the pull request as the drawer opens.
+            let mut tick = tokio::time::interval(RECHECK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Merged already, as when the drawer opens on an old pull request: stays open.
+            let mut was_merged = None;
+            loop {
+                tokio::select! {
+                    _ = child.wait() => break,
+                    _ = tick.tick() => {
+                        let Some(reference) = &reference else { continue };
+                        let Some(merged) = recheck(client, reference).await else { continue };
+                        if merged && was_merged == Some(false) {
+                            let _ = child.kill().await;
+                            return Ok(());
+                        }
+                        was_merged.get_or_insert(merged);
                     }
-                    was_merged.get_or_insert(merged);
                 }
             }
+            if let Some(reference) = &reference {
+                recheck(client, reference).await;
+            }
+            return Ok(());
         }
-        if let Some(reference) = &reference {
-            recheck(client, reference).await;
+        if offered {
+            // Installed, yet not where the drawer looks.
+            wait_key().await;
+            return Ok(());
         }
-        return Ok(());
+        if let Some(gh) = find("gh") {
+            out("\r\n");
+            let _ = std::process::Command::new(gh)
+                .args(["pr", "view", url, "--comments"])
+                .env("PATH", &path)
+                .env("GH_PAGER", "cat")
+                .current_dir(cwd)
+                .status();
+        }
+        out(&format!(
+            "\r\n \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\\r\n\r\n {BOLD}Enter{RESET} installs sup for reviews and merging {DIM}· q closes{RESET}\r\n"
+        ));
+        if !confirm().await {
+            return Ok(());
+        }
+        offered = true;
+        out(&format!("\r\n {DIM}Installing sup…{RESET}\r\n"));
+        match crate::sup::install().await {
+            Ok(at) => out(&format!(
+                " {GREEN}✓{RESET} sup {DIM}{}{RESET}\r\n",
+                at.display()
+            )),
+            Err(e) => {
+                out(&format!(
+                    " {RED}✗{RESET} {e:#}\r\n {DIM}github.com/superultrainc/sup{RESET}\r\n"
+                ));
+                wait_key().await;
+                return Ok(());
+            }
+        }
     }
-    if let Some(gh) = find("gh") {
-        out("\r\n");
-        let _ = std::process::Command::new(gh)
-            .args(["pr", "view", url, "--comments"])
-            .env("PATH", &path)
-            .env("GH_PAGER", "cat")
-            .current_dir(cwd)
-            .status();
-    }
-    out(&format!(
-        "\r\n \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\\r\n\r\n {DIM}Reviews and merging need sup: github.com/superultrainc/sup{RESET}\r\n"
-    ));
-    wait_key().await;
-    Ok(())
 }
 
 /// The pane's PATH, then where sup and gh install.

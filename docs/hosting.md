@@ -51,6 +51,15 @@ to run there). Their threads join the host's session, labelled with the machine'
 A machine that stays a client must not run t3rex: a second install gives it a session of its
 own, and its threads show twice, under **This Mac** and under the host.
 
+## Pictures from another device
+
+Rex carries text into a pane on another machine, but not pictures or files: a picture's ⌘V
+arrives as a bare key, and a drop as nothing. Send pictures to the host with Taildrop instead:
+Share → Tailscale → the host, on a Mac or a phone, or `tailscale file cp shot.png <host>:`. Sync
+takes them in and attaches each to the Reply of the thread whose window is active, as if it had
+been pasted. Files that aren't pictures are kept in t3rex's state folder, in `taildrop-kept`.
+Taildrop must be on for your tailnet.
+
 ## When something looks wrong
 
 - **Panes are bare shell prompts** after the host's Rex server restarted: close the host's

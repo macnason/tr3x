@@ -120,6 +120,12 @@ machine it's paired with, and draws what T3 says into one Rex session.
   else the smallest of those and JPEG (opaque pictures only). HEIC goes through `sips` first.
   Pictures go up with `assets.persistChatAttachments`
   first, and the message carries what that returns, as T3's composer does.
+- A pane on another machine gets no picture from Rex: ⌘V with a picture or file on the
+  clipboard arrives as the key itself (`CSI 118 ; 9 u`), and a drop as nothing. Reply says to
+  use Taildrop then. Sync keeps `tailscale file get --wait --loop` running into `taildrop/` in
+  its state folder, and moves each picture into `inbox/<env>/<thread>/` for the thread whose
+  window is active (`session inspect`'s `active_window_id`); anything else goes to
+  `taildrop-kept/`. Reply reads its inbox every 0.7 seconds and attaches what's there as a paste.
 - Markdown renders to ANSI with only the terminal's 16 colours, so it follows any light or dark
   theme. Code is syntax-highlighted; links are OSC 8.
 - Pictures draw with kitty graphics. HTML embeds (`html_render`) are snapshotted with a headless

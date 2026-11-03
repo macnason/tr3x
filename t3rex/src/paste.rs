@@ -211,7 +211,7 @@ pub fn dropped(text: &str) -> Option<Got> {
 }
 
 /// The pictures at `paths`, when every one is a picture.
-fn files(paths: &[PathBuf]) -> Option<Got> {
+pub(crate) fn files(paths: &[PathBuf]) -> Option<Got> {
     if paths.is_empty()
         || !paths
             .iter()
@@ -231,7 +231,7 @@ fn files(paths: &[PathBuf]) -> Option<Got> {
     Some(Got::Images(images))
 }
 
-fn mime_of(path: &Path) -> Option<&'static str> {
+pub(crate) fn mime_of(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "png" => "image/png",
