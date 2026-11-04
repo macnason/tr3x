@@ -48,7 +48,10 @@ machine it's paired with, and draws what T3 says into one Rex session.
   they are, and after 30 seconds out of reach they read `(offline)`. A window closed while its
   machine is away isn't settled. The conversation shows `studio is offline · retrying` and
   Reply keeps what's typed. A machine that no longer accepts Rex's token says
-  `Run tr3x pair studio`.
+  `Run tr3x pair studio`. This machine's own T3 is named by how it runs, from its `serverSelfUpdate`
+  capability: the T3 Code app (`desktop-managed`) says to open T3 Code, a background service
+  (`t3 service install`) that the service isn't answering, and anything else that T3 isn't
+  running.
 - **Folders.** A thread on another machine works in a folder there, so its panes start in the
   home folder. HTML snapshots read T3's attachments from disk, so they're this Mac's only.
 

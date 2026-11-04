@@ -1200,7 +1200,19 @@ async fn connect(env: &str) -> Result<(Arc<Env>, Value, ShellState)> {
                 return Ok(loaded);
             }
             Err(e) if unavailable(&e) && env.is_empty() => {
-                "T3 Code isn't running. Open T3 Code.".to_string()
+                use crate::chat::LocalT3;
+                let local = t3::hub()
+                    .envs()
+                    .iter()
+                    .find(|m| m.is_local())
+                    .map(|m| LocalT3::of(m));
+                match local {
+                    Some(LocalT3::Service) => "T3's service isn't answering.",
+                    Some(LocalT3::Plain) => "T3 isn't running on this machine.",
+                    _ if !crate::platform::MAC => "T3 isn't running on this machine.",
+                    _ => "T3 Code isn't running. Open T3 Code.",
+                }
+                .to_string()
             }
             Err(e) if unavailable(&e) => format!(
                 "{} is offline",

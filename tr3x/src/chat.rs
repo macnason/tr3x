@@ -834,18 +834,56 @@ fn project_name<'a>(shell: &'a ShellState, thread: &Value) -> Option<&'a str> {
     shell.projects.iter().find(|p| p["id"] == id)?["title"].as_str()
 }
 
+/// How this machine's T3 runs, from `serverSelfUpdate` in the last descriptor it sent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LocalT3 {
+    /// Inside the T3 Code app (`desktop-managed`): quitting the app stops it.
+    App,
+    /// A background service (`boot-service`, `respawn`): `t3 service install`.
+    Service,
+    /// Anything else, such as a plain `t3 serve`.
+    Plain,
+}
+
+impl LocalT3 {
+    pub fn of(env: &t3client::env::Env) -> Self {
+        match env.descriptor() {
+            Some(d) => Self::from_capability(d.capabilities["serverSelfUpdate"].as_str()),
+            // Never answered since this pane started: on a Mac that's most often the app.
+            None if crate::platform::MAC => Self::App,
+            None => Self::Plain,
+        }
+    }
+
+    fn from_capability(how: Option<&str>) -> Self {
+        match how {
+            Some("desktop-managed") => Self::App,
+            Some("boot-service" | "respawn") => Self::Service,
+            _ => Self::Plain,
+        }
+    }
+}
+
 /// What a pane says while its machine is out of reach: that it is, or that it needs pairing.
-/// This Mac's T3 runs inside T3 Code, so when it's gone the app was quit (or is restarting),
-/// and its agents stopped with it. Saying so beats a retry count nobody can act on.
-pub fn offline_line(machine: &str, local: bool, reason: &str, retry_in: Duration) -> String {
+/// `local` is how this machine's T3 runs, `None` for another machine. T3 in the app is gone
+/// when the app was quit (or is restarting), and its agents stopped with it. Saying so beats a
+/// retry count nobody can act on.
+pub fn offline_line(
+    machine: &str,
+    local: Option<LocalT3>,
+    reason: &str,
+    retry_in: Duration,
+) -> String {
     if let Some(at) = reason.find("Run `tr3x pair") {
         return reason[at..].trim_end_matches('.').to_string();
     }
-    if local {
-        return LOCAL_OFFLINE.to_string();
-    }
     let secs = retry_in.as_secs().max(1);
-    format!("{machine} is offline · retrying in {secs}s")
+    match local {
+        Some(LocalT3::App) => LOCAL_OFFLINE.to_string(),
+        Some(LocalT3::Service) => format!("T3's service isn't answering · retrying in {secs}s"),
+        Some(LocalT3::Plain) => format!("T3 isn't running on this machine · retrying in {secs}s"),
+        None => format!("{machine} is offline · retrying in {secs}s"),
+    }
 }
 
 const LOCAL_OFFLINE: &str =
@@ -1414,7 +1452,8 @@ async fn event_loop(
                     reply = true;
                 }
                 Some(WatchEvent::Reconnecting { reason, retry_in }) => {
-                    let said = offline_line(client.name(), client.is_local(), &reason, retry_in);
+                    let local = client.is_local().then(|| LocalT3::of(client));
+                    let said = offline_line(client.name(), local, &reason, retry_in);
                     composer.offline = Some(said.clone());
                     if pane.offline.as_deref() != Some(said.as_str()) {
                         pane.offline = Some(said);
@@ -1811,15 +1850,35 @@ mod tests {
     fn a_lost_mac_says_t3_quit_and_a_lost_machine_says_offline() {
         let lost = "T3 connection lost: the server closed the connection";
         let wait = Duration::from_secs(4);
-        assert_eq!(offline_line("Mac mini", true, lost, wait), LOCAL_OFFLINE);
+        let app = Some(LocalT3::App);
+        assert_eq!(offline_line("Mac mini", app, lost, wait), LOCAL_OFFLINE);
         assert_eq!(
-            offline_line("studio", false, lost, wait),
+            offline_line("studio", None, lost, wait),
             "studio is offline · retrying in 4s"
         );
         let unpaired = "Rex isn't paired. Run `tr3x pair studio`.";
         assert_eq!(
-            offline_line("studio", true, unpaired, wait),
+            offline_line("studio", app, unpaired, wait),
             "Run `tr3x pair studio`"
+        );
+    }
+
+    #[test]
+    fn a_lost_service_never_says_to_open_the_app() {
+        let lost = "T3 connection lost: the server closed the connection";
+        let wait = Duration::from_secs(4);
+        let how = LocalT3::from_capability;
+        assert_eq!(how(Some("desktop-managed")), LocalT3::App);
+        assert_eq!(how(Some("boot-service")), LocalT3::Service);
+        assert_eq!(how(Some("respawn")), LocalT3::Service);
+        assert_eq!(how(None), LocalT3::Plain);
+        assert_eq!(
+            offline_line("Mac mini", Some(LocalT3::Service), lost, wait),
+            "T3's service isn't answering · retrying in 4s"
+        );
+        assert_eq!(
+            offline_line("omarchy", Some(LocalT3::Plain), lost, wait),
+            "T3 isn't running on this machine · retrying in 4s"
         );
     }
 
