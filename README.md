@@ -95,12 +95,12 @@ Works with T3 Code 0.1.7 and its nightlies (orchestration protocol 2), and Rex B
 - [T3 Code](https://github.com/pingdotgg/t3code) by Ping, which does the actual work.
 - [sup](https://github.com/superultrainc/sup) by SuperUltra, which reviews and merges pull
   requests in the drawer.
-- [t3term](https://github.com/krishhgg/t3term) by krishhgg (MIT), which tr3x's T3 client
-  started from.
+- [T1code](https://github.com/maria-rcks/t1code) by Maria, the original reference for tr3x's
+  T3 client.
 
 tr3x is an independent project. It isn't affiliated with Superlogical, Ping or SuperUltra.
 
 ## License
 
-[MIT](LICENSE), by Mac ([macnason](https://github.com/macnason)). `t3client` keeps t3term's
+[MIT](LICENSE), by Mac ([macnason](https://github.com/macnason)). `t3client` retains its
 [MIT license](t3client/LICENSE).
