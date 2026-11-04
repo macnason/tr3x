@@ -96,6 +96,79 @@ fn install_target(exe: &Path) -> PathBuf {
     }
 }
 
+/// `text` as one shell word, single-quoted where it holds anything a shell would read.
+fn sh_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        text.to_string()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// What to tell someone whose `PATH` lacks the folder tr3x was installed to, or None when it
+/// has it. The first line is a command that works right now, with tr3x's whole path. The second
+/// is the line for their shell's startup file, which tr3x doesn't edit. `shell` is `$SHELL`.
+fn path_hint(
+    bin: &Path,
+    path: Option<&std::ffi::OsStr>,
+    home: &Path,
+    shell: Option<&str>,
+) -> Option<String> {
+    let dir = bin.parent()?;
+    let same = |a: &Path, b: &Path| {
+        a == b
+            || matches!(
+                (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                (Ok(a), Ok(b)) if a == b
+            )
+    };
+    let listed = path.is_some_and(|path| {
+        std::env::split_paths(path).any(|entry| !entry.as_os_str().is_empty() && same(&entry, dir))
+    });
+    if listed {
+        return None;
+    }
+    // Written from $HOME where it can be, so the line holds on this account's other machines.
+    let dir_text = dir.to_string_lossy();
+    let in_home = dir
+        .strip_prefix(home)
+        .ok()
+        .filter(|_| !home.as_os_str().is_empty());
+    let shell_name = shell
+        .and_then(|s| Path::new(s).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Inside double quotes, so $HOME expands and the rest of the path is only itself.
+    let dq = |rest: &Path| {
+        rest.to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    };
+    let dir_word = match in_home {
+        Some(rest) => format!("\"$HOME/{}\"", dq(rest)),
+        None => sh_word(&dir_text),
+    };
+    let (file, line) = match shell_name.as_str() {
+        "fish" => ("fish's config", format!("fish_add_path {dir_word}")),
+        "zsh" => ("~/.zshrc", format!("export PATH={dir_word}:\"$PATH\"")),
+        "bash" => ("~/.bashrc", format!("export PATH={dir_word}:\"$PATH\"")),
+        _ => (
+            "your shell's startup file",
+            format!("export PATH={dir_word}:\"$PATH\""),
+        ),
+    };
+    Some(format!(
+        "tr3x isn't on your PATH\n  Check it now: {} doctor\n  To run `tr3x` anywhere, add to {file}: {line}",
+        sh_word(&bin.to_string_lossy())
+    ))
+}
+
 /// Adds the `require` line to init.lua, after copying the file aside once.
 fn add_require(dir: &Path) -> Result<&'static str> {
     let init = dir.join("init.lua");
@@ -283,6 +356,18 @@ pub async fn install(update: bool) -> Result<()> {
         std::fs::rename(&tmp, &bin)?;
     }
     step(true, "Installed tr3x", &bin.display().to_string());
+    if !update
+        && let Some(hint) = path_hint(
+            &bin,
+            std::env::var_os("PATH").as_deref(),
+            &home(),
+            std::env::var("SHELL").ok().as_deref(),
+        )
+    {
+        let (what, rest) = hint.split_once('\n').unwrap_or((&hint, ""));
+        mark(Mark::Warn, what, "");
+        println!("{rest}");
+    }
 
     if retire_launchd().await {
         step(true, "Removed the launchd agent", LABEL);
@@ -763,5 +848,117 @@ mod tests {
         assert!(text.contains("\"/b/tr3x\"") && text.contains("\"/r/rex\""));
         assert!(text.contains("\nthread_action(\"t3_settle\", \"Settle Thread\", { \"settle\" }"));
         assert!(text.contains("\nlayer_action(\"t3_delete\""));
+    }
+
+    fn hint(bin: &str, path: &str, home: &str, shell: Option<&str>) -> Option<String> {
+        path_hint(
+            Path::new(bin),
+            Some(std::ffi::OsStr::new(path)),
+            Path::new(home),
+            shell,
+        )
+    }
+
+    #[test]
+    fn nothing_is_said_when_the_folder_is_on_path() {
+        let bin = "/home/mac/.local/bin/tr3x";
+        assert_eq!(
+            hint(
+                bin,
+                "/usr/bin:/home/mac/.local/bin",
+                "/home/mac",
+                Some("/bin/zsh")
+            ),
+            None
+        );
+        // A trailing slash and an empty entry are still that folder, and the empty one isn't.
+        assert_eq!(hint(bin, "/home/mac/.local/bin/", "/home/mac", None), None);
+        assert!(hint(bin, "::/usr/bin", "/home/mac", None).is_some());
+        assert!(path_hint(Path::new(bin), None, Path::new("/home/mac"), None).is_some());
+    }
+
+    #[test]
+    fn a_folder_reached_through_a_link_counts_as_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.to_string_lossy().into_owned();
+        let bin = real.join("tr3x");
+        assert_eq!(hint(&bin.to_string_lossy(), &path, "/nowhere", None), None);
+    }
+
+    #[test]
+    fn a_missing_folder_gets_a_command_that_works_now_and_a_line_for_the_shell() {
+        let said = hint(
+            "/home/mac/.local/bin/tr3x",
+            "/usr/local/bin:/usr/bin",
+            "/home/mac",
+            Some("/usr/bin/zsh"),
+        )
+        .unwrap();
+        assert!(
+            said.contains("Check it now: /home/mac/.local/bin/tr3x doctor"),
+            "{said}"
+        );
+        assert!(
+            said.contains(r#"~/.zshrc: export PATH="$HOME/.local/bin":"$PATH""#),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_shell_decides_the_file_and_the_syntax() {
+        let say =
+            |shell| hint("/home/mac/.local/bin/tr3x", "/usr/bin", "/home/mac", shell).unwrap();
+        assert!(say(Some("/bin/bash")).contains("~/.bashrc: export PATH="));
+        assert!(
+            say(Some("/opt/homebrew/bin/fish"))
+                .contains(r#"fish's config: fish_add_path "$HOME/.local/bin""#)
+        );
+        let other = say(Some("/bin/nu"));
+        assert!(
+            other.contains("your shell's startup file: export PATH="),
+            "{other}"
+        );
+        assert!(say(None).contains("export PATH="));
+    }
+
+    #[test]
+    fn spaces_and_shell_characters_are_quoted_in_both_lines() {
+        let said = hint(
+            "/home/me/it's here/$x/tr3x",
+            "/usr/bin",
+            "/home/me",
+            Some("/bin/zsh"),
+        )
+        .unwrap();
+        // The doctor command is one word, with the apostrophe closed out and back in.
+        assert!(
+            said.contains(r#"Check it now: '/home/me/it'\''s here/$x/tr3x' doctor"#),
+            "{said}"
+        );
+        // Under $HOME, the rest keeps its space and can't expand.
+        assert!(
+            said.contains(r#"export PATH="$HOME/it's here/\$x":"$PATH""#),
+            "{said}"
+        );
+        // Outside it, one single-quoted word.
+        let said = hint(
+            "/opt/my tools/tr3x",
+            "/usr/bin",
+            "/home/me",
+            Some("/bin/bash"),
+        )
+        .unwrap();
+        assert!(
+            said.contains("Check it now: '/opt/my tools/tr3x' doctor"),
+            "{said}"
+        );
+        assert!(
+            said.contains(r#"export PATH='/opt/my tools':"$PATH""#),
+            "{said}"
+        );
     }
 }

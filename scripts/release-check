@@ -1,0 +1,34 @@
+#!/bin/sh
+# Checks the archives a release is made of before anything publishes them: DIR holds one
+# .tar.gz and one .tar.gz.sha256 for each platform, the checksum matches and names the
+# archive, and the archive holds the binary, the README and the licenses, with t3client's
+# upstream copyright notice. Prints every problem it finds, and fails if there was one.
+set -eu
+DIR=${1:?usage: release-check DIR}
+NAMES=${RELEASE_NAMES:-"tr3x-macos-universal tr3x-linux-x86_64 tr3x-linux-aarch64"}
+
+sum() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
+
+bad=0
+problem() { echo "release-check: $*" >&2; bad=1; }
+
+for name in $NAMES; do
+  archive="$DIR/$name.tar.gz"
+  sumfile="$archive.sha256"
+  [ -s "$archive" ] || { problem "$name.tar.gz is missing"; continue; }
+  [ -s "$sumfile" ] || { problem "$name.tar.gz.sha256 is missing"; continue; }
+  [ "$(awk '{print $2}' "$sumfile")" = "$name.tar.gz" ] \
+    || problem "$name.tar.gz.sha256 doesn't name $name.tar.gz"
+  [ "$(cut -d' ' -f1 < "$sumfile")" = "$(sum "$archive")" ] \
+    || problem "$name.tar.gz doesn't match its checksum"
+  files=$(tar -tzf "$archive") || { problem "$name.tar.gz isn't an archive"; continue; }
+  for file in tr3x README.md LICENSE LICENSE-t3client THIRD-PARTY-LICENSES.txt; do
+    printf '%s\n' "$files" | grep -qx "$name/$file" || problem "$name.tar.gz has no $file"
+  done
+  tar -xzOf "$archive" "$name/LICENSE-t3client" 2>/dev/null | grep -q 'Krish Garg' \
+    || problem "$name.tar.gz's LICENSE-t3client has no upstream copyright notice"
+done
+[ "$bad" -eq 0 ] && echo "release-check: $(echo $NAMES | wc -w | tr -d ' ') archives ok"
+exit "$bad"

@@ -3,24 +3,49 @@
 # pane runs the new binary. Uses the state dir in $TR3X_STATE_DIR (required, so it never
 # touches an installed setup's state by accident). The sync Rex runs for an install has its own
 # state and lock, and carries on. The dev session is called t3x-dev, and its panes only read:
-# they never mark a thread visited. Pairings in the state dir are kept.
+# they never mark a thread visited. Pairings in the state dir are kept. Needs Rex, found as
+# tr3x finds it ($TR3X_REX, `rex` on PATH, the Mac app's copy), and says so up front if not.
 set -e
 : "${TR3X_STATE_DIR:?set TR3X_STATE_DIR to a scratch directory}"
 case "$TR3X_STATE_DIR" in
   "$HOME/.local/state/tr3x"|"$HOME/.local/state/tr3x/") echo "dev-restart: that's the installed state; use a scratch dir" >&2; exit 1 ;;
 esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-REX=${TR3X_REX:-"/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"}
+# Rex as tr3x finds it: $TR3X_REX, else Rex's own copy ($REX_BIN_DIR, set in Rex terminals),
+# else `rex` on PATH (Linux), else the copy in the Mac app. Checked before anything is built,
+# killed or deleted: without it the old sessions couldn't be closed, and deleting their state
+# would leave them running with nothing to find them by.
+BUNDLED="${TR3X_REX_APP:-/Applications/Rex Beta.app}/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+if [ -n "${TR3X_REX:-}" ]; then
+  REX=$TR3X_REX
+  [ -x "$REX" ] || { echo "dev-restart: TR3X_REX ($REX) isn't an executable Rex" >&2; exit 1; }
+elif [ -n "${REX_BIN_DIR:-}" ] && [ -x "$REX_BIN_DIR/rex" ]; then
+  REX=$REX_BIN_DIR/rex
+elif REX=$(command -v rex) && [ -x "$REX" ]; then
+  :
+elif [ -x "$BUNDLED" ]; then
+  REX=$BUNDLED
+else
+  echo "dev-restart: can't find Rex. Put \`rex\` on PATH, or set TR3X_REX to its path." >&2
+  exit 1
+fi
+# Reads the sessions in state.json, so it has to be there too, before anything is deleted.
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY=$(command -v python3) || { echo "dev-restart: needs python3" >&2; exit 1; }
 # A build that fails stops here, with cargo's own output: nothing is killed or deleted below.
 cargo build --release --quiet -p tr3x --manifest-path "$HERE/Cargo.toml"
 pkill -f "$HERE/target/release/tr3x sync" || true
 if [ -f "$TR3X_STATE_DIR/state.json" ]; then
-  /usr/bin/python3 -I -c "
+  # Read first: a state file that can't be read stops here, with it still there.
+  SESSIONS=$("$PY" -I -c "
 import json,sys
 s=json.load(open(sys.argv[1]))
 ids=[g.get('sessionId') for g in s.get('groups',{}).values()] + [s.get('session_id')]
-print('\n'.join(i for i in ids if i))" "$TR3X_STATE_DIR/state.json" | while read -r S; do
-    "$REX" --autostart=false kill "$S" >/dev/null 2>&1 || true
+print('\n'.join(i for i in ids if i))" "$TR3X_STATE_DIR/state.json") \
+    || { echo "dev-restart: couldn't read $TR3X_STATE_DIR/state.json; left as it is" >&2; exit 1; }
+  for S in $SESSIONS; do
+    "$REX" --autostart=false kill "$S" >/dev/null 2>&1 \
+      || echo "dev-restart: couldn't close Rex session $S (already closed?)" >&2
   done
 fi
 rm -f "$TR3X_STATE_DIR/state.json" "$TR3X_STATE_DIR/sync.log"

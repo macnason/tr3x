@@ -87,6 +87,11 @@ machine it's paired with, and draws what T3 says into one Rex session.
   reads `tr3x · Limited · resumes 3pm` or `· resets 3pm`. Both move on with the clock:
   `tomorrow 9am` becomes `9am`, and `resumes` becomes `resuming` at the reset, until T3 sends
   the thread on.
+- A failed turn's last line, `✗ Failed`, has the provider session's own error under it when T3
+  has one (`providerSessions[].lastError`, for the thread's provider, as T3 picks the session):
+  a sign-in or setup problem the turn itself never recorded. It's left out while a run is
+  working, when the session began failing before the latest run started, once the session
+  recovers, and when an error in the conversation for that run already says the same.
 - Reply follows the machine's config subscription (`subscribeServerConfig`), so the usage
   beside its chip stays current: provider `usageLimits` windows appear at 20% remaining or
   less, or only the tightest when they don't all fit beside the chip whole. A used-up window says when it resets.
@@ -321,7 +326,9 @@ command line as `--set-env`.
 
 1. checks Rex and T3 answer,
 2. installs the binary: a build or a download is copied to `~/.local/bin/tr3x`; one that
-   already lives somewhere else, such as a package manager's, stays where it is,
+   already lives somewhere else, such as a package manager's, stays where it is. If that folder
+   isn't on `PATH`, it says so, with a doctor command that works now (the whole path, quoted)
+   and the line to add to the shell's startup file, which it never edits,
 3. moves an earlier install over: removes the background agent it ran sync as
    (`com.tr3x.sync`), stops a running sync, and puts back the pane fading earlier versions
    turned off,
@@ -367,7 +374,7 @@ the open question; the app only links the in-process change notification for its
 | `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`, `join.rs`), the machines tr3x knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch, transcripts, and what a T3 build offers (`surface.rs`). The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/tr3x.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `tr3x install`. |
-| `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `tr3x/t3-surface.json`. `release.yml` builds a universal binary for a `v*` tag and attaches `tr3x-macos-universal.tar.gz` and its SHA-256 to the release. |
+| `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `tr3x/t3-surface.json`. `release.yml` builds a universal macOS binary and Linux x86_64 and aarch64 binaries for a `v*` tag, checks them (`scripts/release-check`), stages them in a draft release with their SHA-256s and licenses, and publishes it once all are there. |
 | `scripts/dev-restart` | A sync of your own build, with its own state, for development. |
 | `docs/` | This file, [usage](usage.md), [hosting](hosting.md) and the README's pictures (`assets/`). |
 | `skills/tr3x/` | The skill that teaches coding agents to install, check and drive tr3x. |
@@ -380,12 +387,14 @@ cargo clippy --release --all-targets
 TR3X_STATE_DIR=/tmp/tr3x-dev scripts/dev-restart   # a sync with its own state, not the installed one
 ```
 
-`dev-restart` stops at a failed build, before it closes or deletes anything. It names its session **t3x-dev** (`TR3X_SESSION_LABEL`) and starts its panes with
+`dev-restart` stops at a missing Rex or a failed build, before it closes or deletes anything. It names its session **t3x-dev** (`TR3X_SESSION_LABEL`) and starts its panes with
 `--passive` (`TR3X_PASSIVE`), so they never mark a thread visited beside an installed sync.
 Pair machines into its state with `TR3X_STATE_DIR=… tr3x pair`. `tr3x rpc --env studio
 <method> '<json>'` calls one machine.
 
-To release, push a tag such as `v0.2.0`; `install.sh` downloads the latest release.
+To release, push a tag such as `v0.2.0`; once every platform's archive is built and checked,
+the workflow publishes the draft it staged, and `install.sh` downloads the latest release. See
+[Releasing](../CONTRIBUTING.md#releasing).
 
 ## Other limits
 

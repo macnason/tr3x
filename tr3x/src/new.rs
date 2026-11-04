@@ -66,14 +66,20 @@ enum Loaded {
     Candidates(Vec<Candidate>),
     /// Whether a paired machine answers.
     Reachable(String, bool),
-    /// Another machine, loaded: its connection, config and shell, or why not.
-    Switched(Result<(Arc<Env>, Value, ShellState), String>),
+    /// Another machine, loaded for the selection with this number: its connection, config and
+    /// shell, or why not.
+    Switched(u64, Result<(Arc<Env>, Value, ShellState), String>),
     /// A picture made ready to send.
     Picture(picture::Ready),
 }
 
 struct NewThread {
     client: Arc<Env>,
+    /// Which machine pick is current, counting from 0. A load that comes back under an older
+    /// number lost to a later pick and is dropped.
+    selection: u64,
+    /// The machine picked and still loading. Nothing launches until it's in or given up on.
+    pending: Option<Arc<Env>>,
     /// Every paired machine, and whether each answers.
     machines: Vec<Arc<Env>>,
     reachable: HashMap<String, bool>,
@@ -294,7 +300,11 @@ impl NewThread {
         let (icon, label) = match field {
             Field::Machine => (
                 Some(Icon::Text("▣".into(), 8)),
-                self.client.name().to_string(),
+                self.pending
+                    .as_ref()
+                    .unwrap_or(&self.client)
+                    .name()
+                    .to_string(),
             ),
             Field::Project => {
                 let p = self.project_value();
@@ -347,7 +357,13 @@ impl NewThread {
                         item
                     }))
                     .collect(),
-                Some(self.client.id().to_string()),
+                Some(
+                    self.pending
+                        .as_ref()
+                        .unwrap_or(&self.client)
+                        .id()
+                        .to_string(),
+                ),
             ),
             Field::Project => (
                 self.projects
@@ -421,15 +437,60 @@ impl NewThread {
         }
     }
 
-    /// Loads machine `id`'s projects, models and branches, to launch there.
-    fn switch(&mut self, id: &str) {
-        if id == self.client.id() {
-            return;
+    fn new(
+        client: Arc<Env>,
+        machines: Vec<Arc<Env>>,
+        welcome: bool,
+        tx: mpsc::UnboundedSender<Loaded>,
+        (cols, rows): (usize, usize),
+    ) -> NewThread {
+        NewThread {
+            client,
+            selection: 0,
+            pending: None,
+            machines,
+            reachable: HashMap::new(),
+            candidates: Vec::new(),
+            config: Value::Null,
+            projects: Vec::new(),
+            recent: HashMap::new(),
+            project: String::new(),
+            settings: Settings::default(),
+            worktree: false,
+            branches: HashMap::new(),
+            base: None,
+            icons: HashMap::new(),
+            logos: HashMap::new(),
+            editor: Editor::default(),
+            escape: Escape::default(),
+            slash: Slash::for_new(&[]),
+            focus: None,
+            menu: None,
+            folder: None,
+            note: None,
+            launching: false,
+            welcome,
+            cols,
+            rows,
+            painter: Painter::default(),
+            chip_spans: Vec::new(),
+            chip_row: 0,
+            chat_width: crate::width::current().0,
+            tx,
+            images: Tray::default(),
+            image_row: 0,
+            image_spans: Vec::new(),
+            clipboard: paste::Reader::default(),
         }
-        let Some(env) = self.machines.iter().find(|m| m.id() == id).cloned() else {
+    }
+
+    /// Picks machine `id`: its projects, models and branches load, and a launch waits for them.
+    /// A later pick, back to this machine included, replaces one still loading.
+    fn switch(&mut self, id: &str) {
+        let Some(env) = self.select(id) else {
             return;
         };
-        self.note = Some((format!("Loading {}…", env.name()), false));
+        let generation = self.selection;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let loaded = async {
@@ -442,8 +503,45 @@ impl NewThread {
                     Ok(Err(e)) => Err(format!("{e:#}")),
                     Err(_) => Err(format!("{} didn't answer", env.name())),
                 };
-            let _ = tx.send(Loaded::Switched(result));
+            let _ = tx.send(Loaded::Switched(generation, result));
         });
+    }
+
+    /// Records the pick and returns the machine to load, if there is one to. Picking the
+    /// machine already shown cancels a pick still loading.
+    fn select(&mut self, id: &str) -> Option<Arc<Env>> {
+        if id == self.client.id() {
+            if self.pending.take().is_some() {
+                self.selection += 1;
+                self.note = None;
+            }
+            return None;
+        }
+        if self.pending.as_ref().is_some_and(|p| p.id() == id) {
+            return None;
+        }
+        let env = self.machines.iter().find(|m| m.id() == id).cloned()?;
+        self.selection += 1;
+        self.note = Some((format!("Loading {}…", env.name()), false));
+        self.pending = Some(env.clone());
+        Some(env)
+    }
+
+    /// What loading a machine came to. A result for a pick since replaced changes nothing. A
+    /// failure leaves the machine that was shown, and says why.
+    fn switched(&mut self, generation: u64, result: Result<(Arc<Env>, Value, ShellState), String>) {
+        if generation != self.selection {
+            return;
+        }
+        self.pending = None;
+        match result {
+            Ok((env, config, shell)) => {
+                self.note = None;
+                self.client = env;
+                self.load(config, &shell);
+            }
+            Err(e) => self.note = Some((e, true)),
+        }
     }
 
     /// Pairs a machine found on the tailnet, in a floating window: over SSH, or with a pasted
@@ -1029,6 +1127,11 @@ return {{}}"#,
         if self.launching {
             return;
         }
+        // The machine picked last isn't in yet: the launch would go to the one before it.
+        if let Some(env) = &self.pending {
+            self.note = Some((format!("Loading {}…", env.name()), false));
+            return;
+        }
         let prompt = self.editor.string();
         if prompt.trim().is_empty() {
             return;
@@ -1283,42 +1386,13 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 30));
     let hub = t3::hub();
     let machines: Vec<Arc<Env>> = hub.envs().to_vec();
-    let mut ui = NewThread {
-        client: client.clone(),
-        machines: machines.clone(),
-        reachable: HashMap::new(),
-        candidates: Vec::new(),
-        config: Value::Null,
-        projects: Vec::new(),
-        recent: HashMap::new(),
-        project: String::new(),
-        settings: Settings::default(),
-        worktree: false,
-        branches: HashMap::new(),
-        base: None,
-        icons: HashMap::new(),
-        logos: HashMap::new(),
-        editor: Editor::default(),
-        escape: Escape::default(),
-        slash: Slash::for_new(&[]),
-        focus: None,
-        menu: None,
-        folder: None,
-        note: None,
-        launching: false,
+    let mut ui = NewThread::new(
+        client.clone(),
+        machines.clone(),
         welcome,
-        cols: cols as usize,
-        rows: rows as usize,
-        painter: Painter::default(),
-        chip_spans: Vec::new(),
-        chip_row: 0,
-        chat_width: crate::width::current().0,
-        tx: tx.clone(),
-        images: Tray::default(),
-        image_row: 0,
-        image_spans: Vec::new(),
-        clipboard: paste::Reader::default(),
-    };
+        tx.clone(),
+        (cols as usize, rows as usize),
+    );
     ui.load(config, &shell);
     for m in machines {
         check(m, tx.clone());
@@ -1455,12 +1529,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
                     Loaded::Reachable(id, up) => {
                         ui.reachable.insert(id, up);
                     }
-                    Loaded::Switched(Ok((env, config, shell))) => {
-                        ui.note = None;
-                        ui.client = env;
-                        ui.load(config, &shell);
-                    }
-                    Loaded::Switched(Err(e)) => ui.note = Some((e, true)),
+                    Loaded::Switched(generation, result) => ui.switched(generation, result),
                     Loaded::Picture(ready) => if let Some(why) = ui.images.ready(ready) {
                         ui.note = Some((why, true));
                     },
@@ -1522,6 +1591,7 @@ pub async fn logos(providers: &[Value]) -> HashMap<String, Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_typed_path_lists_the_folders_it_could_be() {
@@ -1553,5 +1623,140 @@ mod tests {
         assert!(folder_root("relative/path").is_err());
         assert!(folder_root(&format!("{root}/missing")).is_err());
         assert_eq!(folder_root("/"), Ok("/".to_string()));
+    }
+
+    fn machine(id: &str) -> Arc<Env> {
+        let machine = t3client::store::Machine {
+            id: id.into(),
+            label: id.to_uppercase(),
+            alias: None,
+            origins: vec!["http://127.0.0.1:9".into()],
+            ssh: None,
+            via: t3client::store::Via::Link,
+            version: String::new(),
+        };
+        Arc::new(Env::new(
+            t3client::store::Store::new("/nonexistent"),
+            machine,
+        ))
+    }
+
+    /// A new-thread screen on machine `a`, with `b` and `c` paired.
+    fn screen() -> (NewThread, Vec<Arc<Env>>) {
+        let machines = vec![machine("a"), machine("b"), machine("c")];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ui = NewThread::new(machines[0].clone(), machines.clone(), false, tx, (100, 30));
+        (ui, machines)
+    }
+
+    fn loaded(env: &Arc<Env>) -> Result<(Arc<Env>, Value, ShellState), String> {
+        Ok((env.clone(), json!({"providers": []}), ShellState::default()))
+    }
+
+    /// Whether the note under the screen is about machine B.
+    fn says_b(ui: &NewThread) -> bool {
+        ui.note.as_ref().is_some_and(|(n, _)| n.contains('B'))
+    }
+
+    /// Picks `id` as the machine, as the menu does, without starting a load.
+    fn pick(ui: &mut NewThread, id: &str) -> u64 {
+        ui.select(id);
+        ui.selection
+    }
+
+    #[tokio::test]
+    async fn the_machine_picked_last_wins_when_the_loads_finish_out_of_order() {
+        let (mut ui, m) = screen();
+        let slow = pick(&mut ui, "b");
+        let fast = pick(&mut ui, "c");
+        assert_ne!(slow, fast);
+        ui.switched(fast, loaded(&m[2]));
+        assert_eq!(ui.client.id(), "c");
+        assert!(ui.pending.is_none());
+        // B answers last, after C is already showing.
+        ui.switched(slow, loaded(&m[1]));
+        assert_eq!(ui.client.id(), "c");
+        assert!(!says_b(&ui));
+    }
+
+    #[tokio::test]
+    async fn an_earlier_pick_that_fails_after_the_later_one_loaded_says_nothing() {
+        let (mut ui, m) = screen();
+        let slow = pick(&mut ui, "b");
+        let fast = pick(&mut ui, "c");
+        ui.switched(fast, loaded(&m[2]));
+        ui.switched(slow, Err("B didn't answer".into()));
+        assert_eq!(ui.client.id(), "c");
+        assert!(!says_b(&ui));
+    }
+
+    #[tokio::test]
+    async fn an_earlier_pick_that_finishes_first_never_shows() {
+        let (mut ui, m) = screen();
+        let first = pick(&mut ui, "b");
+        let second = pick(&mut ui, "c");
+        ui.switched(first, loaded(&m[1]));
+        // Still waiting for C: B's answer didn't change the machine or end the wait.
+        assert_eq!(ui.client.id(), "a");
+        assert_eq!(ui.pending.as_ref().map(|p| p.id()), Some("c"));
+        ui.switched(second, loaded(&m[2]));
+        assert_eq!(ui.client.id(), "c");
+    }
+
+    #[tokio::test]
+    async fn a_launch_waits_while_the_picked_machine_loads() {
+        let (mut ui, m) = screen();
+        ui.editor.insert("hello");
+        let pick_b = pick(&mut ui, "b");
+        ui.send();
+        assert!(!ui.launching);
+        assert!(
+            ui.note
+                .as_ref()
+                .is_some_and(|(n, _)| n.starts_with("Loading B"))
+        );
+        assert_eq!(ui.chip(Field::Machine).label, "B");
+        // A stale result for an older pick doesn't release it either.
+        ui.switched(pick_b + 1, loaded(&m[2]));
+        assert_eq!(ui.pending.as_ref().map(|p| p.id()), Some("b"));
+        ui.switched(pick_b, loaded(&m[1]));
+        assert!(ui.pending.is_none());
+        assert_eq!(ui.client.id(), "b");
+    }
+
+    #[tokio::test]
+    async fn a_pick_that_fails_leaves_the_machine_shown_and_can_be_tried_again() {
+        let (mut ui, _) = screen();
+        let first = pick(&mut ui, "b");
+        ui.switched(first, Err("B didn't answer".into()));
+        assert_eq!(ui.client.id(), "a");
+        assert!(ui.pending.is_none());
+        assert_eq!(ui.note, Some(("B didn't answer".to_string(), true)));
+        assert_eq!(ui.chip(Field::Machine).label, "A");
+        assert!(ui.select("b").is_some());
+        assert!(ui.selection > first);
+    }
+
+    #[tokio::test]
+    async fn going_back_to_the_machine_shown_cancels_the_load_in_flight() {
+        let (mut ui, m) = screen();
+        let b = pick(&mut ui, "b");
+        assert!(ui.select("a").is_none());
+        assert!(ui.pending.is_none());
+        assert!(ui.note.is_none());
+        ui.switched(b, loaded(&m[1]));
+        assert_eq!(ui.client.id(), "a");
+        // Picking the machine shown with nothing loading changes nothing.
+        let before = ui.selection;
+        assert!(ui.select("a").is_none());
+        assert_eq!(ui.selection, before);
+    }
+
+    #[tokio::test]
+    async fn picking_the_machine_already_loading_starts_nothing_new() {
+        let (mut ui, _) = screen();
+        let first = pick(&mut ui, "b");
+        assert!(ui.select("b").is_none());
+        assert_eq!(ui.selection, first);
     }
 }

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Writes the license texts of the crates linked into the tr3x binary to stdout.
+
+Each crate's own LICENSE, COPYING and NOTICE files are grouped by text, so a license shared by
+a hundred crates is printed once with the crates that carry it. Run it after a build, so the
+crates are fetched; the release workflow puts the output in every archive. It reads the lock
+file as it is (`--locked`) and fails when a crate in the binary ships no license text, instead
+of leaving it out.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WANT = re.compile(r"^(licen[cs]e|copying|notice|unlicense)([-_.].*)?$", re.I)
+
+
+def main():
+    host = re.search(r"^host: (.*)$", subprocess.check_output(["rustc", "-vV"], text=True), re.M)[1]
+    meta = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", host],
+            cwd=ROOT,
+        )
+    )
+    packages = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    start = next(p["id"] for p in meta["packages"] if p["name"] == "tr3x")
+    # What the binary links: the normal dependencies of tr3x, not build scripts or tests.
+    seen, todo = set(), [start]
+    while todo:
+        id = todo.pop()
+        if id in seen:
+            continue
+        seen.add(id)
+        for dep in nodes[id]["deps"]:
+            if any(k["kind"] is None for k in dep["dep_kinds"]):
+                todo.append(dep["pkg"])
+    texts, missing = {}, []
+    for id in sorted(seen, key=lambda i: (packages[i]["name"], packages[i]["version"])):
+        pkg = packages[id]
+        if not pkg["source"]:  # tr3x and t3client, whose licenses are the archive's own
+            continue
+        folder = os.path.dirname(pkg["manifest_path"])
+        found = [
+            f
+            for f in sorted(os.listdir(folder))
+            if WANT.match(f) and os.path.isfile(os.path.join(folder, f))
+        ]
+        if not found:
+            missing.append(f"{pkg['name']} {pkg['version']} ({pkg['license']})")
+        for f in found:
+            with open(os.path.join(folder, f), encoding="utf-8", errors="replace") as fh:
+                text = fh.read().strip()
+            texts.setdefault(text, []).append(f"{pkg['name']} {pkg['version']}")
+    if missing:
+        sys.exit("No license text shipped by: " + ", ".join(missing))
+    print("Third-party licenses of the crates linked into tr3x.\n")
+    for text, crates in sorted(texts.items(), key=lambda kv: kv[1][0]):
+        print("=" * 78)
+        print("\n".join(sorted(set(crates))))
+        print("=" * 78 + "\n")
+        print(text + "\n")
+
+
+main()

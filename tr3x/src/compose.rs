@@ -344,7 +344,8 @@ pub(crate) enum Hit {
 /// What came back from work started in the background.
 pub(crate) enum Done {
     Note(String, bool),
-    /// A message that failed to send, back into the input if it's empty.
+    /// A message that failed to send: back into the input if that's empty, else kept for
+    /// Ctrl+R.
     Restore(String, Vec<Image>),
     /// A picture made ready to send.
     Picture(picture::Ready),
@@ -414,6 +415,9 @@ pub(crate) struct Composer {
     menu_rows: usize,
     /// The pictures the next message takes.
     pub(crate) images: Tray,
+    /// Messages that failed to send while something else was already in the input, oldest
+    /// first. Ctrl+R brings them back, ahead of what's typed.
+    unsent: Vec<(String, Vec<Image>)>,
     pub(crate) clipboard: paste::Reader,
     /// The last command was `/delete`, so the next one deletes.
     deleting: bool,
@@ -707,6 +711,19 @@ impl Composer {
                 hits.push((rows.len(), (x, x), Hit::Remove(i)));
             }
             rows.push(line);
+            rows.push(String::new());
+        }
+        if !self.unsent.is_empty() {
+            let n = self.unsent.len();
+            let what = if n == 1 {
+                "Unsent message".to_string()
+            } else {
+                format!("{n} unsent messages")
+            };
+            rows.push(format!(
+                "{RED}{}{RESET} {DIM}Ctrl+R{RESET}",
+                fit(&what, width.saturating_sub(7))
+            ));
             rows.push(String::new());
         }
         // The menu draws over these, right above the input.
@@ -1420,6 +1437,7 @@ impl Composer {
                 self.images.pop();
             }
             KeyCode::Char('x') if ctrl => self.command("stop"),
+            KeyCode::Char('r') if ctrl && !self.unsent.is_empty() => self.recover(),
             KeyCode::Tab | KeyCode::BackTab => self.pick(Field::Model),
             _ => {
                 edit(&mut self.editor, key);
@@ -1764,6 +1782,7 @@ impl Composer {
             slash,
             menu_rows: 0,
             images: Tray::default(),
+            unsent: Vec::new(),
             clipboard: paste::Reader::default(),
             deleting: false,
             escape: Escape::default(),
@@ -1803,7 +1822,42 @@ impl Composer {
 
     /// Whether nothing is typed or half-answered, so the pane can start again.
     pub(crate) fn idle(&self) -> bool {
-        self.editor.text.is_empty() && self.answers.is_empty() && self.images.is_empty()
+        self.editor.text.is_empty()
+            && self.answers.is_empty()
+            && self.images.is_empty()
+            && self.unsent.is_empty()
+    }
+
+    /// A message that didn't send. With nothing typed or attached it goes back into the input.
+    /// Otherwise it's kept, with its pictures, beside the new draft and not over it.
+    fn failed(&mut self, text: String, images: Vec<Image>) {
+        self.unsent.push((text, images));
+        if self.editor.text.is_empty() && self.images.is_empty() {
+            self.recover();
+        }
+    }
+
+    /// Brings every unsent message back into the input, ahead of what's typed there, and
+    /// their pictures into the tray after those already attached. Cmd+Z takes the text back
+    /// out.
+    fn recover(&mut self) {
+        if self.unsent.is_empty() {
+            return;
+        }
+        let mut text: Vec<String> = Vec::new();
+        let mut images = Vec::new();
+        for (t, i) in std::mem::take(&mut self.unsent) {
+            if !t.is_empty() {
+                text.push(t);
+            }
+            images.extend(i);
+        }
+        let typed = self.editor.string();
+        if !typed.is_empty() {
+            text.push(typed);
+        }
+        self.editor.replace(&text.join("\n\n"), true);
+        self.attach(images);
     }
 
     /// What background work came back with.
@@ -1814,14 +1868,7 @@ impl Composer {
                     self.note(text, error)
                 }
             }
-            Done::Restore(text, images) => {
-                if self.editor.text.is_empty() {
-                    self.editor.insert(&text);
-                }
-                if self.images.is_empty() {
-                    self.attach(images);
-                }
-            }
+            Done::Restore(text, images) => self.failed(text, images),
             Done::Picture(ready) => {
                 if let Some(why) = self.images.ready(ready) {
                     self.note(why, true);
@@ -1861,7 +1908,7 @@ mod tests {
     use super::{Done, Editor, Escape, edit, follow, wrap};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::{Value, json};
-    use t3client::env::WatchEvent;
+    use t3client::env::{IfBusy, WatchEvent};
     use tokio::sync::mpsc;
 
     /// The configs Reply was sent, in order, less the logos.
@@ -1936,6 +1983,10 @@ mod tests {
 
     /// Reply for a thread on Codex, on a machine nothing answers at.
     fn reply_on_codex() -> super::Composer {
+        reply_on_codex_with_done().0
+    }
+
+    fn reply_on_codex_with_done() -> (super::Composer, mpsc::UnboundedReceiver<Done>) {
         let machine = t3client::store::Machine {
             id: "offline".into(),
             label: "Test".into(),
@@ -1946,7 +1997,7 @@ mod tests {
             version: String::new(),
         };
         let env = t3client::env::Env::new(t3client::store::Store::new("/nonexistent"), machine);
-        let (mut reply, _done) = super::Composer::new(std::sync::Arc::new(env), "t1".into());
+        let (mut reply, done) = super::Composer::new(std::sync::Arc::new(env), "t1".into());
         reply.state = t3client::projection::ThreadState::from_snapshot(&json!({
             "kind": "snapshot", "snapshotSequence": 1,
             "projection": {
@@ -1955,7 +2006,147 @@ mod tests {
             }
         }));
         (reply.cols, reply.rows, reply.column) = (120, 30, (0, 120));
-        reply
+        (reply, done)
+    }
+
+    fn png(name: &str) -> crate::paste::Image {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([200, 30, 30, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        crate::paste::Image {
+            name: name.into(),
+            mime: "image/png".into(),
+            bytes,
+        }
+    }
+
+    /// Reply with the channel its background work reports on, and how many failed sends it has
+    /// been told of.
+    struct Bench {
+        reply: super::Composer,
+        rx: mpsc::UnboundedReceiver<Done>,
+        failed: usize,
+    }
+
+    impl Bench {
+        fn new() -> Bench {
+            let (reply, rx) = reply_on_codex_with_done();
+            Bench {
+                reply,
+                rx,
+                failed: 0,
+            }
+        }
+
+        /// Feeds Reply what background work reports until `failures` sends have failed in all
+        /// and every picture is ready.
+        async fn settle(&mut self, failures: usize) {
+            while self.failed < failures || self.reply.images.preparing() {
+                let done = tokio::time::timeout(std::time::Duration::from_secs(10), self.rx.recv())
+                    .await
+                    .expect("the send fails against a dead port")
+                    .unwrap();
+                if matches!(done, Done::Restore(..)) {
+                    self.failed += 1;
+                }
+                self.reply.done(done);
+            }
+        }
+
+        /// Types `text` and attaches `pictures` as the user would, once each is ready.
+        async fn draft(&mut self, text: &str, pictures: &[&str]) {
+            self.reply.editor.insert(text);
+            self.reply.attach(pictures.iter().map(|n| png(n)).collect());
+            self.settle(0).await;
+        }
+
+        fn ctrl_r(&mut self) {
+            self.reply
+                .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        }
+    }
+
+    fn names(images: &[crate::paste::Image]) -> Vec<&str> {
+        images.iter().map(|i| i.name.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_returns_to_an_empty_input_with_its_pictures() {
+        let mut b = Bench::new();
+        b.draft("first", &["a.png"]).await;
+        b.reply.send(IfBusy::Queue);
+        assert!(b.reply.editor.text.is_empty() && b.reply.images.is_empty());
+        b.settle(1).await;
+        assert_eq!(b.reply.editor.string(), "first");
+        assert_eq!(names(&b.reply.images.images()), ["a.png"]);
+        assert!(b.reply.unsent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_send_that_fails_under_a_new_draft_keeps_both_and_their_pictures() {
+        let mut b = Bench::new();
+        b.draft("first", &["a.png"]).await;
+        b.reply.send(IfBusy::Queue);
+        // Typing on, with a picture, before the first send has failed.
+        b.draft("second", &["b.png"]).await;
+        b.settle(1).await;
+        assert_eq!(b.reply.editor.string(), "second");
+        assert_eq!(names(&b.reply.images.images()), ["b.png"]);
+        assert_eq!(b.reply.unsent.len(), 1);
+        assert!(!b.reply.idle());
+        assert!(b.reply.draw(28, true).contains("Unsent message"));
+        // Ctrl+R puts the failed message ahead of the draft, and its picture after.
+        b.ctrl_r();
+        assert_eq!(b.reply.editor.string(), "first\n\nsecond");
+        b.settle(1).await;
+        assert_eq!(names(&b.reply.images.images()), ["b.png", "a.png"]);
+        assert!(b.reply.unsent.is_empty());
+        // The merge is one edit: undo gives the draft back.
+        press(&mut b.reply.editor, KeyCode::Char('z'), KeyModifiers::SUPER);
+        assert_eq!(b.reply.editor.string(), "second");
+    }
+
+    #[tokio::test]
+    async fn several_failed_sends_keep_every_message_and_picture() {
+        let mut b = Bench::new();
+        for (text, picture) in [("one", "1.png"), ("two", "2.png"), ("three", "3.png")] {
+            b.draft(text, &[picture]).await;
+            b.reply.send(IfBusy::Queue);
+        }
+        b.draft("new", &[]).await;
+        b.settle(3).await;
+        // Whichever failure landed first may have found the input free; none is lost.
+        b.ctrl_r();
+        b.settle(3).await;
+        let text = b.reply.editor.string();
+        for part in ["one", "two", "three", "new"] {
+            assert!(text.contains(part), "{part} missing from {text:?}");
+        }
+        assert_eq!(b.reply.images.images().len(), 3);
+        assert!(b.reply.unsent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_of_only_pictures_survives_new_text() {
+        let mut b = Bench::new();
+        b.draft("", &["a.png"]).await;
+        b.reply.send(IfBusy::Queue);
+        b.draft("typed", &[]).await;
+        b.settle(1).await;
+        assert_eq!(b.reply.editor.string(), "typed");
+        assert!(b.reply.images.is_empty());
+        b.ctrl_r();
+        b.settle(1).await;
+        assert_eq!(b.reply.editor.string(), "typed");
+        assert_eq!(names(&b.reply.images.images()), ["a.png"]);
     }
 
     fn codex(session_used: u32) -> Value {
