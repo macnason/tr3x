@@ -84,6 +84,19 @@ impl Hub {
         }
     }
 
+    /// The registry read again, as after a machine is paired, renamed or forgotten. A machine
+    /// whose record hasn't changed keeps its `Env`, and with it its connection and descriptor:
+    /// a fresh `Env` knows neither until something connects through it.
+    pub fn reload(&self) -> Hub {
+        let mut hub = Hub::load(self.store.dir.clone());
+        for env in &mut hub.envs {
+            if let Some(old) = self.envs.iter().find(|o| o.machine() == env.machine()) {
+                *env = old.clone();
+            }
+        }
+        hub
+    }
+
     pub fn envs(&self) -> &[Arc<Env>] {
         &self.envs
     }
@@ -249,6 +262,44 @@ mod tests {
                 "{event:?}"
             );
         }
+    }
+
+    /// Pairing another machine reloads the registry. The machines already known keep their
+    /// `Env`, so what they learned connecting stays; a changed record gets a new one.
+    #[test]
+    fn reloading_keeps_unchanged_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let machine = |id: &str| Machine {
+            id: id.into(),
+            label: id.into(),
+            alias: None,
+            origins: vec![format!("http://{id}:3773")],
+            ssh: None,
+            via: Via::Link,
+            version: String::new(),
+        };
+        let mut registry = Registry::default();
+        registry.upsert(machine("a"));
+        registry.upsert(machine("b"));
+        store.save_registry(&registry).unwrap();
+        let before = Hub::load(dir.path());
+
+        registry.upsert(machine("c"));
+        registry
+            .machines
+            .iter_mut()
+            .find(|m| m.id == "b")
+            .unwrap()
+            .alias = Some("studio".into());
+        store.save_registry(&registry).unwrap();
+        let after = before.reload();
+
+        let same = |id: &str| Arc::ptr_eq(&before.get(id).unwrap(), &after.get(id).unwrap());
+        assert!(same("a"));
+        assert!(!same("b"));
+        assert_eq!(after.get("b").unwrap().name(), "studio");
+        assert!(after.get("c").is_some());
     }
 
     #[test]

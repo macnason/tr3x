@@ -952,6 +952,8 @@ struct Track {
     configured: bool,
     /// When to subscribe again after T3 refused the subscription.
     retry_at: Option<Instant>,
+    /// The `Env` the subscription connects through, which holds the machine's descriptor.
+    env: Option<Arc<Env>>,
     /// The machine's shell subscription. The track owns it: forgetting the machine, or sync
     /// ending, drops the track and with it the subscription.
     forwarder: Option<Forwarder>,
@@ -1119,8 +1121,9 @@ type Shells = tokio::sync::mpsc::Sender<(String, WatchEvent)>;
 
 /// Gives each of `envs` not followed yet a track and a shell subscription, and lets go of the
 /// tracks of machines no longer among them, subscriptions with them. A machine that's only out
-/// of reach stays among `envs` and keeps reconnecting on its own. Returns the names of the
-/// machines newly followed.
+/// of reach stays among `envs` and keeps reconnecting on its own. A machine whose record changed
+/// (a new address, say) comes as a new `Env`: its subscription starts again through it, since
+/// readiness is read from the `Env` that connects. Returns the names of the machines newly followed.
 fn follow_machines(
     tracks: &mut BTreeMap<String, Track>,
     envs: &[Arc<Env>],
@@ -1129,16 +1132,28 @@ fn follow_machines(
 ) -> Vec<String> {
     let mut followed = Vec::new();
     for env in envs {
-        if !tracks.contains_key(env.id()) {
-            followed.push(env.name().to_string());
-            tracks.insert(
-                env.id().to_string(),
-                Track {
-                    down_since: Some(now),
-                    forwarder: Some(Hub::forward(env.clone(), tx.clone())),
-                    ..Track::default()
-                },
-            );
+        match tracks.get_mut(env.id()) {
+            Some(track) => {
+                if !track.env.as_ref().is_some_and(|e| Arc::ptr_eq(e, env)) {
+                    track.env = Some(env.clone());
+                    // Replacing the forwarder ends the old subscription.
+                    track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
+                    track.configured = false;
+                    track.retry_at = None;
+                }
+            }
+            None => {
+                followed.push(env.name().to_string());
+                tracks.insert(
+                    env.id().to_string(),
+                    Track {
+                        down_since: Some(now),
+                        env: Some(env.clone()),
+                        forwarder: Some(Hub::forward(env.clone(), tx.clone())),
+                        ..Track::default()
+                    },
+                );
+            }
         }
     }
     tracks.retain(|id, _| envs.iter().any(|e| e.id() == id));
@@ -1266,7 +1281,9 @@ async fn follow(
         // A machine paired, renamed or forgotten while sync runs.
         if machines_stamp(&hub) != stamp {
             stamp = machines_stamp(&hub);
-            hub = t3::hub();
+            // Reloaded in place: a fresh `Env` has no descriptor until it connects, and only
+            // the subscriptions connect, so replacing every machine's left them all unready.
+            hub = hub.reload();
             for name in follow_machines(&mut tracks, hub.envs(), &tx, now) {
                 eprintln!("tr3x: following {name}");
             }
@@ -1466,6 +1483,56 @@ fn name_of(hub: &Hub, env: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pairing a machine while sync runs reloads the registry. The machines already followed
+    /// keep the `Env` their subscription connects through, so they stay described and ready;
+    /// a machine whose record changed is followed through its new `Env`.
+    #[tokio::test]
+    async fn pairing_a_machine_keeps_the_others_followed() {
+        use t3client::store::{Machine, Registry, Store, Via};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let machine = |id: &str| Machine {
+            id: id.into(),
+            label: id.into(),
+            alias: None,
+            // Nothing answers here: the subscriptions only retry.
+            origins: vec!["http://127.0.0.1:9".into()],
+            ssh: None,
+            via: Via::Link,
+            version: String::new(),
+        };
+        let mut registry = Registry::default();
+        registry.upsert(machine("a"));
+        registry.upsert(machine("b"));
+        store.save_registry(&registry).unwrap();
+        let hub = Hub::load(dir.path());
+        let (tx, _events) = tokio::sync::mpsc::channel(32);
+        let mut tracks = BTreeMap::new();
+        follow_machines(&mut tracks, hub.envs(), &tx, Instant::now());
+        tracks.get_mut("a").unwrap().configured = true;
+        tracks.get_mut("b").unwrap().configured = true;
+
+        registry.upsert(machine("c"));
+        registry
+            .machines
+            .iter_mut()
+            .find(|m| m.id == "b")
+            .unwrap()
+            .origins = vec!["http://127.0.0.1:10".into()];
+        store.save_registry(&registry).unwrap();
+        let hub2 = hub.reload();
+        let followed = follow_machines(&mut tracks, hub2.envs(), &tx, Instant::now());
+
+        assert_eq!(followed, vec!["c".to_string()]);
+        let env_of = |id: &str| tracks[id].env.clone().unwrap();
+        assert!(Arc::ptr_eq(&env_of("a"), &hub.get("a").unwrap()));
+        assert!(tracks["a"].configured);
+        assert!(Arc::ptr_eq(&env_of("b"), &hub2.get("b").unwrap()));
+        assert!(!tracks["b"].configured);
+        assert!(hub2.envs().iter().all(|e| Arc::ptr_eq(e, &env_of(e.id()))));
+    }
 
     fn want(key: &str, label: &str) -> Want {
         let (env, thread) = key.split_once('/').unwrap_or(("h", key));
