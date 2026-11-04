@@ -54,6 +54,22 @@ pub struct Want {
     /// Closing the window settles the thread. A thread that is running or waiting on you only
     /// hides, since T3 won't settle it without stopping the run.
     pub settles: bool,
+    /// A subagent's window.
+    pub child: bool,
+    /// For a subagent under a window: the thread it works for.
+    pub parent: Option<Parent>,
+    /// The subagent is waiting on an approval or an answer: it keeps a window of its own even
+    /// when the thread it works for has none, since the agent can't go on without you.
+    pub needs_you: bool,
+    /// What the label says when the subagent stands alone: `↳ title · for Parent`.
+    pub alone: Option<String>,
+}
+
+/// The thread a subagent works for, the one at the top of its chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parent {
+    pub key: String,
+    pub title: String,
 }
 
 impl Want {
@@ -99,7 +115,9 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
         }
     }
     let env_of = |t: &Value| t["tr3xEnv"].as_str().unwrap_or_default().to_string();
-    let want = |thread: &Value, place: Place, child: bool| {
+    // `under`: the thread a subagent works for, when it shows beneath it. `alone`: the subagent
+    // shows by itself, since that thread has no window.
+    let want = |thread: &Value, place: Place, under: Option<Parent>, alone: Option<&str>| {
         let env = env_of(thread);
         let m = by_env.get(env.as_str())?;
         let id = thread["id"].as_str()?.to_string();
@@ -109,17 +127,31 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             .or_else(|| roots.get(&(m.env, thread["projectId"].as_str()?)).copied())
             .filter(|dir| m.local && std::path::Path::new(dir).is_dir())
             .map(str::to_string);
+        let status = t3client::inbox::status_label(thread, now);
         let title = thread["title"].as_str().unwrap_or("Untitled");
-        let title = match glyph(t3client::inbox::status_label(thread, now)) {
+        let title = match glyph(status) {
             Some(glyph) => format!("{glyph} {title}"),
             None => title.to_string(),
         };
-        let title = if child { format!("↳ {title}") } else { title };
+        let child = under.is_some() || alone.is_some();
+        let needs_you = matches!(status, Some("Approval" | "Input"));
+        let tag = |parent: &str| format!("↳ {title} · for {}", clean(parent, 24));
+        let (title, alone_label) = match (&under, alone) {
+            (_, Some(parent)) => (tag(parent), None),
+            (Some(parent), None) => (format!("↳ {title}"), Some(tag(&parent.title))),
+            (None, None) => (title, None),
+        };
+        // A subagent that only works has nothing to say until it changes, so closing its window
+        // hides it until it needs you or finishes, not until its next tool call.
+        let updated_at = match (child, status) {
+            (true, Some("Working" | "Goal")) => "working".to_string(),
+            _ => thread["updatedAt"].as_str().unwrap_or_default().to_string(),
+        };
         Some(Want {
             thread: ThreadRef::new(env.clone(), id),
             label: decorate(&title, m.badge, m.offline),
             cwd,
-            updated_at: thread["updatedAt"].as_str().unwrap_or_default().to_string(),
+            updated_at,
             place,
             instance: thread["modelSelection"]["instanceId"]
                 .as_str()
@@ -128,9 +160,13 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
                 .to_string(),
             settles: m.caps.settlement
                 && !matches!(
-                    t3client::inbox::status_label(thread, now),
+                    status,
                     Some("Approval" | "Input" | "Working" | "Goal" | "Waiting")
                 ),
+            child,
+            parent: under,
+            needs_you: child && needs_you,
+            alone: alone_label.map(|l| decorate(&l, m.badge, m.offline)),
         })
     };
     let by_id: HashMap<(String, &str), &Value> = threads
@@ -145,14 +181,43 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             children.entry((env, root)).or_default().push(thread);
         }
     }
-    let mut out = Vec::new();
+    let mut out: Vec<Want> = Vec::new();
     for (thread, place) in inbox.order(&threads, caps, now) {
-        out.extend(want(thread, place, false));
+        out.extend(want(thread, place, None, None));
         let id = thread["id"].as_str().unwrap_or_default().to_string();
-        for child in children.remove(&(env_of(thread), id)).unwrap_or_default() {
-            out.extend(want(child, place, true));
+        let env = env_of(thread);
+        let parent = Parent {
+            key: format!("{env}/{id}"),
+            title: thread["title"].as_str().unwrap_or("Untitled").to_string(),
+        };
+        for child in children.remove(&(env, id)).unwrap_or_default() {
+            out.extend(want(child, place, Some(parent.clone()), None));
         }
     }
+    // A subagent whose thread isn't listed (snoozed, settled, archived) and that waits on you
+    // still gets a window, with the attention threads: nothing else shows its request, and the
+    // agent can't go on. One that failed is history, as it is under any thread.
+    let mut stranded: Vec<(&(String, String), &Vec<&Value>)> = children.iter().collect();
+    stranded.sort_by(|a, b| a.0.cmp(b.0));
+    let mut alone: Vec<Want> = Vec::new();
+    for ((env, root), subagents) in stranded {
+        let title = by_id
+            .get(&(env.clone(), root.as_str()))
+            .and_then(|t| t["title"].as_str())
+            .unwrap_or("Untitled");
+        for child in subagents {
+            if let Some(w) =
+                want(child, Place::Attention, None, Some(title)).filter(|w| w.needs_you)
+            {
+                alone.push(w);
+            }
+        }
+    }
+    let after = out
+        .iter()
+        .rposition(|w| w.place == Place::Attention)
+        .map_or(0, |i| i + 1);
+    out.splice(after..after, alone);
     out
 }
 
@@ -317,6 +382,7 @@ impl Plan {
 pub fn plan(
     wants: &[Want],
     present: &[(String, String)],
+    active: Option<&str>,
     group: &mut Group,
     health: &dyn Fn(&str) -> Health,
 ) -> Plan {
@@ -349,6 +415,24 @@ pub fn plan(
         None => !health(env_of(key)).ready,
     });
 
+    // A subagent shows under the thread it works for. When the user closed that thread's
+    // window, it goes too, unless it needs you: that one stays, named for its thread.
+    let shown: Vec<Want> = wants
+        .iter()
+        .filter_map(|w| match &w.parent {
+            Some(p) if group.dismissed.contains_key(&p.key) || !wanted.contains_key(&p.key) => {
+                w.needs_you.then(|| Want {
+                    label: w.alone.clone().unwrap_or_else(|| w.label.clone()),
+                    parent: None,
+                    ..w.clone()
+                })
+            }
+            _ => Some(w.clone()),
+        })
+        .collect();
+    let wanted: HashMap<String, &Want> = shown.iter().map(|w| (w.key(), w)).collect();
+    let wants = &shown[..];
+
     let mut plan = Plan {
         settle,
         ..Plan::default()
@@ -360,6 +444,10 @@ pub fn plan(
         if wanted.contains_key(&key) {
             kept.insert(key, window);
         } else if !health(env_of(&key)).ready {
+            held.push(key.clone());
+            kept.insert(key, window);
+        } else if window.child && active == Some(window.window_id.as_str()) {
+            // A subagent that finished while you read it stays until you leave.
             held.push(key.clone());
             kept.insert(key, window);
         } else {
@@ -536,6 +624,7 @@ fn adopt(
                     Window {
                         window_id: window,
                         label,
+                        child: false,
                     },
                 );
             }
@@ -899,7 +988,13 @@ impl Syncer {
                 .await?;
             return Ok(true);
         }
-        let mut plan = plan(wants, &present, group, health);
+        let mut plan = plan(
+            wants,
+            &present,
+            view["active_window_id"].as_str(),
+            group,
+            health,
+        );
         self.closed.append(&mut plan.settle);
         plan.close.append(&mut extra);
         let closing = plan.close.clone();
@@ -924,6 +1019,7 @@ impl Syncer {
                     Window {
                         window_id: id.to_string(),
                         label: want.label.clone(),
+                        child: want.child,
                     },
                 );
             }
@@ -1456,6 +1552,30 @@ async fn follow(
             syncer.state.next = next;
             syncer.persist()?;
         }
+        // Which subagent works for which thread, for the actions that go between them. A
+        // subagent that finished but still has its window keeps its entry.
+        let mut parents: BTreeMap<String, String> = syncer
+            .state
+            .parents
+            .iter()
+            .filter(|(child, _)| {
+                syncer
+                    .state
+                    .groups
+                    .values()
+                    .any(|g| g.windows.contains_key(*child))
+            })
+            .map(|(c, p)| (c.clone(), p.clone()))
+            .collect();
+        for w in &wants {
+            if let Some(parent) = &w.parent {
+                parents.insert(w.key(), parent.key.clone());
+            }
+        }
+        if parents != syncer.state.parents {
+            syncer.state.parents = parents;
+            syncer.persist()?;
+        }
         // A plain settle, never stopping a run: a thread that started again since stays hidden
         // until it changes.
         for thread in syncer.closed.drain(..) {
@@ -1544,6 +1664,10 @@ mod tests {
             place: Place::Open,
             instance: String::new(),
             settles: true,
+            child: false,
+            parent: None,
+            needs_you: false,
+            alone: None,
         }
     }
 
@@ -1551,6 +1675,7 @@ mod tests {
         Window {
             window_id: id.into(),
             label: label.into(),
+            child: false,
         }
     }
 
@@ -1583,6 +1708,7 @@ mod tests {
         let plan = plan(
             &[want("b", "B"), want("a", "A2")],
             &present,
+            None,
             &mut group,
             &ready,
         );
@@ -1600,12 +1726,12 @@ mod tests {
     fn a_closed_window_stays_closed_until_the_thread_changes() {
         let mut group = Group::default();
         group.windows.insert("h/a".into(), win("w-a", "A"));
-        let plan1 = plan(&[want("a", "A")], &[], &mut group, &ready);
+        let plan1 = plan(&[want("a", "A")], &[], None, &mut group, &ready);
         assert!(plan1.create.is_empty());
         assert_eq!(group.dismissed.get("h/a").map(String::as_str), Some("u1"));
         let mut changed = want("a", "A");
         changed.updated_at = "u2".into();
-        let plan2 = plan(&[changed], &[], &mut group, &ready);
+        let plan2 = plan(&[changed], &[], None, &mut group, &ready);
         assert_eq!(plan2.create.len(), 1);
         assert!(group.dismissed.is_empty());
     }
@@ -1622,6 +1748,7 @@ mod tests {
         let plan = plan(
             &[want("a", "A"), running, want("c", "C")],
             &present,
+            None,
             &mut group,
             &ready,
         );
@@ -1636,12 +1763,16 @@ mod tests {
         group.windows.insert("h/a".into(), win("w-a", "A"));
         group.windows.insert("h/b".into(), win("w-b", "B"));
         let wants = [want("a", "A"), want("b", "B")];
-        assert!(plan(&wants, &[], &mut group, &ready).settle.is_empty());
+        assert!(
+            plan(&wants, &[], None, &mut group, &ready)
+                .settle
+                .is_empty()
+        );
         // The last window, closed on its own, is the user's.
         let mut group = Group::default();
         group.windows.insert("h/a".into(), win("w-a", "A"));
         assert_eq!(
-            plan(&[want("a", "A")], &[], &mut group, &ready).settle,
+            plan(&[want("a", "A")], &[], None, &mut group, &ready).settle,
             vec![ThreadRef::new("h", "a")]
         );
     }
@@ -1653,7 +1784,7 @@ mod tests {
         group.windows.insert("h/b".into(), win("w-b", "B"));
         let present = vec![("w-a".into(), "A".into()), ("w-b".into(), "B".into())];
         let wants = [want("a", "A"), want("b", "B")];
-        assert!(plan(&wants, &present, &mut group, &ready).is_empty());
+        assert!(plan(&wants, &present, None, &mut group, &ready).is_empty());
     }
 
     /// A machine out of reach: its windows stay, in place, marked offline. None closes, none is
@@ -1677,7 +1808,7 @@ mod tests {
             want("h/a", "A"),
             want("b/n", "N · b (offline)"),
         ];
-        let plan = plan(&wants, &present, &mut group, &b_down);
+        let plan = plan(&wants, &present, None, &mut group, &b_down);
         assert!(plan.close.is_empty() && plan.create.is_empty() && plan.settle.is_empty());
         assert!(group.windows.contains_key("b/y"));
         assert!(group.dismissed.contains_key("b/z") || !group.windows.contains_key("b/z"));
@@ -1698,7 +1829,7 @@ mod tests {
             ("w-a".into(), "A".into()),
             ("w-y".into(), "Y · b (offline)".into()),
         ];
-        let plan = super::plan(&back, &present, &mut group, &ready);
+        let plan = super::plan(&back, &present, None, &mut group, &ready);
         assert_eq!(plan.close, vec!["w-y".to_string()]);
         assert_eq!(plan.create.len(), 1);
         assert!(plan.relabel.contains(&("w-x".into(), "X · b".into())));
@@ -1745,6 +1876,10 @@ mod tests {
                 place: Place::Open,
                 instance: String::new(),
                 settles: true,
+                child: false,
+                parent: None,
+                needs_you: false,
+                alone: None,
             })
             .collect();
         let rebuild = reshape(&windows, &group, &wants, false);
@@ -1905,6 +2040,155 @@ mod tests {
                 && !ids.contains(&"finished")
         );
         assert_eq!(wants[a + 1].label, "↳ task");
+    }
+
+    fn child_of(parent: &str, id: &str, extra: Value) -> Value {
+        let mut t = thread(id, extra);
+        t["lineage"] = json!({"parentThreadId": parent, "relationshipToParent": "subagent", "rootThreadId": parent});
+        t
+    }
+
+    /// The thread a subagent works for is archived, so it has no window. A subagent of it that
+    /// needs you still does, named for it; one that only works doesn't.
+    #[test]
+    fn a_subagents_request_shows_without_its_thread() {
+        let shell = ShellState {
+            threads: vec![
+                thread("open", json!({})),
+                thread(
+                    "old",
+                    json!({"archivedAt": "2026-10-30T00:00:00.000Z", "title": "Refactor sync"}),
+                ),
+                child_of(
+                    "old",
+                    "asks",
+                    json!({"creationSource": "mcp", "title": "Audit tests", "pendingRuntimeRequest": {"kind": "command"}}),
+                ),
+                child_of(
+                    "old",
+                    "failed",
+                    json!({"creationSource": "mcp", "status": "error", "latestRunId": "r", "lastErrorClass": "provider_error"}),
+                ),
+                child_of(
+                    "old",
+                    "busy",
+                    json!({"creationSource": "mcp", "activeRunId": "r", "latestRunId": "r", "activityRunStatus": "running"}),
+                ),
+            ],
+            ..ShellState::default()
+        };
+        let wants = wanted(&[machine("h", &shell, None)], &mut Inbox::default(), 0);
+        let ids: Vec<&str> = wants.iter().map(|w| w.thread.thread.as_str()).collect();
+        assert!(ids.contains(&"asks") && !ids.contains(&"busy") && !ids.contains(&"old"));
+        assert!(
+            !ids.contains(&"failed"),
+            "a failure under a closed thread is history"
+        );
+        let asks = wants.iter().find(|w| w.thread.thread == "asks").unwrap();
+        assert_eq!(asks.label, "↳ ● Audit tests · for Refactor sync");
+        assert_eq!(asks.place, Place::Attention);
+        assert!(asks.parent.is_none() && asks.child && asks.needs_you);
+    }
+
+    /// A subagent that only works says nothing new until it changes, so closing its window
+    /// hides it until it needs you.
+    #[test]
+    fn a_working_subagent_stays_closed_until_it_needs_you() {
+        let working = json!({"creationSource": "mcp", "activeRunId": "r", "latestRunId": "r", "activityRunStatus": "running"});
+        let at = |updated: &str, extra: Value| {
+            let mut t = child_of("a", "task", working.clone());
+            t["updatedAt"] = json!(updated);
+            if !extra.is_null() {
+                for (k, v) in extra.as_object().unwrap() {
+                    t[k] = v.clone();
+                }
+            }
+            ShellState {
+                threads: vec![thread("a", json!({})), t],
+                ..ShellState::default()
+            }
+        };
+        let first = at("2026-11-04T10:00:00.000Z", Value::Null);
+        let later = at("2026-11-04T10:00:09.000Z", Value::Null);
+        let asks = at(
+            "2026-11-04T10:00:20.000Z",
+            json!({"pendingRuntimeRequest": {"kind": "command"}}),
+        );
+        let stamp = |shell: &ShellState| {
+            wanted(&[machine("h", shell, None)], &mut Inbox::default(), 0)
+                .into_iter()
+                .find(|w| w.thread.thread == "task")
+                .unwrap()
+                .updated_at
+        };
+        assert_eq!(stamp(&first), stamp(&later));
+        assert_ne!(stamp(&first), stamp(&asks));
+    }
+
+    fn sub(key: &str, label: &str, parent: &str, needs_you: bool) -> Want {
+        Want {
+            child: true,
+            needs_you,
+            parent: Some(Parent {
+                key: parent.into(),
+                title: "Parent".into(),
+            }),
+            alone: Some(format!("{label} · for Parent")),
+            ..want(key, label)
+        }
+    }
+
+    /// Closing a thread's window takes its subagents' windows with it, except one that needs
+    /// you, which stays and says whose it is.
+    #[test]
+    fn closing_a_thread_closes_its_busy_subagents_but_not_one_that_asks() {
+        let mut group = Group::default();
+        group.windows.insert("h/busy".into(), win("w-b", "↳ busy"));
+        group.windows.insert("h/asks".into(), win("w-k", "↳ asks"));
+        group.dismissed.insert("h/a".into(), "u1".into());
+        let present = vec![
+            ("w-b".into(), "↳ busy".into()),
+            ("w-k".into(), "↳ asks".into()),
+        ];
+        let wants = [
+            want("a", "A"),
+            sub("h/busy", "↳ busy", "h/a", false),
+            sub("h/asks", "↳ asks", "h/a", true),
+        ];
+        let plan = plan(&wants, &present, None, &mut group, &ready);
+        assert_eq!(plan.close, vec!["w-b".to_string()]);
+        assert_eq!(
+            plan.relabel,
+            vec![("w-k".to_string(), "↳ asks · for Parent".to_string())]
+        );
+        assert!(group.windows.contains_key("h/asks") && !group.windows.contains_key("h/busy"));
+    }
+
+    /// A subagent that finished while it had focus keeps its window until you leave it.
+    #[test]
+    fn a_finished_subagent_stays_while_it_has_focus() {
+        let mut open = Group::default();
+        open.windows.insert("h/a".into(), win("w-a", "A"));
+        let mut child = win("w-c", "↳ done");
+        child.child = true;
+        open.windows.insert("h/task".into(), child);
+        let present = vec![("w-a".into(), "A".into()), ("w-c".into(), "↳ done".into())];
+        let wants = [want("a", "A")];
+
+        let mut group = open.clone();
+        let made = super::plan(&wants, &present, Some("w-c"), &mut group, &ready);
+        assert!(made.close.is_empty() && group.windows.contains_key("h/task"));
+
+        // Gone from view, it closes.
+        let mut group = open.clone();
+        let made = super::plan(&wants, &present, Some("w-a"), &mut group, &ready);
+        assert_eq!(made.close, vec!["w-c".to_string()]);
+
+        // Only a subagent lingers: an ordinary thread's window closes under you as before.
+        let mut group = open;
+        group.windows.get_mut("h/task").unwrap().child = false;
+        let made = super::plan(&wants, &present, Some("w-c"), &mut group, &ready);
+        assert_eq!(made.close, vec!["w-c".to_string()]);
     }
 
     /// Two machines' threads merge in one order, each knowing its machine, and only the other

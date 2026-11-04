@@ -9,6 +9,11 @@
 - Releases are published only once every platform's archive is built and checked. Each archive carries the license notices of tr3x, the t3client code it grew from, and the crates it links.
 - `scripts/dev-restart` finds Rex on `PATH` on Linux and checks for it before closing or deleting anything.
 - Tokio 1.53.3 (RUSTSEC-2026-0386). SECURITY.md now says what an agent's HTML preview can reach.
+- A subagent's header says which thread it works for. ⌃⌘[ goes up to it and ⌃⌘] goes down to a subagent, on the screen you pressed it on.
+- A subagent you're reading keeps its tab when it finishes, until you leave.
+- Closing a thread closes its subagents' tabs, except one waiting on an approval or an answer.
+- A subagent waiting on an approval or an answer now shows even when its thread is settled, snoozed or archived. Before, its request was invisible and the agent waited.
+- Closing a subagent that's only working keeps it closed until it needs you.
 
 ## 0.1.0
 

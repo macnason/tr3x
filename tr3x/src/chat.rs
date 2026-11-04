@@ -89,6 +89,8 @@ struct Pane {
     snapshots: mpsc::UnboundedSender<media::Ready>,
     /// What the pane says while the thread's machine is out of reach.
     offline: Option<String>,
+    /// For a subagent, the title of the thread it works for: the header says so.
+    parent: String,
     /// The usage-limit line the last frame drew, which time moves on: `tomorrow 9am` becomes
     /// `9am` at midnight, and `resumes` becomes `resuming` at the reset.
     limit: String,
@@ -858,6 +860,23 @@ fn status_sequence(
 }
 
 /// The name of the project `thread` belongs to.
+/// The key that goes up to the thread a subagent works for (`t3_parent` in tr3x.lua).
+const PARENT_KEY: &str = "⌃⌘[";
+
+/// The title of the thread a subagent works for: the nearest ancestor that isn't a subagent
+/// itself, as sync names it. None for a thread that isn't one, or a chain T3 hasn't sent.
+fn parent_title(shell: &ShellState, thread: &Value) -> Option<String> {
+    let mut at = thread;
+    for _ in 0..16 {
+        if at["lineage"]["relationshipToParent"] != "subagent" {
+            return (!std::ptr::eq(at, thread))
+                .then(|| at["title"].as_str().unwrap_or("Untitled").to_string());
+        }
+        at = t3client::inbox::find_thread(shell, at["lineage"]["parentThreadId"].as_str()?)?;
+    }
+    None
+}
+
 fn project_name<'a>(shell: &'a ShellState, thread: &Value) -> Option<&'a str> {
     let id = thread["projectId"].as_str()?;
     shell.projects.iter().find(|p| p["id"] == id)?["title"].as_str()
@@ -1008,6 +1027,7 @@ impl Pane {
             link,
             snapshots,
             offline: None,
+            parent: String::new(),
             limit: String::new(),
             files: crate::link::FileLinks::default(),
             display: None,
@@ -1303,6 +1323,11 @@ impl Pane {
         // The title opens the thread in T3 on whichever device it's clicked on.
         let title = crate::link::osc8(&self.link, &fit(&one_line(title), width));
         text.push_str(&format!("\r\n{p}{BOLD}{title}{RESET}\r\n"));
+        if !self.parent.is_empty() {
+            let room = width.saturating_sub(PARENT_KEY.chars().count() + 4);
+            let parent = fit(&one_line(&self.parent), room);
+            text.push_str(&format!("{p}{DIM}↖ {parent}  {PARENT_KEY}{RESET}\r\n"));
+        }
         if !meta.is_empty() {
             text.push_str(&format!("{p}{DIM}{}{RESET}\r\n", meta.join(" · ")));
         }
@@ -1751,6 +1776,13 @@ async fn event_loop(
         dirty |= pane.reflow;
         if dirty && let Some(s) = composer.state.as_ref() {
             let thread = t3client::inbox::find_thread(&shell, thread_id);
+            let parent = thread
+                .and_then(|t| parent_title(&shell, t))
+                .unwrap_or_default();
+            if parent != pane.parent {
+                pane.reflow |= pane.header;
+                pane.parent = parent;
+            }
             pane.set_title(s, thread.and_then(|t| project_name(&shell, t)));
             pane.set_status(&shell, thread, Some(s));
             text.push_str(&pane.draw(s, thread));
@@ -2465,6 +2497,53 @@ mod tests {
             );
         }
         assert!(drawn.contains('…'));
+    }
+
+    #[test]
+    fn a_subagent_says_which_thread_it_works_for() {
+        let thread = |id: &str, parent: Option<&str>| {
+            let mut t = serde_json::json!({"id": id, "title": id.to_uppercase()});
+            t["lineage"] = match parent {
+                Some(p) => {
+                    serde_json::json!({"parentThreadId": p, "relationshipToParent": "subagent"})
+                }
+                None => serde_json::json!({"parentThreadId": null, "relationshipToParent": null}),
+            };
+            t
+        };
+        let shell = ShellState {
+            threads: vec![
+                thread("root", None),
+                thread("mid", Some("root")),
+                thread("leaf", Some("mid")),
+            ],
+            ..ShellState::default()
+        };
+        let at = |id: &str| parent_title(&shell, t3client::inbox::find_thread(&shell, id).unwrap());
+        // The nearest ancestor that has a window of its own, as ⌃⌘[ goes to.
+        assert_eq!(at("leaf").as_deref(), Some("ROOT"));
+        assert_eq!(at("mid").as_deref(), Some("ROOT"));
+        assert_eq!(at("root"), None);
+        // A chain T3 hasn't sent says nothing.
+        let broken = ShellState {
+            threads: vec![thread("leaf", Some("gone"))],
+            ..ShellState::default()
+        };
+        assert_eq!(parent_title(&broken, &broken.threads[0]), None);
+
+        let state = ThreadState::from_snapshot(&serde_json::json!({
+            "snapshotSequence": 1,
+            "projection": {"thread": {"id": "leaf", "title": "Audit tests"}, "runs": [], "turnItems": []}
+        }))
+        .unwrap();
+        let mut p = pane(40, 1, 0);
+        p.header = false;
+        p.parent = "Refactor sync".into();
+        let drawn = p.draw(&state, None);
+        assert!(drawn.contains("↖ Refactor sync  ⌃⌘["), "{drawn:?}");
+        p.header = false;
+        p.parent.clear();
+        assert!(!p.draw(&state, None).contains('↖'));
     }
 
     #[test]

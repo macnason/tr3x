@@ -246,6 +246,12 @@ enum Command {
     /// Print the thread a Rex block belongs to.
     #[command(hide = true)]
     Which(Target),
+    /// Print where the thread a subagent works for is, as Rex's session.select takes it.
+    #[command(hide = true)]
+    Parent(Target),
+    /// Print where a subagent of this thread is, as Rex's session.select takes it.
+    #[command(hide = true)]
+    Child(Target),
     /// Show or set how wide conversations read: comfortable, wide, full, a column count, or
     /// t3 to follow T3 Code's Chat width.
     Width { width: Option<String> },
@@ -631,6 +637,8 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Inbox => install::inbox().await,
+        Command::Parent(t) => install::hop(&t.resolve().await?, true).await,
+        Command::Child(t) => install::hop(&t.resolve().await?, false).await,
         Command::Rpc {
             method,
             payload,
