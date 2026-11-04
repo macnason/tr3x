@@ -86,7 +86,7 @@ npx skills add macnason/tr3x
 - [Contributing](CONTRIBUTING.md): building, testing, and clean screenshots.
 - [Security](SECURITY.md): what tr3x can reach, where its tokens live, and reporting a problem.
 
-Works with T3 Code 0.1.6 and its nightlies (orchestration protocol 2), and Rex Beta 0.1.0. A
+Works with T3 Code 0.1.7 and its nightlies (orchestration protocol 2), and Rex Beta 0.1.0. A
 [daily check](.github/workflows/surface.yml) flags what each T3 nightly changes.
 
 ## Credits
