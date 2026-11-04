@@ -266,6 +266,35 @@ pub fn one_line(text: &str) -> String {
         .join(" ")
 }
 
+/// `text` broken at spaces into lines of at most `width` columns, and at most `max` lines, the
+/// last ending in an ellipsis if there was more. Plain, single-line text.
+fn wrap_plain(text: &str, width: usize, max: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let used = unicode_width::UnicodeWidthStr::width(line.as_str());
+        let need = unicode_width::UnicodeWidthStr::width(word) + usize::from(!line.is_empty());
+        if !line.is_empty() && used + need > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > max {
+        lines.truncate(max);
+        let last = lines.pop().unwrap_or_default();
+        lines.push(fit(&format!("{last}…"), width));
+    }
+    // A word longer than the line is cut rather than left to spill past the column.
+    lines.into_iter().map(|l| fit(&l, width)).collect()
+}
+
 /// `lines` moved right by `left` columns, into the conversation's column.
 fn pad(lines: Vec<String>, left: usize) -> Vec<String> {
     lines
@@ -1129,9 +1158,9 @@ impl Pane {
                 " ".repeat(left),
                 SPINNER[self.frame % SPINNER.len()]
             ));
-        } else if let Some(footer) = self.footer(state) {
+        } else {
             // The finished turn's footer redraws until the next turn starts, so it can stay live.
-            live.push(footer);
+            live.extend(self.footer(state));
         }
         // A tail taller than the screen can't be rewritten once its top has scrolled away, so
         // anything above the last screenful prints for good now.
@@ -1212,17 +1241,30 @@ impl Pane {
             .unwrap_or_default()
     }
 
-    /// The finished turn's last line: when it finished and how long it took, or that it
+    /// The finished turn's last lines: when it finished and how long it took, or that it
     /// failed or stopped. A turn stopped on a usage limit says when the limit resets, and
-    /// whether T3 resumes the thread then.
-    fn footer(&self, state: &ThreadState) -> Option<String> {
+    /// whether T3 resumes the thread then. The provider session's error goes under a failure
+    /// or a session in trouble, when no error in the conversation says it already.
+    fn footer(&self, state: &ThreadState) -> Vec<String> {
+        let (left, width) = self.column();
         if !self.limit.is_empty() {
-            return Some(format!(
+            return vec![format!(
                 "{}{YELLOW}◷{RESET} {DIM}{}{RESET}",
-                " ".repeat(self.column().0),
-                fit(&self.limit, self.column().1.saturating_sub(2))
-            ));
+                " ".repeat(left),
+                fit(&self.limit, width.saturating_sub(2))
+            )];
         }
+        let mut lines: Vec<String> = self.finished_line(state).into_iter().collect();
+        if let Some(error) = state.session_error() {
+            for line in wrap_plain(&one_line(&error), width.saturating_sub(2), 3) {
+                lines.push(format!("{}{RED}{line}{RESET}", " ".repeat(left + 2)));
+            }
+        }
+        lines
+    }
+
+    /// When the latest turn finished and how long it took, or that it failed or stopped.
+    fn finished_line(&self, state: &ThreadState) -> Option<String> {
         let run = state.latest_run()?;
         let done = run["completedAt"].as_str()?;
         let started = run["startedAt"].as_str().or(run["requestedAt"].as_str())?;
@@ -2280,6 +2322,149 @@ mod tests {
         let drawn = p.draw(&state, Some(&other));
         assert!(drawn.contains("Failed") && !drawn.contains("Usage limit"));
         assert!(p.limit.is_empty());
+    }
+
+    /// A thread whose latest run failed, as T3 sends it, with the provider session's state.
+    fn failed(session_error: Value, items: Value, completed: bool) -> ThreadState {
+        let mut run = serde_json::json!({"id": "r1", "ordinal": 1, "status": "failed",
+            "userMessageId": "m1", "requestedAt": "2026-10-31T00:00:00.000Z",
+            "startedAt": "2026-10-31T00:00:01.000Z"});
+        if completed {
+            run["completedAt"] = "2026-10-31T00:01:00.000Z".into();
+        }
+        let visible: Vec<Value> = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, item)| serde_json::json!({"position": i, "item": item}))
+            .collect();
+        ThreadState::from_snapshot(&serde_json::json!({
+            "kind": "snapshot",
+            "snapshotSequence": 3,
+            "projection": {
+                "thread": {"id": "t1", "title": "Ship it", "providerInstanceId": "codex",
+                    "modelSelection": {"instanceId": "codex", "model": "gpt-5"}},
+                "runs": [run],
+                "runtimeRequests": [],
+                "providerSessions": [{"id": "s1", "driver": "codex", "providerInstanceId": "codex",
+                    "status": "error", "cwd": "/work", "model": "gpt-5", "capabilities": {},
+                    "createdAt": "2026-10-31T00:00:00.000Z", "updatedAt": "2026-10-31T00:00:30.000Z",
+                    "lastError": session_error}],
+                "turnItems": items,
+                "visibleTurnItems": visible,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn message(text: &str) -> Value {
+        serde_json::json!({"id": "m1", "type": "user_message", "ordinal": 0, "text": text})
+    }
+
+    fn error_item(message: &str) -> Value {
+        serde_json::json!({"id": "e1", "type": "error", "runId": "r1", "nodeId": "n1", "ordinal": 1,
+            "status": "failed", "updatedAt": "2026-10-31T00:00:40.000Z",
+            "failure": {"message": message, "class": "provider_error"}})
+    }
+
+    #[test]
+    fn a_failed_turn_says_why_when_only_the_provider_session_knows() {
+        let state = failed(
+            "Codex isn't signed in. Run `codex login`, then send again.".into(),
+            serde_json::json!([message("hi")]),
+            true,
+        );
+        let mut p = pane(30, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, None);
+        assert!(drawn.contains("Failed"), "{drawn:?}");
+        assert!(drawn.contains("Codex isn't signed in."), "{drawn:?}");
+        // Under the footer, in red.
+        assert!(
+            drawn.find("Failed") < drawn.find("Codex isn't signed in."),
+            "{drawn:?}"
+        );
+        assert!(drawn.contains(&format!("{RED}Codex isn't signed in.")));
+    }
+
+    #[test]
+    fn a_failure_before_the_run_finished_still_shows_the_session_error() {
+        // A provider that never started leaves a run without a completion time, and so no
+        // Failed line; the reason is all there is.
+        let state = failed(
+            "Couldn't start Codex: not found".into(),
+            serde_json::json!([message("hi")]),
+            false,
+        );
+        let mut p = pane(30, 1, 0);
+        p.header = false;
+        assert!(
+            p.draw(&state, None)
+                .contains("Couldn't start Codex: not found")
+        );
+    }
+
+    #[test]
+    fn an_error_block_that_says_it_already_isnt_repeated_under_the_footer() {
+        let state = failed(
+            "Rate limited by the provider".into(),
+            serde_json::json!([
+                message("hi"),
+                error_item("Turn failed: rate limited by the provider")
+            ]),
+            true,
+        );
+        let mut p = pane(30, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, None).to_lowercase();
+        assert_eq!(
+            drawn.matches("rate limited by the provider").count(),
+            1,
+            "{drawn:?}"
+        );
+        // A different error block doesn't hide it.
+        let state = failed(
+            "Not signed in".into(),
+            serde_json::json!([message("hi"), error_item("Process exited with code 1")]),
+            true,
+        );
+        let mut p = pane(30, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, None);
+        assert!(drawn.contains("Process exited with code 1") && drawn.contains("Not signed in"));
+    }
+
+    #[test]
+    fn a_long_or_hostile_session_error_stays_inside_the_column() {
+        let long = "token expired ".repeat(40);
+        let state = failed(
+            format!("\x1b[2J\x1b]0;pwned\x07{long}").into(),
+            serde_json::json!([message("hi")]),
+            true,
+        );
+        let mut p = pane(30, 1, 0);
+        p.header = false;
+        let drawn = p.draw(&state, None);
+        // The escape bytes are gone; what followed them is only text.
+        assert!(
+            !drawn.contains("\x1b]0;") && !drawn.contains('\x07'),
+            "{drawn:?}"
+        );
+        let rows: Vec<&str> = drawn
+            .split("\r\n")
+            .filter(|l| l.contains("token expired"))
+            .collect();
+        assert!(rows.len() <= 3, "{rows:?}");
+        let (_, width) = p.column();
+        for row in rows {
+            let plain = row.replace(RED, "").replace(RESET, "");
+            assert!(
+                unicode_width::UnicodeWidthStr::width(plain.trim_start()) <= width,
+                "{plain:?}"
+            );
+        }
+        assert!(drawn.contains('…'));
     }
 
     #[test]

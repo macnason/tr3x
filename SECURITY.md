@@ -37,7 +37,8 @@ paired with. That's the job, so it's worth knowing exactly what it holds and who
 - **Rex's tailnet device**, on a Linux host: the installer runs Rex's server as a systemd user
   service and, where Tailscale is there, as its own HTTPS device on your tailnet.
 
-Nothing else. No telemetry, no analytics, no other servers.
+Nothing else of tr3x's own: no telemetry, no analytics, no other servers. The one exception is
+what an agent's HTML preview asks for, below.
 
 Updating itself means tr3x runs whatever this repository releases, as `install.sh` does. A
 release is checked against its SHA-256 and must say the version it claims, but both come from
@@ -45,6 +46,26 @@ the same GitHub release. `tr3x updates notify` asks before installing one, and
 `tr3x updates off` stops the daily check. T3 is only updated when you say so.
 
 [How it works](docs/how-it-works.md#pairing-with-t3) covers pairing in full.
+
+## HTML previews
+
+When an agent shows a page with T3's `html_render` and Chrome or Chromium is installed, tr3x
+opens that page in a headless browser to take the picture shown in the conversation. The page
+is the agent's: its scripts run and it can fetch whatever it names, fonts, images, scripts or
+data from any address, as it would in a browser tab. That includes addresses only this machine
+can reach, such as its own services, your local network and your tailnet, and a request can
+carry what the page puts in it. tr3x adds no filter, since previews that load a chart library
+or a web font are what they're for.
+
+What bounds it: the browser starts with an empty profile of its own each time, so it has none
+of your cookies or logins; the page is a local file, with the browser's usual limits on reading
+others; it holds none of tr3x's tokens; one capture runs at a time, and each is stopped after
+30 seconds. It only reads pages T3 stored on this machine.
+
+If you don't want a thread's pages loaded unattended, don't install Chrome or Chromium for
+tr3x: without one, previews show as links. `TR3X_CHROME` points
+tr3x at a different browser, for instance one in a sandbox or on a network with limited
+access. `tr3x doctor` says whether it found one.
 
 ## Reporting a problem
 

@@ -272,6 +272,83 @@ impl ThreadState {
         self.list("runs").iter().max_by_key(|r| ordinal(r))
     }
 
+    /// The provider session's error, when it says why the thread is stopped and nothing in the
+    /// thread already says it: the thread's session is the last one on the thread's provider
+    /// instance, as T3 picks it, and its `lastError` stands while no run is working and the
+    /// latest run failed, or the session itself is in `error`. A failed run began before the
+    /// error, so an older session error doesn't explain it. An `error` turn item of the latest
+    /// run that carries the same words already shows it, whatever else it adds.
+    pub fn session_error(&self) -> Option<String> {
+        if self.active_run().is_some() {
+            return None;
+        }
+        let thread = self.thread();
+        let instance = thread
+            .get("providerInstanceId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                thread
+                    .get("modelSelection")
+                    .and_then(|m| m.get("instanceId"))
+                    .and_then(Value::as_str)
+            })?;
+        let session = self
+            .list("providerSessions")
+            .iter()
+            .rfind(|s| s.get("providerInstanceId").and_then(Value::as_str) == Some(instance))?;
+        let message = session
+            .get("lastError")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|m| !m.is_empty())?;
+        let run = self.latest_run();
+        let failed = run.is_some_and(|r| status(r) == "failed");
+        if !failed && status(session) != "error" {
+            return None;
+        }
+        if let Some(run) = run.filter(|_| failed) {
+            let began = ["startedAt", "requestedAt"]
+                .iter()
+                .find_map(|k| run.get(*k).and_then(Value::as_str))
+                .and_then(crate::inbox::parse_iso_ms);
+            let updated = session
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .and_then(crate::inbox::parse_iso_ms);
+            if began
+                .zip(updated)
+                .is_some_and(|(began, updated)| updated < began)
+            {
+                return None;
+            }
+        }
+        let words = |text: &str| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let wanted = words(message);
+        let run_id = run.and_then(|r| r.get("id"));
+        let shown = self.items().into_iter().any(|item| {
+            if item.get("type").and_then(Value::as_str) != Some("error")
+                || run_id.is_none()
+                || item.get("runId") != run_id
+            {
+                return false;
+            }
+            let said = item
+                .get("failure")
+                .and_then(|f| f.get("message"))
+                .and_then(Value::as_str)
+                .or_else(|| item.get("title").and_then(Value::as_str))
+                .map(words)
+                .unwrap_or_default();
+            !said.is_empty() && (said.contains(&wanted) || wanted.contains(&said))
+        });
+        (!shown).then(|| message.to_string())
+    }
+
     /// The run that owns the thread's work: the newest one working, else the newest run not
     /// held in a queue, as the nightly's `deriveThreadActivityRun` picks it
     /// (`packages/client-runtime/src/state/threadExecution.ts:101`). A newer queued run doesn't
@@ -870,6 +947,275 @@ mod tests {
         assert_eq!(ids(&state), ["s2"]);
         state.apply(&detach(16, json!({"providerSessionId": "s2"})));
         assert!(ids(&state).is_empty());
+    }
+
+    /// A thread as T3's V2 projection sends it after a run failed at the provider.
+    fn failed_thread() -> ThreadState {
+        ThreadState::from_snapshot(&json!({
+            "kind": "snapshot",
+            "snapshotSequence": 10,
+            "projection": {
+                "thread": {"id": "t1", "title": "Test", "providerInstanceId": "codex",
+                    "modelSelection": {"instanceId": "codex", "model": "gpt-5"}},
+                "runs": [{"id": "r1", "ordinal": 1, "status": "failed", "userMessageId": "m1",
+                    "requestedAt": "2026-11-04T01:00:00.000Z", "startedAt": "2026-11-04T01:00:01.000Z",
+                    "completedAt": "2026-11-04T01:00:09.000Z"}],
+                "runtimeRequests": [],
+                "providerSessions": [],
+                "turnItems": [{"id": "i1", "type": "user_message", "ordinal": 0, "text": "hi"}],
+                "visibleTurnItems": [{"position": 0, "item": {"id": "i1", "type": "user_message", "ordinal": 0, "text": "hi"}}]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn session(id: &str, instance: &str, status: &str, updated: &str, error: Value) -> Value {
+        json!({"id": id, "driver": "codex", "providerInstanceId": instance, "status": status,
+            "cwd": "/work/app", "model": "gpt-5", "capabilities": {},
+            "createdAt": "2026-11-04T00:59:00.000Z", "updatedAt": updated, "lastError": error})
+    }
+
+    fn error_item(run: &str, message: &str) -> Value {
+        json!({"id": format!("e-{run}"), "type": "error", "runId": run, "nodeId": "n1", "ordinal": 3,
+            "status": "failed", "updatedAt": "2026-11-04T01:00:09.000Z",
+            "failure": {"message": message, "class": "provider_error"}})
+    }
+
+    #[test]
+    fn a_session_error_explains_a_failed_run_that_has_no_error_item() {
+        let mut state = failed_thread();
+        assert_eq!(state.session_error(), None);
+        let failed = session(
+            "s1",
+            "codex",
+            "error",
+            "2026-11-04T01:00:08.000Z",
+            json!("Codex isn't signed in. Run `codex login`, then send again."),
+        );
+        state.apply(&event(11, "provider-session.updated", failed));
+        assert_eq!(
+            state.session_error().as_deref(),
+            Some("Codex isn't signed in. Run `codex login`, then send again.")
+        );
+    }
+
+    #[test]
+    fn an_error_item_with_the_same_words_already_shows_it() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("Rate  limited by the provider"),
+            ),
+        ));
+        assert!(state.session_error().is_some());
+        // The turn item wraps the message in more words and its own spacing and case.
+        state.apply(&event(
+            12,
+            "turn-item.updated",
+            error_item("r1", "Turn failed: rate limited by the provider (429)"),
+        ));
+        assert_eq!(state.session_error(), None);
+    }
+
+    #[test]
+    fn an_error_item_saying_something_else_leaves_the_session_error_showing() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("Not signed in"),
+            ),
+        ));
+        state.apply(&event(
+            12,
+            "turn-item.updated",
+            error_item("r1", "Process exited with code 1"),
+        ));
+        assert_eq!(state.session_error().as_deref(), Some("Not signed in"));
+        // An error of an earlier run doesn't count as this run's.
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("Not signed in"),
+            ),
+        ));
+        state.apply(&event(
+            12,
+            "turn-item.updated",
+            error_item("r0", "Not signed in"),
+        ));
+        assert_eq!(state.session_error().as_deref(), Some("Not signed in"));
+    }
+
+    #[test]
+    fn only_the_session_of_the_threads_provider_counts_and_the_last_one() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s0",
+                "claudeAgent",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("Claude is down"),
+            ),
+        ));
+        assert_eq!(state.session_error(), None);
+        state.apply(&event(
+            12,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:00:05.000Z",
+                json!("old codex error"),
+            ),
+        ));
+        state.apply(&event(
+            13,
+            "provider-session.attached",
+            session(
+                "s2",
+                "codex",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("new codex error"),
+            ),
+        ));
+        assert_eq!(state.session_error().as_deref(), Some("new codex error"));
+        // Detached, it no longer stands for the thread; the one before it doesn't either.
+        state.apply(&event(
+            14,
+            "provider-session.detached",
+            json!({"providerSessionId": "s2", "detachedAt": "2026-11-04T01:01:00.000Z"}),
+        ));
+        assert_eq!(state.session_error().as_deref(), Some("old codex error"));
+    }
+
+    #[test]
+    fn a_session_error_from_before_the_failed_run_is_stale() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T00:50:00.000Z",
+                json!("Not signed in"),
+            ),
+        ));
+        assert_eq!(state.session_error(), None);
+    }
+
+    #[test]
+    fn a_working_thread_or_a_recovered_session_shows_no_error() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:00:08.000Z",
+                json!("Not signed in"),
+            ),
+        ));
+        // A new run is working: the error belongs to the one before.
+        state.apply(&event(
+            12,
+            "run.created",
+            json!({"id": "r2", "ordinal": 2, "status": "running",
+            "requestedAt": "2026-11-04T01:05:00.000Z"}),
+        ));
+        assert_eq!(state.session_error(), None);
+        // It completed and the session is ready again, with the old words still on it.
+        state.apply(&event(
+            13,
+            "run.updated",
+            json!({"id": "r2", "ordinal": 2, "status": "completed",
+            "requestedAt": "2026-11-04T01:05:00.000Z"}),
+        ));
+        state.apply(&event(
+            14,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "ready",
+                "2026-11-04T01:05:30.000Z",
+                json!("Not signed in"),
+            ),
+        ));
+        assert_eq!(state.session_error(), None);
+        // Blank or missing errors say nothing.
+        state.apply(&event(
+            15,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:06:00.000Z",
+                json!("  "),
+            ),
+        ));
+        assert_eq!(state.session_error(), None);
+        state.apply(&event(
+            16,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T01:06:00.000Z",
+                Value::Null,
+            ),
+        ));
+        assert_eq!(state.session_error(), None);
+    }
+
+    #[test]
+    fn a_session_in_error_after_a_finished_run_still_says_why() {
+        let mut state = failed_thread();
+        state.apply(&event(
+            11,
+            "run.updated",
+            json!({"id": "r1", "ordinal": 1, "status": "completed"}),
+        ));
+        state.apply(&event(
+            12,
+            "provider-session.updated",
+            session(
+                "s1",
+                "codex",
+                "error",
+                "2026-11-04T02:00:00.000Z",
+                json!("Session expired"),
+            ),
+        ));
+        assert_eq!(state.session_error().as_deref(), Some("Session expired"));
     }
 
     #[test]

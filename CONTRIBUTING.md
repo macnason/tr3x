@@ -25,6 +25,17 @@ That builds, then starts a sync of your build with its own state, in a session c
 Pair machines into that state with `TR3X_STATE_DIR=/tmp/tr3x-dev tr3x pair`.
 [How it works](docs/how-it-works.md#development) has more.
 
+It finds Rex the way tr3x does: `TR3X_REX`, then `rex` on `PATH` (the usual case on Linux), then
+the Mac app's copy. It stops before it builds, closes or deletes anything when there is none.
+
+## Dependency advisories
+
+`cargo audit` reports no vulnerabilities. It does warn that `bincode` 1.3.3 is unmaintained
+(RUSTSEC-2025-0141): it comes in through `syntect` 5.3.0, the syntax highlighter, which uses it
+to load its bundled syntaxes. That's maintenance debt, not a known flaw in how tr3x uses it; it
+goes when syntect moves off bincode 1. Update locked dependencies one at a time, so a fix like
+Tokio's 1.53.3 (RUSTSEC-2026-0386) is a two-line change to `Cargo.lock`.
+
 ## T3 moves fast
 
 `tr3x/t3-surface.json` records what the T3 build tr3x was made against offers: capabilities,
@@ -38,10 +49,20 @@ target/release/tr3x surface --check tr3x/t3-surface.json
 
 ## Releasing
 
-Push a tag such as `v0.2.0` and `release.yml` builds, checksums and publishes it. Every
-install picks it up within a day, on its own, so a release is a deploy: run the build on a Mac
-beside an installed one first (above). Bump `version` in `tr3x/Cargo.toml` to match the tag;
-the updater checks the binary says the version its release claims.
+Push a tag such as `v0.2.0` and `release.yml` builds each platform, checks every archive, puts
+them in a draft release and publishes it only once all of them are there, so `install.sh` never
+sees a half-built release. Every install picks it up within a day, on its own, so a release is a
+deploy: run the build on a Mac beside an installed one first (above). Bump `version` in
+`tr3x/Cargo.toml` to match the tag; the workflow stops if they differ, and the updater checks the
+binary says the version its release claims.
+
+Run the workflow by hand (Actions → release → Run workflow) to build and check the same archives
+without a tag; it keeps them as a run artifact and never touches a release. A failed run leaves
+at most a draft: re-run its failed jobs to retry, and the draft's files are replaced. Runs for
+one tag take turns. A tag whose release is already published (a retag) keeps its notes and has
+its files replaced. Each archive carries the licenses: `LICENSE`, t3client's upstream
+`LICENSE-t3client`, and `THIRD-PARTY-LICENSES.txt` from `scripts/third-party-notices`, which
+reads every linked crate's own license files and fails if one has none.
 
 ## Pull requests
 

@@ -1,19 +1,42 @@
 name: release
 
-# A tag like v0.2.0 builds a universal macOS binary and Linux binaries and attaches them to
-# that tag's release, where install.sh downloads the latest from.
-# Run by hand, it only builds and keeps the files as a run artifact, so a release can be tried
-# before it's tagged.
+# A tag like v0.2.0 builds a universal macOS binary and Linux binaries, checks them, puts them in
+# a draft release, and publishes it once all of them are there. install.sh downloads the latest
+# release, so nothing is published while a platform is still building or after one failed.
+# Run by hand, it builds and checks the same files and keeps them as a run artifact, so a
+# release can be tried before it's tagged. It never touches a release.
+#
+# Re-run failed jobs to retry: the draft is reused and its files are replaced. Runs for one tag
+# take turns.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' tr3x/Cargo.toml | head -1)
+          echo "tr3x/Cargo.toml: $version"
+          [ "$GITHUB_REF_TYPE" = tag ] || exit 0
+          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "$GITHUB_REF_NAME isn't a version tag like v0.2.0"; exit 1; }
+          [ "v$version" = "$GITHUB_REF_NAME" ] \
+            || { echo "tr3x/Cargo.toml says $version, the tag says $GITHUB_REF_NAME"; exit 1; }
+
   release:
+    needs: check
     runs-on: macos-latest
     env:
       NAME: tr3x-macos-universal
@@ -38,25 +61,21 @@ jobs:
           test "$("dist/$NAME/tr3x" --version)" = "tr3x $want" \
             || { echo "tr3x/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
+          # t3client is forked from t3term, whose notice has to travel with it.
+          cp t3client/LICENSE "dist/$NAME/LICENSE-t3client"
+          scripts/third-party-notices > "dist/$NAME/THIRD-PARTY-LICENSES.txt"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           cat "dist/$NAME.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
         with:
           name: ${{ env.NAME }}
           path: dist/*.tar.gz*
-      - name: Publish
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
-            || gh release view "$GITHUB_REF_NAME" >/dev/null  # another job made it first
-          gh release upload "$GITHUB_REF_NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber
+          if-no-files-found: error
+          retention-days: 14
 
   linux:
+    needs: check
     strategy:
       matrix:
         include:
@@ -81,20 +100,87 @@ jobs:
           test "$("dist/$NAME/tr3x" --version)" = "tr3x $want" \
             || { echo "tr3x/Cargo.toml's version doesn't match $GITHUB_REF_NAME"; exit 1; }
           cp README.md LICENSE "dist/$NAME/"
+          cp t3client/LICENSE "dist/$NAME/LICENSE-t3client"
+          scripts/third-party-notices > "dist/$NAME/THIRD-PARTY-LICENSES.txt"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
           cat "dist/$NAME.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
         with:
           name: ${{ env.NAME }}
           path: dist/*.tar.gz*
-      - name: Publish
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # Every platform built and packaged, and the files are what install.sh and the updater expect.
+  # A hand-run workflow ends here.
+  verify:
+    needs: [release, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tr3x-*
+          path: dist
+          merge-multiple: true
+      - run: scripts/release-check dist
+
+  # The files go into a draft: unlisted, so `releases/latest` and install.sh don't see them. A
+  # release the tag already published (a retag) keeps its notes and has its files replaced.
+  stage:
+    if: github.ref_type == 'tag'
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tr3x-*
+          path: dist
+          merge-multiple: true
+      - name: Draft release with every file
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
-            || gh release view "$GITHUB_REF_NAME" >/dev/null  # another job made it first
-          gh release upload "$GITHUB_REF_NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" --clobber
+          found=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -1)
+          if [ -z "$found" ]; then
+            flags=""
+            case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag $flags \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 --clobber
+
+  # The last step, after every build and upload: the release has every file at the size built,
+  # then it's published.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: stage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tr3x-*
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        run: |
+          gh api --paginate "repos/$GH_REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .assets[] | select(.state == \"uploaded\") | \"\(.name) \(.size)\"" \
+            | sort > uploaded
+          for f in dist/*.tar.gz dist/*.tar.gz.sha256; do
+            echo "$(basename "$f") $(wc -c < "$f" | tr -d ' ')"
+          done | sort > built
+          cat built
+          cmp built uploaded || { echo "The release's files aren't the ones built; not publishing"; exit 1; }
+          [ "$(wc -l < built | tr -d ' ')" -eq 6 ] || { echo "Expected 6 files"; exit 1; }
+          gh release edit "$GITHUB_REF_NAME" --draft=false
