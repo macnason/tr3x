@@ -32,6 +32,9 @@ pub struct Window {
     #[serde(alias = "window_id")]
     pub window_id: String,
     pub label: String,
+    /// A subagent's window: it stays while it has focus, even once it finishes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child: bool,
 }
 
 /// Where ⌃⌘I goes: the window of the thread that most needs you, on any machine.
@@ -51,6 +54,10 @@ pub struct State {
     pub groups: BTreeMap<String, Group>,
     #[serde(default)]
     pub next: Option<Next>,
+    /// Each shown subagent's thread to the thread it works for, both `env/thread`, for the
+    /// actions that go up to a parent and down to a subagent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parents: BTreeMap<String, String>,
 }
 
 pub fn dir() -> PathBuf {
@@ -226,6 +233,7 @@ mod tests {
             Window {
                 window_id: window.into(),
                 label: "A".into(),
+                child: false,
             },
         );
         state.groups.insert(String::new(), group);

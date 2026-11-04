@@ -807,6 +807,57 @@ pub async fn inbox() -> Result<()> {
     Ok(())
 }
 
+/// Where ⌃⌘[ and ⌃⌘] go from `thread` (`env/thread`), as Rex's `session.select` takes it: up
+/// to the thread a subagent works for, or down to a subagent of this thread. With more than
+/// one, the first in the session's order, which is the one that needs you. Fails when sync
+/// isn't running, as `inbox` does.
+pub async fn hop(thread: &str, up: bool) -> Result<()> {
+    if sync::running().is_none() {
+        bail!("tr3x isn't syncing");
+    }
+    let state = State::load();
+    let window = |key: &str| {
+        state
+            .groups
+            .values()
+            .find_map(|g| Some((g.session_id.clone()?, g.windows.get(key)?.window_id.clone())))
+    };
+    let (session, window_id) = if up {
+        let parent = state
+            .parents
+            .get(thread)
+            .context("this thread isn't working for another")?;
+        window(parent)
+            .context("the thread it works for has no tab: Find Thread (⌘⇧P) brings it back")?
+    } else {
+        let mut kids: Vec<(String, String)> = state
+            .parents
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == thread)
+            .filter_map(|(child, _)| window(child))
+            .collect();
+        if kids.len() > 1
+            && let Ok(view) = Rex::find().inspect(&kids[0].0).await
+        {
+            let at = |id: &str| {
+                view["windows"]
+                    .as_array()
+                    .and_then(|w| w.iter().position(|w| w["window_id"] == id))
+                    .unwrap_or(usize::MAX)
+            };
+            kids.sort_by_key(|(_, id)| at(id));
+        }
+        kids.into_iter()
+            .next()
+            .context("no subagent of this thread has a tab")?
+    };
+    println!(
+        "{}",
+        serde_json::json!({"session_id": session, "window_id": window_id})
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

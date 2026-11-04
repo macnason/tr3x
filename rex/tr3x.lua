@@ -95,6 +95,25 @@ rex.action{
   end,
 }
 
+-- From a subagent up to the thread it works for, and from a thread down to its subagent. Each
+-- goes on the screen that asked, so a phone and a Mac can be in different places.
+local function hop(name, title, command, keywords)
+  rex.action{
+    name = name,
+    title = title,
+    category = "T3 Code",
+    keywords = keywords,
+    run = function(ctx)
+      local target = rex.json.decode(tr3x(ctx, { command }))
+      if target and target.session_id then
+        rex.client.queue("session.select", target)
+      end
+    end,
+  }
+end
+hop("t3_parent", "Go to Thread This Subagent Works For", "parent", "t3 subagent parent up back")
+hop("t3_child", "Go to Subagent", "child", "t3 subagent child down")
+
 -- A new thread in the T3 Code session, from anywhere. In that session, New Tab does the same.
 rex.action{
   name = "t3_new",
@@ -143,10 +162,12 @@ rex.action{
   run = function(ctx) tr3x({}, { "reopen", "--client", ctx.client_id }) end,
 }
 
--- Two keys, for what you reach for from anywhere. Everything else is in the palette under T3 Code
+-- Four keys, for what you reach for from anywhere. Everything else is in the palette under T3 Code
 -- and in Reply's `/` commands; bind any of it yourself in init.lua.
 rex.bind("ctrl+cmd+i", "t3_inbox")
 rex.bind("ctrl+cmd+n", "t3_new")
+rex.bind("ctrl+cmd+[", "t3_parent")
+rex.bind("ctrl+cmd+]", "t3_child")
 
 -- The client that ran an action, from the server's list: its principal says where it is.
 local function caller(ctx)

@@ -26,11 +26,19 @@ Every key, command and setting. New to it? Start with [getting started](../READM
 | Snooze | `/snooze 1h`, `/snooze 2h`, `/snooze tomorrow`. The way to put a thread away without settling it. |
 | Commands | `/steer …` `/settle` `/unsettle` `/snooze` `/wake` `/pin` `/unpin` `/rename` `/retitle` `/fork` `/archive` `/delete` `/stop` `/force-stop` `/model` `/effort` `/mode` `/open` `/pr` `/width` `/details`. `/` lists these with the agent's own commands and skills; typing filters, Tab or Enter completes. A command the thread's machine is too old for isn't listed. |
 | Updates | tr3x checks once a day and installs its own updates; `tr3x updates notify` makes it ask first, `tr3x updates off` stops it checking. A tab picks up a new version once nothing's typed in it. When a machine's T3 is behind, Reply says `T3 update · /update`. `/update`, **Update tr3x and T3…** in the palette, or `tr3x update` in a terminal lists what's out and installs it on Enter: the T3 Code app downloads its update and restarts to install it, asking first while threads run there (T3 picks them up again after); a machine running T3's background service updates and restarts by itself. A machine running a plain `t3 serve` is updated there. `tr3x update --check` only lists. |
-| Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you |
+| Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you · ⌃⌘[ from a subagent to the thread it works for · ⌃⌘] from a thread to its subagent |
 | Palette | Everything else is in Rex's command palette (⌘⇧P) under **T3 Code**. To give an action a key, add a line like `rex.bind("ctrl+cmd+s", "t3_settle")` to `~/.config/rex/init.lua`. |
 
 Subagents show under the thread they work for, as `↳ title`, while they work or need you. A
 finished subagent's result is in its parent thread.
+
+- A subagent's header says which thread it works for. ⌃⌘[ goes there, and ⌃⌘] goes from a thread
+  to its subagent (the one that needs you, first). Each goes on the screen you pressed it on.
+- A subagent you're reading keeps its tab when it finishes, until you leave it.
+- Closing a thread closes its subagents' tabs. One that waits on an approval or an
+  answer stays, as `↳ title · for Parent`. The same goes for a subagent of a thread that's
+  settled, snoozed or archived: its request would otherwise wait, unseen.
+- Closing a subagent that's only working hides it until it needs you or finishes.
 
 ## Chat width
 
