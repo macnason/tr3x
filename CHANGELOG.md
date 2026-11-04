@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
 - A message that fails to send comes back with its pictures. If you've started typing something else by then, it waits under **Unsent message** and ⌃R puts it back ahead of your draft, so neither is lost.
 - A new thread launches on the machine you picked last, even when an earlier pick answers later. It waits while the pick loads, and a pick that fails says why and stays on the machine before it.
