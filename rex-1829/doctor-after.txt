@@ -1,0 +1,14 @@
+✓ tr3x  0.1.2
+✓ Rex server  /Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex
+! Rex's server is older than the app  server d018d2, API 10, app af0c20, API 11
+  Run `rex server stop`, then open Rex Beta. Its server starts on the new version, and tr3x puts its tabs back.
+✓ init.lua loads tr3x  /Volumes/HomeDrive/mac/.config/rex/init.lua
+✓ Rex actions  /Volumes/HomeDrive/mac/.config/rex/tr3x.lua
+✓ Rex config loads
+✓ T3 server  0.1.8-nightly.20261104.4165 at http://127.0.0.1:3773
+✓ T3 on omarchy  0.1.8-nightly.20261104.4165 at http://mac.tail451f23.ts.net:3773
+✓ Sync  pid 36222
+! Sync's last error, since recovered  tr3x: updated to 0.1.2
+✓ T3 Code session  3 window(s)
+✓ Headless Chromium  for HTML snapshots
+✓ sup  for pull requests

@@ -1,0 +1,14 @@
+$ rex do tr3x.lua --action t3_settle          # no block, as from Shortcuts
+Error: Go to a T3 thread first
+$ rex do tr3x.lua --action t3_parent          # no block, as from Shortcuts
+Error: Go to a T3 thread first
+$ rex do tr3x.lua --action t3_model          # no block, as from Shortcuts
+Error: Go to a T3 thread first
+$ rex do tr3x.lua --action t3_open          # no block, as from Shortcuts
+Error: Go to a T3 thread first
+$ rex do -b <a plain shell's block> tr3x.lua --action t3_settle
+Error: Go to a T3 thread first
+$ tr3x settle --block <a plain shell's block>
+tr3x: Go to a T3 thread first
+$ rex do -b <a T3 thread's block> tr3x.lua --action t3_child    # still reaches tr3x
+Error: no subagent of this thread has a tab

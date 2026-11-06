@@ -1,0 +1,8 @@
+$ rex do t3_settle          # installed 0.1.2, no block
+Error: name a thread with --thread, or run this in a T3 window in Rex
+$ rex do t3_parent          # installed 0.1.2, no block
+Error: name a thread with --thread, or run this in a T3 window in Rex
+$ rex do t3_model          # installed 0.1.2, no block
+Error: name a thread with --thread, or run this in a T3 window in Rex
+$ rex do t3_open          # installed 0.1.2, no block
+Error: name a thread with --thread, or run this in a T3 window in Rex
