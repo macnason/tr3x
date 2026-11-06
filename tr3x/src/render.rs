@@ -1191,25 +1191,64 @@ fn highlight(lines: &[String], syntax: &SyntaxReference) -> Vec<Line> {
     out
 }
 
-fn truncate_frags(frags: Line, max: usize) -> Line {
+/// Soft-wrap a code line to `max` columns. Breaks after whitespace when
+/// that keeps at least half the row, otherwise mid-token. Continuation rows
+/// hang two columns past the line's own indent so they read as one line.
+fn wrap_frags(frags: Line, max: usize) -> Vec<Line> {
+    let max = max.max(1);
     if frag_width(&frags) <= max {
-        return frags;
+        return vec![frags];
     }
-    let keep = max.saturating_sub(1);
-    let mut out: Line = Vec::new();
-    let mut cw = 0usize;
-    'outer: for (t, s) in &frags {
-        for g in t.graphemes(true) {
-            let gw = g.width();
-            if cw + gw > keep {
-                break 'outer;
+    let cells: Vec<(&str, &Style, usize)> = frags
+        .iter()
+        .flat_map(|(t, s)| t.graphemes(true).map(move |g| (g, s, g.width())))
+        .collect();
+    let lead = cells.iter().take_while(|c| c.0 == " ").count();
+    let hang = if lead + 2 <= max / 2 { lead + 2 } else { 0 };
+    let mut out: Vec<Line> = Vec::new();
+    let mut i = 0;
+    while i < cells.len() {
+        let first = out.is_empty();
+        let room = if first { max } else { max - hang };
+        if !first {
+            while i < cells.len() && cells[i].0 == " " {
+                i += 1;
             }
-            push_frag(&mut out, g, s);
-            cw += gw;
+            if i == cells.len() {
+                break;
+            }
         }
+        let mut j = i;
+        let mut cw = 0;
+        let mut brk = None;
+        while j < cells.len() && (cw + cells[j].2 <= room || j == i) {
+            cw += cells[j].2;
+            if cells[j].0.chars().all(char::is_whitespace) {
+                brk = Some(j + 1);
+            }
+            j += 1;
+        }
+        if j < cells.len()
+            && let Some(b) = brk.filter(|&b| b > i && widths(&cells[i..b]) * 2 >= room)
+        {
+            j = b;
+        }
+        let mut line: Line = Vec::new();
+        if !first {
+            push_frag(&mut line, &" ".repeat(hang), &Style::default());
+        }
+        for (g, s, _) in &cells[i..j] {
+            push_frag(&mut line, g, s);
+        }
+        trim_frags(&mut line);
+        out.push(line);
+        i = j;
     }
-    push_frag(&mut out, "…", &Style::dim());
     out
+}
+
+fn widths(cells: &[(&str, &Style, usize)]) -> usize {
+    cells.iter().map(|c| c.2).sum()
 }
 
 fn render_code(lang: Option<&str>, text: &str, w: usize) -> Vec<String> {
@@ -1233,11 +1272,12 @@ fn render_code(lang: Option<&str>, text: &str, w: usize) -> Vec<String> {
     let bare = dim("│");
     for mut frags in styled {
         trim_frags(&mut frags);
-        let frags = truncate_frags(frags, w.saturating_sub(2));
-        if frags.is_empty() {
-            out.push(bare.clone());
-        } else {
-            out.push(format!("{gutter}{}", emit(&frags)));
+        for frags in wrap_frags(frags, w.saturating_sub(2)) {
+            if frags.is_empty() {
+                out.push(bare.clone());
+            } else {
+                out.push(format!("{gutter}{}", emit(&frags)));
+            }
         }
     }
     out
@@ -1703,15 +1743,37 @@ Final line.
     }
 
     #[test]
-    fn code_is_truncated_not_wrapped_and_tabs_expand() {
+    fn code_wraps_long_lines_and_tabs_expand() {
         let long = "x".repeat(100);
         let ls = lines(&format!("```\n{long}\n\tindented\n```"), 40);
         let p = plain(&ls);
-        assert_eq!(p.len(), 2, "{p:?}");
-        assert_eq!(visible_width(&p[0]), 40);
-        assert!(p[0].ends_with('…'));
-        assert!(ls[0].ends_with("\x1b[2m…\x1b[0m"));
-        assert_eq!(p[1], "│     indented");
+        assert_eq!(p.len(), 4, "{p:?}");
+        assert_eq!(p[0], format!("│ {}", "x".repeat(38)));
+        assert_eq!(p[1], format!("│   {}", "x".repeat(36)));
+        assert_eq!(p[2], format!("│   {}", "x".repeat(26)));
+        assert_eq!(p[3], "│     indented");
+        assert!(p.iter().all(|l| visible_width(l) <= 40 && !l.contains('…')));
+        for l in &ls {
+            assert_self_contained(l);
+        }
+    }
+
+    #[test]
+    fn code_wraps_at_whitespace() {
+        let src = "```sh\nfor a in /Applications/*T3*.app; do echo \"$a: $(defaults read \"$a/Contents/Info\" CFBundleShortVersionString)\"; done\n```";
+        let p = plain(&lines(src, 60));
+        let body: Vec<&str> = p[1..]
+            .iter()
+            .map(|l| l.trim_start_matches('│').trim())
+            .collect();
+        assert_eq!(
+            body.join(" "),
+            "for a in /Applications/*T3*.app; do echo \"$a: $(defaults read \"$a/Contents/Info\" CFBundleShortVersionString)\"; done"
+        );
+        assert!(
+            p.len() > 2 && p.iter().all(|l| visible_width(l) <= 60),
+            "{p:?}"
+        );
     }
 
     #[test]
