@@ -28,6 +28,7 @@ Every key, command and setting. New to it? Start with [getting started](../READM
 | Updates | tr3x checks once a day and installs its own updates; `tr3x updates notify` makes it ask first, `tr3x updates off` stops it checking. A tab picks up a new version once nothing's typed in it. When a machine's T3 is behind, Reply says `T3 update · /update`. `/update`, **Update tr3x and T3…** in the palette, or `tr3x update` in a terminal lists what's out and installs it on Enter: the T3 Code app downloads its update and restarts to install it, asking first while threads run there (T3 picks them up again after); a machine running T3's background service updates and restarts by itself. A machine running a plain `t3 serve` is updated there. `tr3x update --check` only lists. |
 | Keys | ⌃⌘N new thread · ⌃⌘I go to the thread that needs you · ⌃⌘[ from a subagent to the thread it works for · ⌃⌘] from a thread to its subagent |
 | Palette | Everything else is in Rex's command palette (⌘⇧P) under **T3 Code**. To give an action a key, add a line like `rex.bind("ctrl+cmd+s", "t3_settle")` to `~/.config/rex/init.lua`. |
+| Shortcuts | Shortcuts' **Run Rex Action** lists every **T3 Code** action, for Siri, a widget or a hotkey. Go to Thread That Needs You, New Thread and Find Thread… work from anywhere. The rest act on the thread in Rex's last window, and stop with "Go to a T3 thread first" when it isn't one. |
 
 Subagents show under the thread they work for, as `↳ title`, while they work or need you. A
 finished subagent's result is in its parent thread.

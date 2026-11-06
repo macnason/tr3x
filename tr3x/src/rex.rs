@@ -92,6 +92,14 @@ impl Rex {
         serde_json::from_str(&text).with_context(|| format!("rex printed {text:?}"))
     }
 
+    /// The version of this `rex` and of the server it reaches, as `{rex_version, api_revision}`.
+    /// They differ when Rex updated the app but its server kept running.
+    pub async fn versions(&self) -> Result<(Value, Value)> {
+        let cli = self.json(&["version", "--json"], None).await?;
+        let server = self.call("server.version", "{}").await?;
+        Ok((cli, server))
+    }
+
     /// Every session, in Rex's order, as `{session_id, label}`.
     pub async fn sessions(&self) -> Result<Vec<Value>> {
         let list = self.json(&["ls", "--json"], None).await?;

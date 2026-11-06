@@ -86,7 +86,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
   Backspace takes a picture off.
 - The pane subscribes to the thread once. It reports
   the thread's status to Rex with OSC 7501, from the same status word T3's sidebar shows, so
-  Rex's markers are T3's. `title` is the thread's title. While it waits on you, `msg` is what
+  Rex's markers are T3's. `title` is the thread's title, as is the terminal's own title (OSC 2),
+  which Go to Anything's Activity list names the pane by. While it waits on you, `msg` is what
   it waits on: `Run` and the command an approval gates, `Edit` and the file, or the question,
   cut to the protocol's 2048 bytes.
 - A thread stopped on a usage limit (the shell's `lastErrorClass` is `usage_limit`) ends on

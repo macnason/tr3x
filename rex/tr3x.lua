@@ -22,6 +22,10 @@ local function pane(args)
   return argv
 end
 
+-- What an action on a thread says when nothing names one: run from Shortcuts' Run Rex Action
+-- or `rex do`, an action may have no block, or the last window may not be a thread's.
+local NO_THREAD = "Go to a T3 thread first"
+
 local function tr3x(ctx, args)
   local argv = { TR3X }
   for _, a in ipairs(args) do table.insert(argv, a) end
@@ -44,6 +48,7 @@ local function thread_action(name, title, args, keywords, opts)
     category = "T3 Code",
     keywords = keywords,
     run = function(ctx)
+      if not ctx.block_id then error(NO_THREAD, 0) end
       local argv = {}
       for _, a in ipairs(args) do table.insert(argv, a) end
       if opts and opts.client then
@@ -63,12 +68,11 @@ local function layer_action(name, title, args, keywords)
     category = "T3 Code",
     keywords = keywords,
     run = function(ctx)
+      if not ctx.block_id then error(NO_THREAD, 0) end
       local argv = {}
       for _, a in ipairs(args) do table.insert(argv, a) end
-      if ctx.block_id then
-        table.insert(argv, "--block")
-        table.insert(argv, ctx.block_id)
-      end
+      table.insert(argv, "--block")
+      table.insert(argv, ctx.block_id)
       local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.2, 0.3, 0.6, 0.3 }, focus = true,
         layout = { block = { flavor = "com.superlogical.terminal.shell", label = title,
           options = { shell = "none", login = false, command = pane(argv) } } } }
@@ -104,6 +108,7 @@ local function hop(name, title, command, keywords)
     category = "T3 Code",
     keywords = keywords,
     run = function(ctx)
+      if not ctx.block_id then error(NO_THREAD, 0) end
       local target = rex.json.decode(tr3x(ctx, { command }))
       if target and target.session_id then
         rex.client.queue("session.select", target)
@@ -189,6 +194,7 @@ rex.action{
     if c and c.principal and c.principal.transport ~= "unix" then
       error("Click the thread's title to open it on this device", 0)
     end
+    if not ctx.block_id then error(NO_THREAD, 0) end
     tr3x(ctx, { "open" })
   end,
 }

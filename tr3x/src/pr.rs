@@ -54,7 +54,7 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
             break;
         }
     }
-    let (session, window) = found.context("that block isn't in a T3 window")?;
+    let (session, window) = found.context("Go to a T3 thread first")?;
     let window = &window;
     let drawer = blocks(window)
         .find(|b| b["label"] == LABEL)

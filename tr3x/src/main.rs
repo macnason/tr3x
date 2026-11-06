@@ -367,10 +367,10 @@ impl Target {
                 return state
                     .thread_for_window(window)
                     .map(str::to_string)
-                    .context("that window isn't one of tr3x's");
+                    .context("Go to a T3 thread first");
             }
         }
-        bail!("that block isn't in a T3 window")
+        bail!("Go to a T3 thread first")
     }
 }
 
