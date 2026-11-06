@@ -8,11 +8,15 @@
 //! ⌘Enter does the other, as in T3. Alt+Enter or Ctrl+J adds a line. A line that
 //! starts with `/` is a command: /settle, /snooze 2h, /wake, /pin, /unpin, /archive, /stop,
 //! /model NAME, /effort LEVEL, /open, /width comfortable|wide|full|t3, /reply inline|pane,
-//! /details on|off.
+//! /details on|off, /clear.
 //! `/` first opens a menu of those, the provider's commands and skills (`slash`).
 //!
 //! A pasted picture, or a dropped one, rides on the next message (`paste`). It shows as a chip
 //! over the input; its ✕, or Backspace at the start of the input, takes it off.
+//!
+//! `/clear` arms a fresh provider session for the next message, as in T3; Esc on an empty
+//! input keeps the current one. While the agent asks for a secret, the input is that
+//! secret: it shows as dots, and Enter gives it to T3, which never puts it in the thread.
 
 use std::sync::Arc;
 
@@ -339,6 +343,8 @@ pub(crate) enum Hit {
     Choose(usize),
     /// Takes an attached picture off, by index.
     Remove(usize),
+    /// Declines the agent's secret request.
+    DeclineSecret,
 }
 
 /// What came back from work started in the background.
@@ -355,6 +361,8 @@ pub(crate) enum Done {
     Link(String),
     /// Pictures sent to the host with Taildrop, as if pasted.
     Dropped(Got),
+    /// A fresh-session message that failed to send: the next one starts fresh again.
+    Fresh,
 }
 
 /// Reply's rows at most, as a share of a pane it shares with the conversation, and the
@@ -421,6 +429,8 @@ pub(crate) struct Composer {
     pub(crate) clipboard: paste::Reader,
     /// The last command was `/delete`, so the next one deletes.
     deleting: bool,
+    /// `/clear`: the next message starts a fresh provider session.
+    fresh: bool,
     escape: Escape,
     /// A width `/width` chose, for the pane to take up.
     pub(crate) width_set: Option<ChatWidth>,
@@ -458,11 +468,23 @@ impl Composer {
         crate::ask::pending(self.state.as_ref()?)
     }
 
+    /// The agent's secret request, the `secret_request` item, while nothing else is pending.
+    fn secret(&self) -> Option<Value> {
+        let state = self.state.as_ref()?;
+        if self.pending().is_some() {
+            return None;
+        }
+        crate::ask::pending_secret(state).cloned()
+    }
+
     /// The buttons that answer what's pending: Approve, Always and Decline for an approval, or
     /// the question's options, numbered as the number keys pick them.
     fn buttons(&self) -> Vec<(String, Hit)> {
         let Some((request, item)) = self.pending() else {
-            return Vec::new();
+            return match self.secret() {
+                Some(_) => vec![("Decline".into(), Hit::DeclineSecret)],
+                None => Vec::new(),
+            };
         };
         if !crate::ask::is_question(&request) {
             return vec![
@@ -492,6 +514,7 @@ impl Composer {
             Hit::Field(field) => self.pick(field),
             Hit::Remove(i) => self.images.remove(i),
             Hit::Decide(decision) => self.respond(decision),
+            Hit::DeclineSecret => self.give_secret(None),
             Hit::Choose(i) => {
                 if let Some((request, item)) = self.pending()
                     && let Some(q) = self.question(&item).cloned()
@@ -659,8 +682,15 @@ impl Composer {
     /// its background is), a note, and the chip. At most `share` of the pane;
     /// the input shows the rows around the cursor when there's less room than it has.
     fn layout(&mut self) -> Laid {
+        // A secret is typed blind: no menu reads it.
+        let secret = self.secret();
+        let blank = Editor::default();
         self.slash.sync(
-            &self.editor,
+            if secret.is_some() {
+                &blank
+            } else {
+                &self.editor
+            },
             self.config.as_ref(),
             self.state.as_ref().map(|s| s.thread()),
             &self.client.capabilities(),
@@ -706,6 +736,25 @@ impl Composer {
                 }
             }
         }
+        if let Some(item) = &secret {
+            let label = crate::ask::clean(item["label"].as_str().unwrap_or("A secret"));
+            rows.push(format!(
+                "{YELLOW}{BOLD}◆{RESET} {BOLD}{}{RESET}",
+                fit(&label, width - 2)
+            ));
+            let reason = crate::ask::clean(item["reason"].as_str().unwrap_or_default());
+            if !reason.is_empty() {
+                rows.push(format!("  {DIM}{}{RESET}", fit(&reason, width - 2)));
+            }
+            let buttons = self.buttons();
+            let labels: Vec<String> = buttons.iter().map(|(l, _)| l.clone()).collect();
+            for (line, spans) in picker::buttons(&labels, self.focus, false, left, width) {
+                for (cols, i) in spans {
+                    hits.push((rows.len(), cols, buttons[i].1));
+                }
+                rows.push(line);
+            }
+        }
         if !self.images.is_empty() {
             let (line, spans, _) = self.images.row(&mut self.painter, left, width + 2);
             for (i, x) in spans.into_iter().enumerate() {
@@ -724,6 +773,13 @@ impl Composer {
             rows.push(format!(
                 "{RED}{}{RESET} {DIM}Ctrl+R{RESET}",
                 fit(&what, width.saturating_sub(7))
+            ));
+            rows.push(String::new());
+        }
+        if self.fresh {
+            rows.push(format!(
+                "{BLUE}{}{RESET} {DIM}Esc{RESET}",
+                fit("Next message starts a new session", width.saturating_sub(4))
             ));
             rows.push(String::new());
         }
@@ -770,7 +826,14 @@ impl Composer {
         below.push(String::new());
         // The input, wrapped, and as many of its rows as there's room for around the cursor.
         self.editor.width = width;
-        let (lines, cursor) = wrap(&self.editor.text, self.editor.cursor, width);
+        let masked: Vec<char>;
+        let text = if secret.is_some() {
+            masked = vec!['•'; self.editor.text.len()];
+            &masked
+        } else {
+            &self.editor.text
+        };
+        let (lines, cursor) = wrap(text, self.editor.cursor, width);
         self.wanted = rows.len() + lines.len().min(INPUT_ROWS) + 2 + below.len();
         let most = ((self.rows as f64 * self.share) as usize).max(3);
         let room = most
@@ -1004,6 +1067,26 @@ impl Composer {
         }
     }
 
+    /// Answers the secret request: `Some` gives the value, `None` declines. The input is
+    /// emptied with its undo, so nothing typed outlives the answer.
+    fn give_secret(&mut self, value: Option<String>) {
+        let Some(item) = self.secret() else {
+            return;
+        };
+        let width = self.editor.width;
+        self.editor = Editor {
+            width,
+            ..Editor::default()
+        };
+        let (client, thread) = (self.client.clone(), self.thread_id.clone());
+        let id = item["id"].as_str().unwrap_or_default().to_string();
+        let saved = value.is_some();
+        self.spawn(async move {
+            client.answer_secret(&thread, &id, value.as_deref()).await?;
+            Ok(if saved { "Given" } else { "Declined" }.into())
+        });
+    }
+
     /// Sends what's typed, or answers what's pending with it. `other` is ⌘Enter: the follow-up
     /// T3's setting doesn't pick.
     fn submit(&mut self, other: bool) {
@@ -1018,6 +1101,14 @@ impl Composer {
         // Out of reach: nothing goes, and the text stays for when the machine is back.
         if let Some(offline) = self.offline.clone() {
             return self.note(offline, true);
+        }
+        // While the agent asks for a secret, what's typed is the secret and never a message.
+        if self.secret().is_some() {
+            if !trimmed.is_empty() {
+                let value = trimmed.to_string();
+                self.give_secret(Some(value));
+            }
+            return;
         }
         // A pending question takes the input as its answer: a number picks an option.
         if !trimmed.is_empty()
@@ -1082,6 +1173,9 @@ impl Composer {
             return;
         };
         let busy = state.active_run().is_some();
+        // A fresh session never steers: T3 queues it.
+        let fresh = self.fresh;
+        let mode = if fresh { IfBusy::Queue } else { mode };
         let steer = matches!(mode, IfBusy::Steer);
         // A model picked while the thread worked rides on the next message that starts a turn.
         // Steering stays on the running turn's model, so the draft waits.
@@ -1094,6 +1188,11 @@ impl Composer {
             },
             _ => Plan::default(),
         };
+        let plan = Plan {
+            fresh_context: fresh,
+            ..plan
+        };
+        self.fresh = false;
         let message = self.editor.take();
         let images = self.images.take();
         let uploads: Vec<Value> = images.iter().map(Image::upload).collect();
@@ -1112,6 +1211,9 @@ impl Composer {
                 Ok(_) if busy && !steer => Done::Note("Queued".into(), false),
                 Ok(_) => return,
                 Err(e) => {
+                    if fresh {
+                        let _ = tx.send(Done::Fresh);
+                    }
                     let _ = tx.send(Done::Restore(message, images));
                     Done::Note(format!("{e:#}"), true)
                 }
@@ -1134,6 +1236,24 @@ impl Composer {
             }
         };
         match name {
+            // T3's `/clear`: alone it arms the next message; with text, sends that fresh. On a
+            // T3 too old for it, it goes to the agent as before.
+            "clear"
+                if self
+                    .client
+                    .descriptor()
+                    .is_some_and(|d| !d.has_capability("freshContext")) =>
+            {
+                self.editor.insert(&format!("/{line}"));
+                self.send(IfBusy::Queue);
+            }
+            "clear" => {
+                self.fresh = true;
+                if !arg.is_empty() {
+                    self.editor.insert(arg);
+                    self.send(IfBusy::Queue);
+                }
+            }
             "settle" => self.spawn(lifecycle(Lifecycle::Settle, "Settled")),
             "unsettle" => self.spawn(lifecycle(Lifecycle::Unsettle, "Back in the inbox")),
             "wake" => self.spawn(lifecycle(Lifecycle::Wake, "Awake")),
@@ -1306,7 +1426,9 @@ impl Composer {
     /// the two that cleared it.
     fn escape(&mut self, again: bool) {
         if self.editor.text.is_empty() && self.images.is_empty() {
-            if !again
+            if self.fresh && !again {
+                self.fresh = false;
+            } else if !again
                 && self
                     .state
                     .as_ref()
@@ -1406,7 +1528,8 @@ impl Composer {
         }
         // Up at the start brings back what was sent before, and Down at the end goes forward
         // again, as in Claude Code and Codex.
-        if key.modifiers.is_empty() {
+        let secret = self.secret().is_some();
+        if key.modifiers.is_empty() && !secret {
             let edge = match key.code {
                 KeyCode::Up => self.editor.cursor == 0,
                 KeyCode::Down => self.editor.cursor == self.editor.text.len(),
@@ -1438,7 +1561,7 @@ impl Composer {
                 self.images.pop();
             }
             KeyCode::Char('x') if ctrl => self.command("stop"),
-            KeyCode::Char('r') if ctrl && !self.unsent.is_empty() => self.recover(),
+            KeyCode::Char('r') if ctrl && !self.unsent.is_empty() && !secret => self.recover(),
             KeyCode::Tab | KeyCode::BackTab => self.pick(Field::Model),
             _ => {
                 edit(&mut self.editor, key);
@@ -1786,6 +1909,7 @@ impl Composer {
             unsent: Vec::new(),
             clipboard: paste::Reader::default(),
             deleting: false,
+            fresh: false,
             escape: Escape::default(),
             width_set: None,
             details_set: None,
@@ -1827,13 +1951,14 @@ impl Composer {
             && self.answers.is_empty()
             && self.images.is_empty()
             && self.unsent.is_empty()
+            && !self.fresh
     }
 
     /// A message that didn't send. With nothing typed or attached it goes back into the input.
     /// Otherwise it's kept, with its pictures, beside the new draft and not over it.
     fn failed(&mut self, text: String, images: Vec<Image>) {
         self.unsent.push((text, images));
-        if self.editor.text.is_empty() && self.images.is_empty() {
+        if self.editor.text.is_empty() && self.images.is_empty() && self.secret().is_none() {
             self.recover();
         }
     }
@@ -1870,6 +1995,7 @@ impl Composer {
                 }
             }
             Done::Restore(text, images) => self.failed(text, images),
+            Done::Fresh => self.fresh = true,
             Done::Picture(ready) => {
                 if let Some(why) = self.images.ready(ready) {
                     self.note(why, true);
@@ -2398,5 +2524,118 @@ mod tests {
         let (lines, at) = wrap(&"a\nb".chars().collect::<Vec<_>>(), 2, 10);
         assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(at, (1, 0));
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    /// The rows Reply draws, without colours.
+    fn shown(reply: &mut super::Composer) -> String {
+        crate::render::strip_ansi(&reply.layout().rows.join("\n"))
+    }
+
+    /// `/clear` arms the next message instead of sending, and says so over the input. Esc on
+    /// the empty input keeps the session; it doesn't stop the run.
+    #[tokio::test]
+    async fn clear_arms_a_fresh_session_and_esc_keeps_this_one() {
+        let mut b = Bench::new();
+        b.reply.editor.insert("/clear");
+        b.reply.key(enter());
+        assert!(b.reply.fresh);
+        assert!(b.reply.editor.text.is_empty());
+        assert!(shown(&mut b.reply).contains("Next message starts a new session"));
+        assert!(
+            !b.reply.idle(),
+            "an armed session survives the pane starting again"
+        );
+        b.reply.key(esc());
+        assert!(!b.reply.fresh);
+        assert!(!shown(&mut b.reply).contains("new session"));
+    }
+
+    /// A fresh message that fails comes back armed, so retrying it still starts fresh.
+    #[tokio::test]
+    async fn a_failed_fresh_message_stays_fresh() {
+        let mut b = Bench::new();
+        b.reply.fresh = true;
+        b.draft("start over", &[]).await;
+        b.reply.key(enter());
+        assert!(!b.reply.fresh);
+        b.settle(1).await;
+        assert!(b.reply.fresh);
+        assert_eq!(b.reply.editor.string(), "start over");
+    }
+
+    /// Reply for a thread whose agent asks for a secret.
+    fn asked_for_a_secret(status: &str) -> Bench {
+        let mut b = Bench::new();
+        b.reply.state = t3client::projection::ThreadState::from_snapshot(&json!({
+            "kind": "snapshot", "snapshotSequence": 2,
+            "projection": {
+                "thread": {"id": "t1", "title": "T", "modelSelection": {"instanceId": "codex", "model": "gpt"}},
+                "runs": [{"id": "r1", "status": "running", "ordinal": 1}], "runtimeRequests": [],
+                "turnItems": [{"id": "s1", "type": "secret_request", "ordinal": 1,
+                    "label": "GitHub token", "reason": "To push the branch", "secretStatus": status}],
+                "visibleTurnItems": []
+            }
+        }));
+        b
+    }
+
+    /// While the agent asks for a secret, Reply names it, shows what's typed as dots, offers
+    /// Decline, and keeps the menu and the sent history away from the input.
+    #[tokio::test]
+    async fn a_secret_is_typed_blind() {
+        let mut b = asked_for_a_secret("pending");
+        b.reply.editor.insert("/hunter2");
+        let rows = shown(&mut b.reply);
+        assert!(rows.contains("◆ GitHub token"), "{rows}");
+        assert!(rows.contains("To push the branch"), "{rows}");
+        assert!(rows.contains("Decline"), "{rows}");
+        assert!(rows.contains("••••••••"), "{rows}");
+        assert!(!rows.contains("hunter2"), "{rows}");
+        assert!(!b.reply.slash.is_open());
+        assert!(b.reply.wants_clicks());
+        assert_eq!(
+            crate::ask::line(b.reply.state.as_ref().unwrap()).as_deref(),
+            Some("GitHub token")
+        );
+    }
+
+    /// Enter gives the secret, never a message: the input empties with its undo, and nothing
+    /// fails back into it.
+    #[tokio::test]
+    async fn enter_gives_the_secret_and_forgets_it() {
+        let mut b = asked_for_a_secret("pending");
+        b.reply.editor.insert("hunter2");
+        b.reply.key(enter());
+        assert!(b.reply.editor.text.is_empty());
+        assert!(!b.reply.editor.undo(), "no undo brings the secret back");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(10), b.rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(done, Done::Note(_, true)),
+            "the dead port refuses it"
+        );
+        assert!(b.reply.unsent.is_empty());
+    }
+
+    /// An answered secret request leaves Reply as it was.
+    #[tokio::test]
+    async fn an_answered_secret_asks_nothing() {
+        let mut b = asked_for_a_secret("saved");
+        b.reply.editor.insert("hello");
+        let rows = shown(&mut b.reply);
+        assert!(
+            rows.contains("hello") && !rows.contains("GitHub token"),
+            "{rows}"
+        );
     }
 }

@@ -558,6 +558,7 @@ mod tests {
             runtime_mode: Some("full-access".into()),
             interaction_mode: Some("default".into()),
             prompt_effort: None,
+            fresh_context: false,
         }
     }
 

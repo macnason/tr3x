@@ -509,6 +509,11 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
     }
     match block.kind {
         BlockKind::User => {
+            // `/clear` started a new provider session here: the agent saw nothing above.
+            if block.fresh_context {
+                lines.push(String::new());
+                lines.push(format!("{DIM}New session{RESET}"));
+            }
             lines.push(String::new());
             let text = render::markdown_with_links(&block.body, width.saturating_sub(2), ctx.files);
             for (i, line) in text.lines.into_iter().enumerate() {
@@ -1344,7 +1349,15 @@ impl Pane {
     ) {
         let Some(thread) = thread else { return };
         let now = t3::now_ms();
-        let word = t3client::inbox::status_label(thread, now);
+        // A secret request isn't one T3's sidebar counts, but the agent waits on you all the
+        // same: Rex marks it as a question.
+        let secret = state.is_some_and(|s| {
+            crate::ask::pending(s).is_none() && crate::ask::pending_secret(s).is_some()
+        });
+        let word = match t3client::inbox::status_label(thread, now) {
+            Some("Working" | "Goal" | "Waiting") | None if secret => Some("Input"),
+            word => word,
+        };
         // A usage limit says what it waits for: `Limited · resumes 3pm`.
         let limited = t3client::inbox::limit(thread)
             .map(|limit| limit_wait(&limit, now, self.offset_minutes))
@@ -1849,6 +1862,13 @@ async fn event_loop(
                 .map_or(&ThreadState::default(), |s| s),
         )
         .map(|(r, _)| r["id"].as_str().unwrap_or_default().to_string())
+        .or_else(|| {
+            composer
+                .state
+                .as_ref()
+                .and_then(crate::ask::pending_secret)
+                .map(|i| i["id"].as_str().unwrap_or_default().to_string())
+        })
         .unwrap_or_default();
         if ask != asking {
             asking = ask;
@@ -1930,6 +1950,7 @@ mod tests {
             request_id: String::new(),
             change: None,
             images: Vec::new(),
+            fresh_context: false,
         }
     }
 

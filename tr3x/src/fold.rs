@@ -116,6 +116,7 @@ pub fn fold(
                 request_id: String::new(),
                 change: None,
                 images: Vec::new(),
+                fresh_context: false,
             });
         }
         if open {
@@ -155,6 +156,7 @@ mod tests {
             request_id: String::new(),
             change: None,
             images: Vec::new(),
+            fresh_context: false,
         }
     }
 

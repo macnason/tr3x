@@ -171,11 +171,14 @@ pub fn entries(
         })
         .collect();
     let mut commands = std::collections::HashSet::new();
+    // T3's `/clear` replaces the provider's, which would end a session T3 still treats as live.
+    let ours_clear = out.iter().any(|e| e.kind == Kind::Rex && e.name == "clear");
+    let replaced = |name: &str| ours_clear && key(name) == "clear";
     for c in list("slashCommands") {
         let Some(name) = c["name"].as_str() else {
             continue;
         };
-        if seen.contains(&key(name)) || !commands.insert(key(name)) {
+        if seen.contains(&key(name)) || replaced(name) || !commands.insert(key(name)) {
             continue;
         }
         let hint = c["input"]["hint"].as_str();
@@ -877,5 +880,25 @@ mod tests {
         let out = s.draw(&mut p, (10, 10), 12, 0, 40);
         assert!(out.contains("\x1b[2;1H") && out.contains("\x1b[9;1H"));
         assert!(!out.contains("\x1b[10;1H"));
+    }
+
+    /// T3's `/clear` replaces the provider's, as in T3's menu; where T3 lacks it, the
+    /// provider's stays.
+    #[test]
+    fn t3s_clear_replaces_the_providers() {
+        let mut config = config();
+        config["providers"][0]["slashCommands"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "clear", "description": "Clear the conversation"}));
+        let clears = |caps: Value| -> Vec<Kind> {
+            entries(&config, &thread(None), &HashMap::new(), &caps)
+                .into_iter()
+                .filter(|e| e.name == "clear")
+                .map(|e| e.kind)
+                .collect()
+        };
+        assert_eq!(clears(json!({"freshContext": true})), [Kind::Rex]);
+        assert_eq!(clears(json!({})), [Kind::Command]);
     }
 }

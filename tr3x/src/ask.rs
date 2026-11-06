@@ -24,6 +24,18 @@ pub fn pending(state: &ThreadState) -> Option<(Value, Value)> {
     Some((request, item))
 }
 
+/// The agent's latest secret request still waiting on an answer, the `secret_request` item.
+/// It isn't a runtime request: the agent's tool call waits on it, and T3 answers it through
+/// `secrets.answerRequest`.
+pub fn pending_secret(state: &ThreadState) -> Option<&Value> {
+    state
+        .items()
+        .into_iter()
+        .rev()
+        .find(|i| i["type"] == "secret_request")
+        .filter(|i| i["secretStatus"] == "pending")
+}
+
 pub fn is_question(request: &Value) -> bool {
     request["kind"] == "user_input"
 }
@@ -76,7 +88,10 @@ pub fn question_text(q: &Value) -> String {
 
 /// The one line Rex's status carries for a pending request: `Run pnpm test?`, or the question.
 pub fn line(state: &ThreadState) -> Option<String> {
-    let (request, item) = pending(state)?;
+    let Some((request, item)) = pending(state) else {
+        let secret = pending_secret(state)?;
+        return Some(clean(secret["label"].as_str().unwrap_or("A secret")));
+    };
     if is_question(&request) {
         let q = item["questions"].as_array()?.first()?;
         return Some(question_text(q));
