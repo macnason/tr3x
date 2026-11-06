@@ -823,7 +823,8 @@ fn within(text: &str, max: usize) -> String {
 /// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it under the window's label,
 /// which already names the thread. `msg` is that line: what the thread is waiting on you for,
 /// when it is, else the project and the status word, or the project alone when idle. `title`
-/// is the project. `shown` is the word the line says, which can differ from `word`, the one
+/// is the thread's `name`, else the project: Go to Anything's Activity list and Rex's
+/// notifications have no window label to go by. `shown` is the word the line says, which can differ from `word`, the one
 /// the state comes from: a finished run you've already seen still says Done, at rest. Both
 /// are cut to the protocol's limits: 2048 and 192 bytes.
 fn status_sequence(
@@ -831,6 +832,7 @@ fn status_sequence(
     shown: Option<&str>,
     ask: Option<&str>,
     project: Option<&str>,
+    name: Option<&str>,
 ) -> String {
     let (state, extra) = match word {
         Some("Approval") => ("blocked", ":kind=permission"),
@@ -842,7 +844,7 @@ fn status_sequence(
     };
     let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let mut seq = format!("\x1b]7501;state={state}{extra}:app=t3code");
-    let title = within(project.unwrap_or_default(), 192);
+    let title = within(name.or(project).unwrap_or_default(), 192);
     if !title.is_empty() {
         seq.push_str(&format!(":title={}", b64(&title)));
     }
@@ -1354,23 +1356,24 @@ impl Pane {
             .or(t3client::inbox::finished(thread).then_some("Done"));
         let project = project_name(shell, thread).map(one_line);
         let ask = state.and_then(crate::ask::line);
-        let seq = status_sequence(word, shown, ask.as_deref(), project.as_deref());
+        let name = thread["title"].as_str().map(one_line);
+        let seq = status_sequence(
+            word,
+            shown,
+            ask.as_deref(),
+            project.as_deref(),
+            name.as_deref(),
+        );
         if seq != self.status {
             out(&seq);
             self.status = seq;
         }
     }
 
+    /// The terminal's title is the thread's, as Go to Anything's Activity list names the pane
+    /// by it. The project and status are on the line under it.
     fn set_title(&mut self, state: &ThreadState, project: Option<&str>) {
-        let thread = state.thread();
-        let mut parts = vec!["T3".to_string()];
-        if let Some(p) = project {
-            parts.push(p.to_string());
-        }
-        if let Some(b) = thread["branch"].as_str() {
-            parts.push(b.to_string());
-        }
-        let title = parts.join(" · ");
+        let title = terminal_title(state.thread()["title"].as_str(), project);
         if title != self.title {
             out(&format!(
                 "\x1b]2;{}\x07",
@@ -1379,6 +1382,16 @@ impl Pane {
             self.title = title;
         }
     }
+}
+
+/// The thread's title, else the project's, else T3.
+fn terminal_title(thread: Option<&str>, project: Option<&str>) -> String {
+    [thread, project]
+        .into_iter()
+        .flatten()
+        .map(one_line)
+        .find(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "T3".into())
 }
 
 /// What a thread's pane shows.
@@ -2102,23 +2115,49 @@ mod tests {
     }
 
     #[test]
+    fn activity_names_the_pane_after_its_thread() {
+        let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+        assert_eq!(
+            terminal_title(Some("Fix the build"), Some("tr3x")),
+            "Fix the build"
+        );
+        assert_eq!(terminal_title(Some("  "), Some("tr3x")), "tr3x");
+        assert_eq!(terminal_title(None, None), "T3");
+        assert_eq!(
+            status_sequence(
+                Some("Working"),
+                Some("Working"),
+                None,
+                Some("tr3x"),
+                Some("Fix the build")
+            ),
+            format!(
+                "\x1b]7501;state=working:app=t3code:title={}:msg={}\x1b\\",
+                b64("Fix the build"),
+                b64("tr3x · Working")
+            )
+        );
+    }
+
+    #[test]
     fn status_maps_to_rex_states() {
         assert!(
-            status_sequence(Some("Approval"), Some("Approval"), None, Some("t"))
+            status_sequence(Some("Approval"), Some("Approval"), None, Some("t"), None)
                 .contains("state=blocked:kind=permission")
         );
         assert!(
-            status_sequence(Some("Input"), Some("Input"), None, Some("t"))
+            status_sequence(Some("Input"), Some("Input"), None, Some("t"), None)
                 .contains("state=blocked:kind=question")
         );
         assert!(
-            status_sequence(Some("Working"), Some("Working"), None, Some("t"))
+            status_sequence(Some("Working"), Some("Working"), None, Some("t"), None)
                 .contains("state=working")
         );
         assert!(
-            status_sequence(Some("Done"), Some("Done"), None, Some("t")).contains("state=done")
+            status_sequence(Some("Done"), Some("Done"), None, Some("t"), None)
+                .contains("state=done")
         );
-        assert!(status_sequence(None, None, None, Some("t")).contains("state=idle"));
+        assert!(status_sequence(None, None, None, Some("t"), None).contains("state=idle"));
     }
 
     #[test]
@@ -2129,6 +2168,7 @@ mod tests {
             Some("Approval"),
             Some("Run pnpm test?"),
             Some("tr3x"),
+            None,
         );
         assert_eq!(
             seq,
@@ -2140,12 +2180,18 @@ mod tests {
         );
         // Not blocked: the project and the status word, whatever was asked before.
         assert!(
-            status_sequence(Some("Working"), Some("Working"), Some("x"), Some("tr3x"))
-                .ends_with(&format!(":msg={}\x1b\\", b64("tr3x · Working")))
+            status_sequence(
+                Some("Working"),
+                Some("Working"),
+                Some("x"),
+                Some("tr3x"),
+                None
+            )
+            .ends_with(&format!(":msg={}\x1b\\", b64("tr3x · Working")))
         );
         // Idle: the project alone, on the line under the label; no project, the word alone.
         assert_eq!(
-            status_sequence(None, None, None, Some("tr3x")),
+            status_sequence(None, None, None, Some("tr3x"), None),
             format!(
                 "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
                 b64("tr3x"),
@@ -2153,12 +2199,12 @@ mod tests {
             )
         );
         assert_eq!(
-            status_sequence(None, None, None, None),
+            status_sequence(None, None, None, None, None),
             "\x1b]7501;state=idle:app=t3code\x1b\\"
         );
         // A finished run you've seen: Done on the line, at rest in Rex.
         assert_eq!(
-            status_sequence(None, Some("Done"), None, Some("tr3x")),
+            status_sequence(None, Some("Done"), None, Some("tr3x"), None),
             format!(
                 "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
                 b64("tr3x"),
@@ -2166,12 +2212,12 @@ mod tests {
             )
         );
         assert!(
-            status_sequence(Some("Done"), Some("Done"), None, None)
+            status_sequence(Some("Done"), Some("Done"), None, None, None)
                 .ends_with(&format!(":app=t3code:msg={}\x1b\\", b64("Done")))
         );
         // Over the limits: cut on a character, never mid-way through one.
         let long = "é".repeat(2000);
-        let seq = status_sequence(Some("Input"), Some("Input"), Some(&long), Some(&long));
+        let seq = status_sequence(Some("Input"), Some("Input"), Some(&long), Some(&long), None);
         let field = |key: &str| {
             let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
             let end = seq[at..].find([':', '\x1b']).unwrap() + at;
@@ -2289,7 +2335,8 @@ mod tests {
                 Some("Limited"),
                 Some("Limited · resumes 3pm"),
                 None,
-                Some("tr3x")
+                Some("tr3x"),
+                None,
             ),
             format!(
                 "\x1b]7501;state=error:app=t3code:title={}:msg={}\x1b\\",

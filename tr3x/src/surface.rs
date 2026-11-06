@@ -152,8 +152,11 @@ mod tests {
                     format!("orchestration.{m}")
                 }
             })
+            // Rex's own methods, which `Rex::call` sends.
             .filter(|m| {
-                !m.starts_with("block.") && !m.starts_with("session.") && !m.starts_with("client.")
+                !["block.", "session.", "client.", "server."]
+                    .iter()
+                    .any(|rex| m.starts_with(rex))
             })
             .collect();
         assert!(methods.contains(&"orchestration.subscribeShell".to_string()));

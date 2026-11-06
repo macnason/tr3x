@@ -76,6 +76,25 @@ fn fail_with(what: &str, detail: &str, fix: &str) {
     println!("  {fix}");
 }
 
+/// What doctor says about Rex's version: the server's build and API revision, or, as the
+/// error, both builds when the server is older than the `rex` beside the app.
+fn rex_versions(cli: &Value, server: &Value) -> Result<String, String> {
+    let build = |v: &Value| {
+        let version = v["rex_version"].as_str().unwrap_or("?");
+        // `0.0.1793890641-gaf0c20`: the build's time, then its commit.
+        let commit = version.rsplit_once("-g").map_or(version, |(_, c)| c);
+        format!("{commit}, API {}", v["api_revision"].as_u64().unwrap_or(0))
+    };
+    let behind = server["api_revision"].as_u64() < cli["api_revision"].as_u64()
+        || (server["rex_version"] != cli["rex_version"]
+            && server["built_at"].as_str() < cli["built_at"].as_str());
+    if behind {
+        Err(format!("server {}, app {}", build(server), build(cli)))
+    } else {
+        Ok(build(server))
+    }
+}
+
 /// Where tr3x runs from once installed: where it already is, unless that's a build or a
 /// download, which go to ~/.local/bin.
 fn install_target(exe: &Path) -> PathBuf {
@@ -544,6 +563,19 @@ pub async fn doctor() -> Result<()> {
         Ok(_) => step(true, "Rex server", &rex.bin.display().to_string()),
         Err(e) => fail("Rex server", &format!("{e:#}"), "Open Rex Beta."),
     }
+    if sessions.is_ok()
+        && let Ok((cli, server)) = rex.versions().await
+    {
+        match rex_versions(&cli, &server) {
+            Ok(detail) => step(true, "Rex version", &detail),
+            Err(detail) => {
+                mark(Mark::Warn, "Rex's server is older than the app", &detail);
+                println!(
+                    "  Run `rex server stop`, then open Rex Beta. Its server starts on the new version, and tr3x puts its tabs back."
+                );
+            }
+        }
+    }
 
     let dir = config_dir();
     let init = std::fs::read_to_string(dir.join("init.lua")).unwrap_or_default();
@@ -861,6 +893,20 @@ pub async fn hop(thread: &str, up: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_says_when_rex_kept_an_old_server() {
+        let v = |version: &str, built: &str, api: u64| serde_json::json!({"rex_version": version, "built_at": built, "api_revision": api});
+        let app = v("0.0.1793890641-gaf0c20", "2026-11-05T14:57:21Z", 11);
+        let old = v("0.0.1793645657-gd018d2", "2026-11-02T18:54:17Z", 10);
+        assert_eq!(rex_versions(&app, &app), Ok("af0c20, API 11".into()));
+        assert_eq!(
+            rex_versions(&app, &old),
+            Err("server d018d2, API 10, app af0c20, API 11".into())
+        );
+        // A server newer than this `rex`, such as one on PATH from an older package, is fine.
+        assert!(rex_versions(&old, &app).is_ok());
+    }
 
     #[test]
     fn builds_and_downloads_install_to_local_bin_and_the_rest_stay_put() {

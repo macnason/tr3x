@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Rex's Go to Anything lists a thread by its title. It showed `T3 · project · branch`, the pane's terminal title.
+- An action on a thread, run from Shortcuts' Run Rex Action or `rex do` without one in front, says "Go to a T3 thread first".
+- `tr3x doctor` warns when Rex's server is older than the app, and says how to restart it.
+
 ## 0.1.2
 
 - A message that fails to send comes back with its pictures. If you've started typing something else by then, it waits under **Unsent message** and ⌃R puts it back ahead of your draft, so neither is lost.
