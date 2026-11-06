@@ -673,7 +673,10 @@ async fn update_machine(
         .map_err(|e| anyhow::anyhow!("{}", reason(&e)))?;
     let Some(token) = result["desktopUpdateToken"].as_str() else {
         // A background service hands the new version to its launcher, which restarts T3.
-        return Ok((format!("T3 {} installed; it restarts by itself", m.latest), true));
+        return Ok((
+            format!("T3 {} installed; it restarts by itself", m.latest),
+            true,
+        ));
     };
     let running = running_threads(env).await;
     if running > 0 {
@@ -684,7 +687,10 @@ async fn update_machine(
             if running == 1 { "it" } else { "them" }
         );
         if !interactive || !confirm(&format!("  {ask}")).await? {
-            return Ok(("downloaded; installs next time T3 Code restarts".into(), false));
+            return Ok((
+                "downloaded; installs next time T3 Code restarts".into(),
+                false,
+            ));
         }
     }
     let target = result["targetVersion"].as_str().unwrap_or(&m.latest);
