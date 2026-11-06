@@ -68,6 +68,8 @@ pub struct Block {
     pub change: Option<FileChange>,
     /// For user messages: the pictures that went with it.
     pub images: Vec<Picture>,
+    /// For user messages: it started a fresh provider session, which `/clear` arms.
+    pub fresh_context: bool,
 }
 
 /// A picture on a message, as T3 keeps it in its attachments folder.
@@ -950,10 +952,12 @@ fn describe_as(item: &Value, runs: &[Value], with_change: bool) -> Option<Block>
         request_id: str_of(item, "requestId").to_string(),
         change: None,
         images: Vec::new(),
+        fresh_context: false,
     };
     Some(match item_type {
         "user_message" => Block {
             images: pictures(item),
+            fresh_context: item.get("freshContext").and_then(Value::as_bool) == Some(true),
             ..block(
                 BlockKind::User,
                 "You".into(),
@@ -1116,8 +1120,36 @@ fn describe_as(item: &Value, runs: &[Value], with_change: bool) -> Option<Block>
             }
             block(BlockKind::Notice, title.to_string(), String::new())
         }
-        // Checkpoints, interrupt requests and secret requests carry nothing worth a line.
-        "checkpoint" | "run_interrupt_request" | "secret_request" => return None,
+        // The secret itself never reaches the thread: only what was asked for, and what
+        // became of it. Reply answers a pending one.
+        "secret_request" => {
+            let label = plain(str_of(item, "label"));
+            let header = match str_of(item, "secretStatus") {
+                "saved" => format!("Gave {label}"),
+                "declined" => format!("Declined to give {label}"),
+                "cancelled" => format!("Stopped asking for {label}"),
+                _ => format!("Asked for {label}"),
+            };
+            block(BlockKind::Notice, header, String::new())
+        }
+        // Linking machines is T3's to do: the line says what was asked and where it went.
+        "link_request" => {
+            let what = [str_of(item, "label"), str_of(item, "url")]
+                .into_iter()
+                .find(|s| !s.trim().is_empty())
+                .map(plain)
+                .unwrap_or_else(|| "a machine".into());
+            let header = match str_of(item, "linkStatus") {
+                "linked" => format!("Linked {what}"),
+                "declined" => format!("Declined to link {what}"),
+                "cancelled" => format!("Stopped asking to link {what}"),
+                "failed" => format!("Couldn't link {what}"),
+                _ => format!("Asked to link {what}. Answer in T3 Code"),
+            };
+            block(BlockKind::Notice, header, String::new())
+        }
+        // Checkpoints and interrupt requests carry nothing worth a line.
+        "checkpoint" | "run_interrupt_request" => return None,
         _ => {
             if title.is_empty() {
                 return None;
@@ -2497,5 +2529,49 @@ mod tests {
             plain_text(&state, None, false),
             format!("{}\n", rows.join("\n"))
         );
+    }
+
+    /// A secret request is a line saying what was asked and what became of it, never the value;
+    /// a message `/clear` armed says it started fresh.
+    #[test]
+    fn secrets_and_fresh_sessions_read_as_lines() {
+        let secret = |status: &str| {
+            describe(
+                &json!({"id": "s", "type": "secret_request", "label": "npm \u{1b}[2Jtoken",
+                    "reason": "publish", "secretStatus": status}),
+                &[],
+            )
+            .unwrap()
+        };
+        let headers: Vec<String> = ["pending", "saved", "declined", "cancelled"]
+            .iter()
+            .map(|s| secret(s).header)
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "Asked for npm [2Jtoken",
+                "Gave npm [2Jtoken",
+                "Declined to give npm [2Jtoken",
+                "Stopped asking for npm [2Jtoken"
+            ]
+        );
+        assert_eq!(secret("pending").kind, BlockKind::Notice);
+        let link = describe(
+            &json!({"id": "l", "type": "link_request", "label": "omarchy", "linkStatus": "pending"}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(link.header, "Asked to link omarchy. Answer in T3 Code");
+        let fresh = |v: Value| {
+            describe(
+                &json!({"id": "u", "type": "user_message", "text": "hi", "freshContext": v}),
+                &[],
+            )
+            .unwrap()
+            .fresh_context
+        };
+        assert!(fresh(json!(true)));
+        assert!(!fresh(Value::Null));
     }
 }

@@ -1,5 +1,5 @@
 {
-  "t3": "0.1.7-nightly.20261103.4119",
+  "t3": "0.1.8-nightly.20261106.4262",
   "capabilities": [
     "agentActivityPublishing",
     "attachmentUploads",
@@ -11,6 +11,7 @@
     "environmentIcon",
     "environmentThemes",
     "fileAttachments",
+    "freshContext",
     "ignoredFileListing",
     "inlineMessageContext",
     "linkFence",
@@ -32,6 +33,7 @@
     "questionAttachments",
     "repositoryIdentity",
     "requiredWorktreeBootstrap",
+    "scheduledTaskThreadModes",
     "serverBrowser",
     "serverInstallation",
     "serverResolvedCommandContext",
@@ -63,6 +65,7 @@
     "usageLimitSources",
     "usageModelAliases",
     "usagePriceOverrides",
+    "voiceTranscription",
     "worktreesDirectory"
   ],
   "commands": [
@@ -163,6 +166,7 @@
     "orchestration.getOlderSettledThreads",
     "orchestration.getThreadFamily",
     "orchestration.getThreadProjection",
+    "orchestration.getThreadTitles",
     "orchestration.getTurnDiff",
     "orchestration.getTurnItem",
     "orchestration.getWorkflowScript",
@@ -348,6 +352,7 @@
     "composer.branch",
     "composer.cycleHost",
     "composer.decreaseEffort",
+    "composer.dictation",
     "composer.effort",
     "composer.host",
     "composer.increaseEffort",

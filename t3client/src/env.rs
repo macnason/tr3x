@@ -38,6 +38,18 @@ pub struct Env {
     fixed: Option<Api>,
 }
 
+/// What a `SecretRequestError` says, in T3's words, by its `reason`.
+fn secret_failure(reason: Option<&str>) -> Option<&'static str> {
+    Some(match reason? {
+        "load_failed" => "Could not load the secret request.",
+        "not_found" => "This secret request no longer exists.",
+        "already_answered" => "This secret request was already answered.",
+        "agent_stopped" => "The agent that asked has stopped, so this secret can't be used.",
+        "store_failed" => "Could not store the secret.",
+        _ => return None,
+    })
+}
+
 /// What to do when a message arrives while the thread is already working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfBusy {
@@ -482,6 +494,22 @@ impl Env {
                 "That thread was deleted.",
             ));
         }
+        // Only a T3 known to lack it refuses: one not reached yet says so itself.
+        let lacks = self
+            .descriptor()
+            .is_some_and(|d| !d.has_capability("freshContext"));
+        if plan.fresh_context && lacks {
+            return Err(err_exit(
+                "FRESH_CONTEXT_UNSUPPORTED",
+                exit::REJECTED,
+                "This machine's T3 can't start a fresh session. Update it with `tr3x update`.",
+            ));
+        }
+        // A fresh session never steers: T3 queues it behind the running turn.
+        let if_busy = match if_busy {
+            IfBusy::Steer if plan.fresh_context => IfBusy::Queue,
+            other => other,
+        };
         let (dispatch_mode, mode_name) = match (state.active_run(), if_busy) {
             (None, _) => (json!({"type": "start_immediately"}), "start_immediately"),
             (Some(_), IfBusy::Queue) => {
@@ -520,6 +548,9 @@ impl Env {
         });
         if let Some(selection) = &plan.model_selection {
             command["modelSelection"] = selection.clone();
+        }
+        if plan.fresh_context {
+            command["freshContext"] = json!(true);
         }
         let sequence = self.dispatch(command).await?;
         Ok(SendReceipt {
@@ -677,6 +708,35 @@ impl Env {
             "answers": answers,
         }))
         .await
+    }
+
+    /// Answers the agent's secret request, the `secret_request` turn item `item_id`: `Some`
+    /// saves the value where T3 keeps secrets, `None` declines. The value never enters the
+    /// thread.
+    pub async fn answer_secret(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        secret: Option<&str>,
+    ) -> Result<()> {
+        let answer = match secret {
+            Some(value) => json!({ "type": "save", "secret": value }),
+            None => json!({ "type": "decline" }),
+        };
+        let input = json!({ "threadId": thread_id, "turnItemId": item_id, "answer": answer });
+        self.rpc()
+            .await?
+            .call("secrets.answerRequest", input, DISPATCH_TIMEOUT)
+            .await
+            .map_err(|e| match e {
+                RpcError::Failed { message, error, .. } => err_exit(
+                    "SECRET_REJECTED",
+                    exit::REJECTED,
+                    secret_failure(error["reason"].as_str()).unwrap_or(&message),
+                ),
+                other => other.into(),
+            })?;
+        Ok(())
     }
 
     pub async fn interrupt(&self, thread_id: &str, run_id: &str) -> Result<u64> {
@@ -1340,5 +1400,137 @@ pub(crate) mod tests {
             .await
             .expect("the server saw every interrupt")
             .unwrap();
+    }
+
+    /// A machine at the fake T3 at `origin` whose T3 reports `capabilities`.
+    fn client_with(origin: &str, capabilities: Value) -> Arc<Env> {
+        let env = client_at(origin);
+        *env.descriptor.lock().unwrap() = Some(Descriptor {
+            origin: origin.to_string(),
+            environment_id: "e1".into(),
+            label: None,
+            server_version: "0.1.8".into(),
+            protocol_version: None,
+            capabilities,
+            platform: Value::Null,
+        });
+        env
+    }
+
+    /// A thread working on run `r1`.
+    fn working() -> ThreadState {
+        let run = json!({"id": "r1", "status": "running", "ordinal": 1});
+        let projection = json!({"thread": {"id": "t1"}, "runs": [run]});
+        ThreadState::from_snapshot(&json!({"projection": projection})).unwrap()
+    }
+
+    /// Answers tr3x's next request with `value`, and returns the request.
+    async fn answer_next(socket: &mut Socket, value: Value) -> Value {
+        let request = recv(socket).await;
+        let exit = json!({"_tag": "Success", "value": value});
+        let frame = json!({"_tag": "Exit", "requestId": request["id"], "exit": exit});
+        socket
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .unwrap();
+        request
+    }
+
+    /// `/clear`'s message carries `freshContext`, and to a working thread it queues even when
+    /// asked to steer, as T3 never steers a fresh session.
+    #[tokio::test]
+    async fn a_fresh_send_queues_and_says_so() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let client = client_with(&origin, json!({"freshContext": true}));
+        let server = tokio::spawn(async move {
+            let (_, mut socket) = open(&listener, &mut 0).await;
+            answer_next(&mut socket, json!({"sequence": 7})).await
+        });
+        let plan = Plan {
+            fresh_context: true,
+            ..Plan::default()
+        };
+        let receipt = client
+            .send_message_with(&working(), "start over", IfBusy::Steer, &plan, &[])
+            .await
+            .unwrap();
+        assert_eq!(receipt.dispatch_mode, "queue_after_active");
+        let command = &server.await.unwrap()["payload"];
+        assert_eq!(command["type"], "message.dispatch");
+        assert_eq!(command["freshContext"], true);
+        assert_eq!(
+            command["dispatchMode"],
+            json!({"type": "queue_after_active"})
+        );
+    }
+
+    /// An ordinary send leaves `freshContext` out, and a T3 without the capability refuses a
+    /// fresh one before anything goes.
+    #[tokio::test]
+    async fn only_a_fresh_send_carries_fresh_context() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let client = client_with(&origin, json!({}));
+        let plan = Plan {
+            fresh_context: true,
+            ..Plan::default()
+        };
+        let refused = client
+            .send_message_with(&working(), "start over", IfBusy::Queue, &plan, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("fresh session"),
+            "{refused:#}"
+        );
+        let server = tokio::spawn(async move {
+            let (_, mut socket) = open(&listener, &mut 0).await;
+            answer_next(&mut socket, json!({"sequence": 8})).await
+        });
+        client
+            .send_message(&working(), "go on", IfBusy::Queue, &[])
+            .await
+            .unwrap();
+        let command = &server.await.unwrap()["payload"];
+        assert!(command.get("freshContext").is_none(), "{command}");
+    }
+
+    /// A secret goes to `secrets.answerRequest`, not into the thread, and a decline sends no
+    /// value at all.
+    #[tokio::test]
+    async fn a_secret_is_given_or_declined_by_its_item() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let client = client_at(&origin);
+        let server = tokio::spawn(async move {
+            let (_, mut socket) = open(&listener, &mut 0).await;
+            let given = answer_next(&mut socket, json!({})).await;
+            let declined = answer_next(&mut socket, json!({})).await;
+            (given, declined)
+        });
+        client
+            .answer_secret("t1", "i1", Some("hunter2"))
+            .await
+            .unwrap();
+        client.answer_secret("t1", "i2", None).await.unwrap();
+        let (given, declined) = server.await.unwrap();
+        assert_eq!(given["tag"], "secrets.answerRequest");
+        assert_eq!(
+            given["payload"],
+            json!({"threadId": "t1", "turnItemId": "i1", "answer": {"type": "save", "secret": "hunter2"}})
+        );
+        assert_eq!(declined["payload"]["answer"], json!({"type": "decline"}));
+    }
+
+    /// A refused secret says why in T3's words.
+    #[test]
+    fn a_refused_secret_says_why() {
+        assert_eq!(
+            secret_failure(Some("already_answered")),
+            Some("This secret request was already answered.")
+        );
+        assert_eq!(secret_failure(Some("something_new")), None);
+        assert_eq!(secret_failure(None), None);
     }
 }

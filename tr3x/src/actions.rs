@@ -63,6 +63,11 @@ pub const ALL: &[Action] = &[
         ..NONE
     },
     Action {
+        slash: slash("clear", "Start a fresh session", None),
+        needs: Some("freshContext"),
+        ..NONE
+    },
+    Action {
         id: "t3_settle",
         title: "Settle Thread",
         keywords: "t3 done close archive inbox",

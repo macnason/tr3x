@@ -57,6 +57,9 @@ pub struct Plan {
     pub interaction_mode: Option<String>,
     /// An effort the desktop app applies by prefixing the message, such as Claude's ultrathink.
     pub prompt_effort: Option<String>,
+    /// The message starts a fresh provider session in the same thread, as T3's `/clear` arms.
+    /// It never steers: to a working thread it queues.
+    pub fresh_context: bool,
 }
 
 impl Plan {
@@ -1082,6 +1085,7 @@ mod tests {
             runtime_mode: Some("auto".into()),
             interaction_mode: Some("default".into()),
             prompt_effort: None,
+            fresh_context: false,
         };
         assert_eq!((plan, source), (expected, ModeSource::Project));
 

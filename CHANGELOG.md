@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `/clear` starts a fresh session in the same thread, as in T3 0.1.8. The next message goes to a new provider session, the conversation marks it **New session**, and Esc keeps the current one. It replaces the agent's own `/clear`, which ended a session T3 still treated as live.
+- When an agent asks for a secret, Reply asks for it. What you type shows as dots, Enter gives it to T3 and Decline says no; the thread only says what was asked for. Before, the request didn't show and the agent waited. Rex marks the tab `?` while it waits.
+- A request to link another machine shows in the conversation, with what became of it.
+
 - Rex's Go to Anything lists a thread by its title. It showed `T3 · project · branch`, the pane's terminal title.
 - An action on a thread, run from Shortcuts' Run Rex Action or `rex do` without one in front, says "Go to a T3 thread first".
 - `tr3x doctor` warns when Rex's server is older than the app, and says how to restart it.
