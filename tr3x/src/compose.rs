@@ -566,7 +566,8 @@ impl Composer {
         }
         // Without a limit to warn about, an update waiting for you.
         if windows.is_empty() {
-            let note = crate::update::notice(self.client.id())?;
+            let running = self.client.descriptor().map(|d| d.server_version);
+            let note = crate::update::notice(self.client.id(), running.as_deref())?;
             return (unicode_width::UnicodeWidthStr::width(note.as_str()) <= room)
                 .then(|| format!("{}{note}{}", crate::chat::DIM, crate::chat::RESET));
         }

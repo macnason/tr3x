@@ -189,11 +189,12 @@ impl Notes {
             .filter(|v| newer(v, env!("CARGO_PKG_VERSION")))
     }
 
-    /// The machine's T3 update, when it has one tr3x can install.
-    pub fn t3_update(&self, env: &str) -> Option<&Machine> {
-        self.machines
-            .get(env)
-            .filter(|m| m.behind() && m.how.is_some())
+    /// The machine's T3 update, when it has one tr3x can install. `running` is the version
+    /// the machine's T3 says it runs now, which outdates the check's once T3 has updated.
+    pub fn t3_update(&self, env: &str, running: Option<&str>) -> Option<&Machine> {
+        self.machines.get(env).filter(|m| {
+            m.behind() && m.how.is_some() && running.is_none_or(|v| newer(&m.latest, v))
+        })
     }
 }
 
@@ -217,8 +218,9 @@ fn save(notes: &Notes) -> Result<()> {
 }
 
 /// What Reply shows beside its chip for a thread on `env`, as of the last check: T3's update
-/// there, else tr3x's when it waits for you. Read again only when the file changes.
-pub fn notice(env: &str) -> Option<String> {
+/// there, else tr3x's when it waits for you. `running` is the T3 version `env` last said it
+/// runs. Read again only when the file changes.
+pub fn notice(env: &str, running: Option<&str>) -> Option<String> {
     use std::sync::Mutex;
     use std::time::SystemTime;
     static CACHE: Mutex<Option<(Option<SystemTime>, Notes)>> = Mutex::new(None);
@@ -230,10 +232,11 @@ pub fn notice(env: &str) -> Option<String> {
         *cache = Some((stamp, notes()));
     }
     let notes = &cache.as_ref()?.1;
-    if notes.t3_update(env).is_some() {
+    if notes.t3_update(env, running).is_some() {
         return Some("T3 update · /update".into());
     }
-    let waiting = mode() != Mode::Auto || !self_updates();
+    // Once a new tr3x is in place, this pane starts again on it when it's idle.
+    let waiting = (mode() != Mode::Auto || !self_updates()) && !crate::icons::replaced();
     notes
         .tr3x_update()
         .filter(|_| waiting)
@@ -624,7 +627,13 @@ async fn run_inner(check_only: bool, auto: bool) -> Result<()> {
     println!();
     for (env, m) in todo {
         match update_machine(&env, &m, interactive).await {
-            Ok(said) => println!("  ✓ {}: {said}", m.name),
+            Ok((said, installed)) => {
+                println!("  ✓ {}: {said}", m.name);
+                if installed && let Some(saved) = notes.machines.get_mut(env.id()) {
+                    saved.version = m.latest.clone();
+                    let _ = save(&notes);
+                }
+            }
             Err(e) => println!("  ✗ {}: {e:#}", m.name),
         }
     }
@@ -642,7 +651,7 @@ async fn update_machine(
     env: &t3client::env::Env,
     m: &Machine,
     interactive: bool,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     if !env.holds(MAINTAIN) {
         env.pair_fresh().await.with_context(|| {
             format!(
@@ -664,7 +673,10 @@ async fn update_machine(
         .map_err(|e| anyhow::anyhow!("{}", reason(&e)))?;
     let Some(token) = result["desktopUpdateToken"].as_str() else {
         // A background service hands the new version to its launcher, which restarts T3.
-        return Ok(format!("T3 {} installed; it restarts by itself", m.latest));
+        return Ok((
+            format!("T3 {} installed; it restarts by itself", m.latest),
+            true,
+        ));
     };
     let running = running_threads(env).await;
     if running > 0 {
@@ -675,12 +687,15 @@ async fn update_machine(
             if running == 1 { "it" } else { "them" }
         );
         if !interactive || !confirm(&format!("  {ask}")).await? {
-            return Ok("downloaded; installs next time T3 Code restarts".into());
+            return Ok((
+                "downloaded; installs next time T3 Code restarts".into(),
+                false,
+            ));
         }
     }
     let target = result["targetVersion"].as_str().unwrap_or(&m.latest);
     commit(env, token, target).await?;
-    Ok(format!("T3 Code restarted on {target}"))
+    Ok((format!("T3 Code restarted on {target}"), true))
 }
 
 /// What T3 said went wrong: a `ServerSelfUpdateError`'s reason, else the error as tr3x puts it.
@@ -838,10 +853,27 @@ mod tests {
         notes
             .machines
             .insert("c".into(), machine(Some("desktop-managed"), "0.1.7"));
-        assert!(notes.t3_update("a").is_some());
-        assert!(notes.t3_update("b").is_none());
-        assert!(notes.t3_update("c").is_none());
-        assert!(notes.t3_update("missing").is_none());
+        assert!(notes.t3_update("a", None).is_some());
+        assert!(notes.t3_update("a", Some("0.1.6")).is_some());
+        assert!(notes.t3_update("b", None).is_none());
+        assert!(notes.t3_update("c", None).is_none());
+        assert!(notes.t3_update("missing", None).is_none());
+    }
+
+    #[test]
+    fn a_t3_that_has_since_updated_has_no_update() {
+        let mut notes = Notes::default();
+        notes.machines.insert(
+            "a".into(),
+            Machine {
+                name: "studio".into(),
+                version: "0.1.6".into(),
+                latest: "0.1.7".into(),
+                how: Some("desktop-managed".into()),
+            },
+        );
+        assert!(notes.t3_update("a", Some("0.1.7")).is_none());
+        assert!(notes.t3_update("a", Some("0.1.8")).is_none());
     }
 
     #[test]
