@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+step() {
+    local label="$1" start=$SECONDS
+    shift
+    printf '\n==> %s\n' "$label"
+    "$@"
+    printf '==> %s finished in %ss\n' "$label" "$((SECONDS - start))"
+}
+
+# aws-lc-sys builds native code; the release tooling also uses Python.
+missing=()
+for package in build-essential cmake pkg-config perl curl ca-certificates python3; do
+    if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
+        missing+=("$package")
+    fi
+done
+if ((${#missing[@]})); then
+    step 'Refresh system package index' sudo apt-get update
+    step 'Install missing build tools' sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+fi
+
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
+if ! command -v rustup >/dev/null; then
+    installer=$(mktemp)
+    trap 'rm -f "$installer"' EXIT
+    step 'Download rustup' curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$installer"
+    step 'Install stable Rust' sh "$installer" -y --no-modify-path --profile minimal --default-toolchain stable
+elif ! rustup run stable rustc --version >/dev/null 2>&1; then
+    step 'Install stable Rust' rustup toolchain install stable --profile minimal
+fi
+step 'Select stable Rust (matching CI)' rustup default stable
+installed=$(rustup component list --toolchain stable --installed)
+for component in rustfmt clippy; do
+    if ! grep -q "^$component-" <<< "$installed"; then
+        step "Install $component" rustup component add --toolchain stable "$component"
+    fi
+done
+
+# Amp and supervised services start in separate login shells. The orb's
+# .bash_profile does not source .profile, so rustup's usual PATH hook is not enough.
+profile_line='. "${CARGO_HOME:-$HOME/.cargo}/env"'
+if ! grep -Fqx "$profile_line" "$HOME/.bash_profile" 2>/dev/null; then
+    printf '\n# Rust toolchain for orb login shells\n%s\n' "$profile_line" >> "$HOME/.bash_profile"
+fi
+
+# Cache every locked target's sources, including test dependencies. Leave builds
+# to the task: compiling the whole workspace would slow down snapshot creation.
+step 'Fetch locked Cargo dependencies' cargo fetch --locked

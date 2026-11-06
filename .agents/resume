@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Rust and Cargo's dependency cache survive pause/resume. Tests use a fake T3
+# server, so there are no services to restart or credentials to refresh here.
