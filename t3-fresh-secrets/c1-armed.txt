@@ -1,0 +1,23 @@
+
+  tr3x PR test: /clear (safe to delete)
+
+  › Remember the word: pineapple. Reply only with OK.
+    8:48 PM
+
+  ▸ Worked for 2s
+
+  OK
+  8:48 PM
+
+
+
+
+
+
+  Next message starts a new session Esc
+
+
+  ›
+
+
+     Haiku 5.5 · Medium · Supervised

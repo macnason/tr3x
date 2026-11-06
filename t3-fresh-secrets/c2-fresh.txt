@@ -1,0 +1,26 @@
+
+  tr3x PR test: /clear (safe to delete)
+
+  › Remember the word: pineapple. Reply only with OK.
+    8:48 PM
+
+  ▸ Worked for 2s
+
+  OK
+
+  New session
+
+  › What word did I ask you to remember? If you see no earlier message, reply
+    NONE.
+    8:49 PM
+
+  ▸ Worked for 3s
+
+  NONE
+  8:49 PM
+
+
+  ›
+
+
+     Haiku 5.5 · Medium · Supervised
