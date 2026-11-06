@@ -9,6 +9,7 @@
 - Rex's Go to Anything lists a thread by its title. It showed `T3 · project · branch`, the pane's terminal title.
 - An action on a thread, run from Shortcuts' Run Rex Action or `rex do` without one in front, says "Go to a T3 thread first".
 - `tr3x doctor` warns when Rex's server is older than the app, and says how to restart it.
+- Long lines in code blocks wrap, with continuation rows indented past the gutter. They were cut off with `…`.
 
 ## 0.1.2
 
