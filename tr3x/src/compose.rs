@@ -2120,6 +2120,7 @@ mod tests {
             alias: None,
             origins: vec!["http://127.0.0.1:9".into()],
             ssh: None,
+            rex: None,
             via: t3client::store::Via::Link,
             version: String::new(),
         };

@@ -1005,6 +1005,7 @@ impl Env {
                 alias: None,
                 origins: vec!["http://127.0.0.1:9".into()],
                 ssh: None,
+                rex: None,
                 via: Via::Link,
                 version: String::new(),
             },

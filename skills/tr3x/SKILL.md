@@ -38,7 +38,7 @@ lists them with the command for each instead, and `tr3x pair` does that part lat
 | `tr3x doctor` | Checks everything; prints a fix for each ✗. |
 | `tr3x envs` | Machines Rex follows, and the ones on the tailnet it could pair. |
 | `tr3x pair` | Finds machines on the tailnet that run T3 and pairs them. |
-| `tr3x pair <ssh-host>` | Pairs one machine over SSH. Needs `ssh <host>` to work without a password. |
+| `tr3x pair <host>` | Pairs one machine through its Rex host (a label from `rex hosts`), else over SSH, which needs `ssh <host>` to work without a password. |
 | `tr3x pair '<link>'` | Pairs with a link from T3 → Settings → Connections on that machine. |
 | `tr3x env rename <machine> <name>` | What Rex calls a machine. An empty name goes back to T3's. |
 | `tr3x env forget <machine>` | Unpairs a machine. |
@@ -46,7 +46,8 @@ lists them with the command for each instead, and `tr3x pair` does that part lat
 | `tr3x details [on\|off]` | Show each finished turn's work, or fold it to `Worked for …` (default). Alone, switches it. |
 | `tr3x reply [inline\|pane]` | Reply at the bottom of the conversation, or in a pane of its own. |
 | `tr3x sessions [merged\|per-machine]` | One T3 Code session, or one per machine. |
-| `tr3x update` | Lists updates for tr3x and each machine's T3, and installs them on Enter. `--check` only lists. |
+| `tr3x new --prompt '…' [--project p \| --folder dir] [--env machine] [--no-open]` | Starts a thread without the composer, with T3's defaults for the project, and opens its tab. `--prompt -` reads standard input. |
+| `tr3x update` | Lists updates for tr3x, each machine's T3 and the Rex apps for Mac attached here, and installs them on Enter. `--check` only lists. |
 | `tr3x updates [auto\|notify\|off]` | Whether tr3x installs its own updates, asks first, or never checks. |
 | `tr3x uninstall` | Stops sync, removes the config, closes tr3x's session. |
 
@@ -65,7 +66,7 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 |---|---|
 | `~/.local/bin/tr3x` | The binary. |
 | `~/.config/rex/tr3x.lua` | The Rex config `install` writes: starts sync, adds actions and keys. |
-| `~/.config/tr3x/settings.json` | Width, Reply, sessions, pane fading. The commands above edit it. |
+| `~/.config/tr3x/settings.json` | Width, Reply, sessions. The commands above edit it. |
 | `~/.local/state/tr3x/sync.log` | What sync did last. Read it when a tab is missing or stale. |
 | `~/.local/state/tr3x/state.json` | The session and a window per thread. Sync owns it. |
 | `~/.local/state/tr3x/updates.json` | What the last update check found. |
@@ -86,9 +87,12 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 - **Esc in an empty Reply stops the running thread.** When driving a pane with `rex send-key`,
   never send Escape unless stopping it is the point. Same for `stop --force`, which kills the
   agent.
-- **Updating T3 restarts it.** On a Mac running the T3 Code app, `tr3x update` restarts the
-  app to install, which stops running threads until T3 picks them up again. Ask the user before
+- **Updating T3 restarts it, and Rex relaunches.** On a Mac running the T3 Code app,
+  `tr3x update` restarts the app to install, which stops running threads until T3 picks them
+  up again; a Rex app with an update relaunches (its tabs keep running). Ask the user before
   running it, and never script past its question. `tr3x update --check` is always safe.
+- **Rex itself** (sessions, panes, hosts, `-S`, client actions) is the `rex` skill's job:
+  `rex skill setup` installs it. This one covers only what tr3x adds.
 - **Leave other people's sessions alone.** tr3x never touches a Rex session it didn't make;
   neither should you while working on it.
 - **A machine out of reach isn't an error to fix.** Its tabs read `(offline)` and come back on
@@ -97,8 +101,7 @@ Thread actions take `--thread <env/thread>` or a thread id on this Mac. Inside a
 ## When a tab is missing or wrong
 
 1. `tr3x doctor`. Fix any ✗ the way it says.
-2. `tail -20 ~/.local/state/tr3x/sync.log`. Each pass lists the threads it shows, in order,
-   with their markers.
+2. `tail -20 ~/.local/state/tr3x/sync.log`. Each pass lists the threads it shows, in order.
 3. A thread that's settled, snoozed or archived has no tab by design. **Find Thread…** in the
    palette, or `tr3x unsettle --thread …` / `tr3x wake --thread …`, brings it back.
 4. A thread on another machine: `tr3x envs`. Not paired means `tr3x pair <machine>`.

@@ -30,8 +30,10 @@ curl -fsSL https://raw.githubusercontent.com/macnason/tr3x/master/install.sh | s
 
 ## Attach a client
 
-In the Rex app on each device: the globe at the bottom of the sidebar → **Add Remote Host** → the
-host's address. The host then shows in the sidebar and in **Filter Hosts**.
+On the host, `rex server tailscale pair` shows a QR code for its tailnet address (the Linux
+installer shows it once). In Rex on a phone or iPad, **Pair via QR Code** and scan it. On a Mac:
+the globe at the bottom of the sidebar → **Add Remote Host** → the address it printed. The host
+then shows in the sidebar and in **Filter Hosts**.
 
 `rex hosts add` only saves an address; it doesn't attach the app. To check, run
 `rex -S <address> client ls` and look for the app.

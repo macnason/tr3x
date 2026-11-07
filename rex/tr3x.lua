@@ -231,11 +231,11 @@ rex.action{
   end,
 }
 
--- What's new for tr3x and for T3 on each machine, in a floating window that asks before it
--- installs anything.
+-- What's new for tr3x, T3 on each machine and the Rex apps here, in a floating window that asks
+-- before it installs anything.
 rex.action{
   name = "t3_update",
-  title = "Update tr3x and T3…",
+  title = "Update tr3x, T3 and Rex…",
   category = "T3 Code",
   keywords = "t3 update upgrade version release new install",
   run = function(ctx)

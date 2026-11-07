@@ -129,10 +129,7 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             .map(str::to_string);
         let status = t3client::inbox::status_label(thread, now);
         let title = thread["title"].as_str().unwrap_or("Untitled");
-        let title = match glyph(status) {
-            Some(glyph) => format!("{glyph} {title}"),
-            None => title.to_string(),
-        };
+        let title = title.to_string();
         let child = under.is_some() || alone.is_some();
         let needs_you = matches!(status, Some("Approval" | "Input"));
         let tag = |parent: &str| format!("↳ {title} · for {}", clean(parent, 24));
@@ -219,18 +216,6 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
         .map_or(0, |i| i + 1);
     out.splice(after..after, alone);
     out
-}
-
-/// The mark before a window's title for T3's status word. Labels are plain text, so it's a
-/// shape, not a colour. Work has none: Rex's spinner shows it.
-fn glyph(word: Option<&str>) -> Option<char> {
-    match word? {
-        "Approval" => Some('●'),
-        "Input" => Some('?'),
-        "Failed" | "Limited" => Some('✕'),
-        "Done" | "Woke" => Some('✓'),
-        _ => None,
-    }
 }
 
 /// A subagent gets a window only while it works or needs you. Once it finishes, its result
@@ -666,20 +651,10 @@ fn reshape(windows: &[Value], group: &Group, wants: &[Want], own_pane: bool) -> 
 
 /// The Lua that carries out `plan` in one connection, so the blocks it starts are disowned by
 /// the client that made them and size to whoever views them.
-/// Each pane runs tr3x under the name of the thread's provider, so Rex's sidebar shows that
-/// provider's glyph for the window.
 /// With `own_pane`, each window has Reply in a pane of its own under the conversation.
-pub fn script(
-    plan: &Plan,
-    exe: &std::path::Path,
-    configs: &HashMap<String, Value>,
-    own_pane: bool,
-) -> String {
+pub fn script(plan: &Plan, exe: &std::path::Path, own_pane: bool) -> String {
     let pane = |want: &Want| {
-        let config = configs.get(&want.thread.env);
-        let program =
-            crate::icons::as_program(exe, crate::icons::driver_of(config, &want.instance));
-        let program = program.to_string_lossy();
+        let program = exe.to_string_lossy();
         let key = want.key();
         json!({
             "thread": key,
@@ -799,11 +774,17 @@ fn new_argv(exe: &str, env: Option<&str>, welcome: bool) -> Value {
 /// Turns each window made in the session by Rex's New Tab, its + button or the palette, which
 /// is one unlabelled shell, into a new-thread composer. The shell gives way to it in place, so
 /// the window keeps its spot and focus. tr3x's own windows are labelled as they are made.
+/// Prints `closed` when a window closes, so sync settles its thread at once rather than on its
+/// next pass.
 pub fn watcher_script(exe: &str, env: Option<&str>) -> String {
     let argv = new_argv(exe, env, false);
     format!(
         r#"local argv = rex.json.decode({argv})
 local term = "com.superlogical.terminal.shell"
+rex.on("window_closed", function(ctx, ev)
+  print("closed")
+  io.stdout:flush()
+end)
 rex.on("window_created", function(ctx, ev)
   local view = rex.session.view{{}}
   for _, w in ipairs((view and view.windows) or {{}}) do
@@ -843,6 +824,9 @@ return {{}}
     )
 }
 
+/// A window closed in a session sync watches: reconcile now, so its thread settles at once.
+static CLOSED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub struct Syncer {
     pub rex: Rex,
     pub exe: PathBuf,
@@ -853,8 +837,6 @@ pub struct Syncer {
     pub first: bool,
     /// The `rex do` scripts that turn a New Tab in each session into a new thread, by session.
     pub watchers: HashMap<String, tokio::process::Child>,
-    /// Each machine's server config, for each provider instance's driver.
-    pub configs: HashMap<String, Value>,
     /// Threads whose window the user closed since the last reconcile, for `follow` to settle.
     pub closed: Vec<ThreadRef>,
 }
@@ -915,7 +897,7 @@ impl Syncer {
             .args(crate::rex::NO_AUTOSTART)
             .args(["do", "-s", session, "-"])
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn();
@@ -926,6 +908,17 @@ impl Syncer {
                     tokio::spawn(async move {
                         use tokio::io::AsyncWriteExt;
                         let _ = stdin.write_all(script.as_bytes()).await;
+                    });
+                }
+                if let Some(stdout) = child.stdout.take() {
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut lines = tokio::io::BufReader::new(stdout).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            if line.trim() == "closed" {
+                                CLOSED.notify_one();
+                            }
+                        }
                     });
                 }
                 self.watchers.insert(session.to_string(), child);
@@ -1007,7 +1000,7 @@ impl Syncer {
         }
         let result = self
             .rex
-            .lua(&session, &script(&plan, &self.exe, &self.configs, own_pane))
+            .lua(&session, &script(&plan, &self.exe, own_pane))
             .await?;
         let group = self.state.groups.entry(spec.key.clone()).or_default();
         for (key, id) in result["created"].as_object().into_iter().flatten() {
@@ -1044,8 +1037,6 @@ struct Track {
     down_since: Option<Instant>,
     /// Why, as last said, so the log says it once.
     reason: String,
-    /// The server config was asked for.
-    configured: bool,
     /// When to subscribe again after T3 refused the subscription.
     retry_at: Option<Instant>,
     /// The `Env` the subscription connects through, which holds the machine's descriptor.
@@ -1182,17 +1173,10 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
     if log {
         log_to_file()?;
     }
-    tokio::spawn(crate::fade::follow());
     // Once a day: tr3x's and each machine's T3's updates. On `auto`, tr3x installs its own.
     tokio::spawn(crate::update::follow());
     // Pictures sent to this machine with Taildrop go to the thread in front.
     tokio::spawn(crate::taildrop::follow());
-    // Other machines join with `curl …/join | sh`; off a tailnet there's nothing to listen on.
-    tokio::spawn(async {
-        if let Err(e) = t3client::join::serve(t3::hub().store).await {
-            eprintln!("tr3x: not taking joins: {e:#}");
-        }
-    });
     let mut pause = 2;
     loop {
         let started = Instant::now();
@@ -1234,7 +1218,6 @@ fn follow_machines(
                     track.env = Some(env.clone());
                     // Replacing the forwarder ends the old subscription.
                     track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
-                    track.configured = false;
                     track.retry_at = None;
                 }
             }
@@ -1283,14 +1266,12 @@ async fn follow(
         disk: Disk::new(found),
         first,
         watchers: HashMap::new(),
-        configs: HashMap::new(),
         closed: Vec::new(),
     };
     if !home.is_empty() {
         syncer.persist()?;
     }
     let (tx, mut events) = tokio::sync::mpsc::channel(32);
-    let (config_tx, mut configs) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
     let mut tracks: BTreeMap<String, Track> = BTreeMap::new();
     let started = Instant::now();
     follow_machines(&mut tracks, hub.envs(), &tx, started);
@@ -1347,11 +1328,9 @@ async fn follow(
                 take(env, event, &mut tracks);
                 dirty = true;
             }
-            Some((env, config)) = configs.recv() => {
-                syncer.configs.insert(env, config);
-            }
             _ = tick.tick() => dirty = true,
             _ = wake.recv() => dirty = true,
+            _ = CLOSED.notified() => dirty = true,
             _ = tokio::time::sleep_until(next_reconcile), if dirty => {},
         }
         // Drain a burst before acting, so a snapshot's items reconcile once.
@@ -1392,15 +1371,6 @@ async fn follow(
                 track.retry_at = None;
                 // The refused subscription is over; this replaces it.
                 track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
-            }
-            if track.shell.synchronized && !track.configured {
-                track.configured = true;
-                let (env, config_tx) = (env.clone(), config_tx.clone());
-                tokio::spawn(async move {
-                    if let Ok(config) = env.server_config().await {
-                        let _ = config_tx.send((env.id().to_string(), config));
-                    }
-                });
             }
         }
         // Nothing to say until some machine has caught up once.
@@ -1620,6 +1590,7 @@ mod tests {
             // Nothing answers here: the subscriptions only retry.
             origins: vec!["http://127.0.0.1:9".into()],
             ssh: None,
+            rex: None,
             via: Via::Link,
             version: String::new(),
         };
@@ -1631,8 +1602,6 @@ mod tests {
         let (tx, _events) = tokio::sync::mpsc::channel(32);
         let mut tracks = BTreeMap::new();
         follow_machines(&mut tracks, hub.envs(), &tx, Instant::now());
-        tracks.get_mut("a").unwrap().configured = true;
-        tracks.get_mut("b").unwrap().configured = true;
 
         registry.upsert(machine("c"));
         registry
@@ -1648,9 +1617,7 @@ mod tests {
         assert_eq!(followed, vec!["c".to_string()]);
         let env_of = |id: &str| tracks[id].env.clone().unwrap();
         assert!(Arc::ptr_eq(&env_of("a"), &hub.get("a").unwrap()));
-        assert!(tracks["a"].configured);
         assert!(Arc::ptr_eq(&env_of("b"), &hub2.get("b").unwrap()));
-        assert!(!tracks["b"].configured);
         assert!(hub2.envs().iter().all(|e| Arc::ptr_eq(e, &env_of(e.id()))));
     }
 
@@ -2085,7 +2052,7 @@ mod tests {
             "a failure under a closed thread is history"
         );
         let asks = wants.iter().find(|w| w.thread.thread == "asks").unwrap();
-        assert_eq!(asks.label, "↳ ● Audit tests · for Refactor sync");
+        assert_eq!(asks.label, "↳ Audit tests · for Refactor sync");
         assert_eq!(asks.place, Place::Attention);
         assert!(asks.parent.is_none() && asks.child && asks.needs_you);
     }
@@ -2225,29 +2192,9 @@ mod tests {
         assert_eq!(label("o/a"), "a · studio");
         assert_eq!(
             label("o/x"),
-            "● x · studio",
-            "an approval's mark leads the label"
+            "x · studio",
+            "Rex's own dot shows the approval, not the label"
         );
-    }
-
-    #[test]
-    fn status_marks() {
-        let marks: Vec<Option<char>> = [
-            "Approval", "Input", "Failed", "Limited", "Done", "Woke", "Working", "Goal", "Waiting",
-        ]
-        .into_iter()
-        .map(|w| glyph(Some(w)))
-        .collect();
-        let want = [
-            Some('●'),
-            Some('?'),
-            Some('✕'),
-            Some('✕'),
-            Some('✓'),
-            Some('✓'),
-        ];
-        assert_eq!(&marks[..6], &want);
-        assert!(marks[6..].iter().all(Option::is_none) && glyph(None).is_none());
     }
 
     #[test]
@@ -2326,6 +2273,7 @@ mod tests {
             alias: None,
             origins: vec![origin.into()],
             ssh: None,
+            rex: None,
             via: Via::Link,
             version: String::new(),
         };
@@ -2504,7 +2452,6 @@ mod tests {
             state,
             first: false,
             watchers: HashMap::new(),
-            configs: HashMap::new(),
             closed: Vec::new(),
         };
         syncer.persist().unwrap();

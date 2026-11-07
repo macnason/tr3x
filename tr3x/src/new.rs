@@ -221,7 +221,7 @@ fn folder_root(typed: &str) -> Result<String, String> {
 /// The settings T3 starts a new thread in this project with: the project's default model,
 /// else the environment's, else the model of the project's latest thread, else the first
 /// enabled model. The runtime mode is the project's or environment's default.
-fn defaults(config: &Value, project: &Value, recent: Option<&Value>) -> Settings {
+pub(crate) fn defaults(config: &Value, project: &Value, recent: Option<&Value>) -> Settings {
     let selection = [
         &project["defaultModelSelection"],
         &config["settings"]["defaultModelSelection"],
@@ -253,7 +253,7 @@ fn defaults(config: &Value, project: &Value, recent: Option<&Value>) -> Settings
 
 /// Whether new threads in this project start in a worktree: the project's override, else the
 /// environment's setting, else the project folder, as T3 resolves `defaultThreadEnvMode`.
-fn starts_in_worktree(config: &Value, project: &Value) -> bool {
+pub(crate) fn starts_in_worktree(config: &Value, project: &Value) -> bool {
     let id = project["id"].as_str().unwrap_or_default();
     let mode = project["defaultThreadEnvMode"]
         .as_str()
@@ -1337,7 +1337,7 @@ async fn connect(env: &str) -> Result<(Arc<Env>, Value, ShellState)> {
 
 /// Projects with the most recent work first, as T3's picker lists them, and each project's
 /// most recent thread, for its model.
-fn projects_by_recent(shell: &ShellState) -> (Vec<Value>, HashMap<String, Value>) {
+pub(crate) fn projects_by_recent(shell: &ShellState) -> (Vec<Value>, HashMap<String, Value>) {
     let mut recent: HashMap<String, Value> = HashMap::new();
     for t in &shell.threads {
         if t["lineage"]["relationshipToParent"] == "subagent" {
@@ -1553,9 +1553,7 @@ pub async fn run(welcome: bool, env: Option<String>) -> Result<()> {
         .and_then(|p| p["workspaceRoot"].as_str())
         .filter(|_| ui.client.is_local())
         .map(str::to_string);
-    // The pane runs under the provider's name, so Rex's sidebar shows its glyph.
-    let driver = icons::driver_of(Some(&ui.config), &ui.settings.instance).to_string();
-    let program = icons::as_program(&icons::real_exe(), &driver);
+    let program = icons::real_exe();
     if crate::reply::own_pane()
         && let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await
     {
@@ -1632,6 +1630,7 @@ mod tests {
             alias: None,
             origins: vec!["http://127.0.0.1:9".into()],
             ssh: None,
+            rex: None,
             via: t3client::store::Via::Link,
             version: String::new(),
         };

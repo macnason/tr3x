@@ -53,6 +53,17 @@ pub struct Embed {
     pub height: u64,
 }
 
+impl Media {
+    /// The page an `html_render` embed shows, when it's on this Mac.
+    pub fn html_file(&self, attachment: &str) -> Option<PathBuf> {
+        let file = self
+            .attachments
+            .as_ref()?
+            .join(format!("{attachment}.html"));
+        file.is_file().then_some(file)
+    }
+}
+
 /// The `html_render` calls in a thread, by item id.
 pub fn embeds(state: &ThreadState) -> HashMap<String, Embed> {
     let mut out = HashMap::new();

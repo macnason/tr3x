@@ -66,6 +66,7 @@ impl Hub {
                     alias: None,
                     origins: Vec::new(),
                     ssh: None,
+                    rex: None,
                     via: Via::Local,
                     version: String::new(),
                 },
@@ -193,6 +194,7 @@ mod tests {
             alias: None,
             origins: vec![format!("http://{id}:3773")],
             ssh: None,
+            rex: None,
             via: Via::Link,
             version: String::new(),
         };
@@ -276,6 +278,7 @@ mod tests {
             alias: None,
             origins: vec![format!("http://{id}:3773")],
             ssh: None,
+            rex: None,
             via: Via::Link,
             version: String::new(),
         };

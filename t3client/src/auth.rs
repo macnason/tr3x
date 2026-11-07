@@ -531,6 +531,7 @@ t3run() {{
 fn pairing_script(label: &str) -> String {
     ssh_script(&format!(
         r#"printf 'ENV %s\n' "$(cat "$H/userdata/environment-id" 2>/dev/null)"
+printf 'HOST %s\n' "$(hostname 2>/dev/null)"
 printf 'RUNTIME %s\n' "$(tr -d '\n' < "$H/userdata/server-runtime.json" 2>/dev/null)"
 printf 'PAIRING %s\n' "$(t3run {} | tr -d '\n')""#,
         shell_words(&pairing_args(label))
@@ -598,6 +599,108 @@ async fn ssh_run(host: &str, script: String) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// The `rex` tr3x drives, which runs scripts on Rex hosts. Set once at startup.
+static REX_BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Tells pairing which `rex` reaches Rex hosts.
+pub fn use_rex(bin: std::path::PathBuf) {
+    let _ = REX_BIN.set(bin);
+}
+
+pub(crate) fn rex_path() -> std::path::PathBuf {
+    rex_bin()
+}
+
+fn rex_bin() -> std::path::PathBuf {
+    REX_BIN
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from("rex"))
+}
+
+/// `script` as a Lua long string: the shortest `[==[ … ]==]` it can't close early.
+fn lua_long_string(script: &str) -> String {
+    let mut level = 1;
+    while script.contains(&format!("]{}]", "=".repeat(level))) {
+        level += 1;
+    }
+    let eq = "=".repeat(level);
+    format!("[{eq}[\n{script}]{eq}]")
+}
+
+/// The Lua `rex do` runs on a host: `script` through `sh` there, as the account Rex's server
+/// runs as, and what it printed.
+fn rex_lua(script: &str, timeout: u64) -> String {
+    format!(
+        "local r, err = rex.exec({{ \"sh\" }}, {{ stdin = {}, timeout = {timeout} }})\n\
+         if not r then return {{ error = err }} end\n\
+         return {{ ok = r.ok, code = r.code, stdout = r.stdout, stderr = r.stderr }}\n",
+        lua_long_string(script)
+    )
+}
+
+/// Runs `script` on the Rex host labelled `host` (`rex -S host do`), on the Rex server there.
+/// No SSH, no keys: Rex's own connection to that host.
+async fn rex_run(host: &str, script: String, timeout: u64) -> Result<String> {
+    if host.starts_with('-') || host.chars().any(char::is_control) {
+        bail!("{host:?} isn't a Rex host");
+    }
+    let mut child = tokio::process::Command::new(rex_bin())
+        .args(["--autostart=false", "-S", host, "do", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("couldn't run rex")?;
+    let lua = rex_lua(&script, timeout);
+    let output = tokio::time::timeout(Duration::from_secs(timeout + 10), async {
+        if let Some(mut pipe) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            pipe.write_all(lua.as_bytes()).await?;
+        }
+        child.wait_with_output().await
+    })
+    .await
+    .with_context(|| format!("Rex host {host} took over {timeout} seconds"))??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Rex host {host} failed: {}",
+            stderr.trim().lines().last().unwrap_or("rex failed")
+        );
+    }
+    read_rex_run(host, &String::from_utf8_lossy(&output.stdout))
+}
+
+fn read_rex_run(host: &str, stdout: &str) -> Result<String> {
+    let result: Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("Rex host {host} answered {stdout:?}"))?;
+    if let Some(err) = result["error"].as_str() {
+        bail!("Rex host {host} couldn't run sh: {err}");
+    }
+    if result["ok"] != true {
+        let stderr = result["stderr"].as_str().unwrap_or_default().trim();
+        bail!(
+            "on Rex host {host}: {}",
+            stderr.lines().last().unwrap_or("the script failed")
+        );
+    }
+    Ok(result["stdout"].as_str().unwrap_or_default().to_string())
+}
+
+/// Whether the Rex host labelled `host` runs a script for us now.
+pub async fn rex_reaches(host: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(8), rex_run(host, "true".into(), 5))
+        .await
+        .is_ok_and(|r| r.is_ok())
+}
+
+/// A pairing code from the T3 on the Rex host labelled `host`, through Rex.
+pub async fn rex_code(host: &str, label: &str) -> Result<Minted> {
+    read_minted(&rex_run(host, pairing_script(label), 60).await?)
+}
+
 /// A pairing code from `host`'s T3, over SSH.
 pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
     let stdout = ssh_run(host, pairing_script(label)).await?;
@@ -615,6 +718,8 @@ pub async fn ssh_code(host: &str, label: &str) -> Result<SshPairing> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Minted {
     pub environment_id: Option<String>,
+    /// The machine's own name for itself, which the tailnet usually answers to.
+    pub host: Option<String>,
     pub port: Option<u16>,
     pub code: String,
 }
@@ -634,25 +739,17 @@ pub fn read_minted(stdout: &str) -> Result<Minted> {
         .and_then(|p| u16::try_from(p).ok());
     Ok(Minted {
         environment_id: line("ENV "),
+        host: line("HOST "),
         port,
         code: read_pairing(&line("PAIRING ").unwrap_or_default())?,
     })
 }
 
-/// The script `curl …/join | sh` runs on a machine joining Rex: the pairing script, its
-/// answer posted back to `join_url`, and what Rex said printed.
-pub fn join_script(label: &str, join_url: &str) -> String {
-    format!(
-        "#!/bin/sh\n# Pairs this machine's T3 with {label}.\n(\n{}) | curl -sS --fail-with-body --data-binary @- {}\n",
-        pairing_script(label),
-        shell_words(&[join_url.to_string()])
-    )
-}
-
-/// Where a machine's `t3` runs: here, or over SSH.
+/// Where a machine's `t3` runs: here, over SSH, or through its Rex host.
 pub enum Cli<'a> {
     Local(&'a Local),
     Ssh(&'a str),
+    Rex(&'a str),
 }
 
 impl Cli<'_> {
@@ -660,6 +757,14 @@ impl Cli<'_> {
         match self {
             Cli::Ssh(host) => {
                 ssh_run(host, ssh_script(&format!("t3run {}", shell_words(args)))).await
+            }
+            Cli::Rex(host) => {
+                rex_run(
+                    host,
+                    ssh_script(&format!("t3run {}", shell_words(args))),
+                    60,
+                )
+                .await
             }
             Cli::Local(local) => {
                 let t3 = T3Command::local(local)?;
@@ -815,6 +920,65 @@ pub async fn ssh_hostname(host: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_goes_to_rex_as_a_long_string_it_cant_close() {
+        assert_eq!(lua_long_string("echo hi"), "[=[\necho hi]=]");
+        assert_eq!(lua_long_string("a ]=] b"), "[==[\na ]=] b]==]");
+        let lua = rex_lua("printf '%s' \"$HOME\"", 60);
+        assert!(lua.contains(
+            "rex.exec({ \"sh\" }, { stdin = [=[\nprintf '%s' \"$HOME\"]=], timeout = 60 })"
+        ));
+    }
+
+    #[test]
+    fn reads_what_a_rex_host_ran() {
+        let ok = r#"{"code":0,"ok":true,"stderr":"","stdout":"ENV env-1\n"}"#;
+        assert_eq!(read_rex_run("studio", ok).unwrap(), "ENV env-1\n");
+        let failed =
+            r#"{"code":3,"ok":false,"stderr":"tr3x: no t3 on this machine\n","stdout":""}"#;
+        assert_eq!(
+            read_rex_run("studio", failed).unwrap_err().to_string(),
+            "on Rex host studio: tr3x: no t3 on this machine"
+        );
+        let never = r#"{"error":"sh: not found"}"#;
+        assert!(
+            read_rex_run("studio", never)
+                .unwrap_err()
+                .to_string()
+                .contains("couldn't run sh")
+        );
+    }
+
+    /// Pairs this machine's T3 through a Rex host, end to end, into a throwaway store, then
+    /// forgets it through the same host. `TR3X_LIVE_REX_HOST` names the host (a label from
+    /// `rex hosts`, or a server address such as this machine's socket).
+    #[tokio::test]
+    #[ignore = "needs a Rex host running T3"]
+    async fn live_pairing_through_a_rex_host() {
+        let host = std::env::var("TR3X_LIVE_REX_HOST").expect("TR3X_LIVE_REX_HOST");
+        if let Ok(bin) = std::env::var("TR3X_REX") {
+            use_rex(bin.into());
+        }
+        assert!(rex_reaches(&host).await, "{host} doesn't run scripts");
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::new(dir.path());
+        let machine = crate::pair::pair(&store, crate::pair::How::Rex(host.clone()), None)
+            .await
+            .unwrap();
+        println!(
+            "paired {} ({}) at {:?}",
+            machine.name(),
+            machine.id,
+            machine.origins
+        );
+        assert_eq!(machine.via, crate::store::Via::Rex);
+        assert_eq!(machine.rex.as_deref(), Some(host.as_str()));
+        assert!(store.credential(&machine.id).is_some());
+        let forgot = crate::pair::forget(&store, &machine).await.unwrap();
+        println!("forgot: {forgot:?}");
+        assert_eq!(forgot, crate::pair::Forgot::Revoked);
+    }
 
     #[test]
     fn every_link_form_t3_accepts() {

@@ -13,6 +13,11 @@
 //! it restarts (`server.commitDesktopUpdate`); a machine running T3's background service hands
 //! it to its launcher. A plain `t3 serve` can't be updated from outside.
 //!
+//! The same command checks each Rex app for Mac attached to this machine's Rex server, with the
+//! app's own `client.update.check`, and installs what it finds with `client.update.install`,
+//! last, since the app relaunches. Tabs keep running on the server through it. Rex's Remote
+//! Control setting has to be on in that app.
+//!
 //! What the checks found is in `updates.json` in tr3x's state directory, for Reply to read.
 
 use std::collections::BTreeMap;
@@ -588,6 +593,25 @@ async fn run_inner(check_only: bool, auto: bool) -> Result<()> {
             Err(_) => println!("  ✗ {name:<w$} didn't answer", w = NAME),
         }
     }
+    let rex = crate::rex::Rex::find();
+    let mut rex_todo: Vec<crate::rex::MacApp> = Vec::new();
+    for app in rex.mac_apps().await.unwrap_or_default() {
+        let name = format!("Rex · {}", app.name);
+        match rex.app_action(&app.id, "client.update.check").await {
+            Ok(found) => match crate::rex::rex_update(&found) {
+                None => println!("  ✓ {name:<w$} {}", crate::rex::rex_build(&found), w = NAME),
+                Some(to) => {
+                    println!(
+                        "  ↑ {name:<w$} {} → {to}",
+                        crate::rex::rex_build(&found),
+                        w = NAME
+                    );
+                    rex_todo.push(app);
+                }
+            },
+            Err(e) => println!("  · {name:<w$} {e:#}", w = NAME),
+        }
+    }
     if let Some(r) = &release {
         notes.tr3x = Some(r.version.clone());
     }
@@ -608,7 +632,7 @@ async fn run_inner(check_only: bool, auto: bool) -> Result<()> {
     if check_only {
         return Ok(());
     }
-    if tr3x_update.is_none() && todo.is_empty() {
+    if tr3x_update.is_none() && todo.is_empty() && rex_todo.is_empty() {
         let behind = notes.machines.values().any(Machine::behind);
         println!(
             "\n{}",
@@ -641,6 +665,12 @@ async fn run_inner(check_only: bool, auto: bool) -> Result<()> {
         println!("  … tr3x {}", release.version);
         install(release).await?;
         println!("  ✓ tr3x: {}", release.version);
+    }
+    for app in rex_todo {
+        match rex.app_action(&app.id, "client.update.install").await {
+            Ok(_) => println!("  ✓ Rex · {}: installing, then it relaunches", app.name),
+            Err(e) => println!("  ✗ Rex · {}: {e:#}", app.name),
+        }
     }
     Ok(())
 }
@@ -747,7 +777,7 @@ async fn commit(env: &t3client::env::Env, token: &str, target: &str) -> Result<(
     bail!("T3 Code hasn't come back after three minutes")
 }
 
-/// `/update`: **Update tr3x and T3…** in a floating window over the thread `block` is in.
+/// `/update`: **Update tr3x, T3 and Rex…** in a floating window over the thread `block` is in.
 pub async fn open_layer(block: &str) -> Result<()> {
     let rex = crate::rex::Rex::find();
     let session = std::env::var("REX_SESSION").context("not in a Rex session")?;

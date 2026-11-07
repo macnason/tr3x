@@ -24,8 +24,11 @@ pub enum Via {
     Ssh,
     /// A pairing link the user pasted. Pairing again takes another.
     Link,
-    /// The machine joined with `curl …/join | sh`. Pairing again takes running it again.
+    /// Joined with `curl …/join | sh`, which tr3x no longer serves. Pairing again takes a link,
+    /// or the machine's Rex host or SSH.
     Join,
+    /// Through the Rex server on that machine (`rex -S <host>`), running its T3 CLI there.
+    Rex,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +47,9 @@ pub struct Machine {
     /// The SSH host it was paired through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
+    /// The Rex host (a label from `rex hosts`) it was paired through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rex: Option<String>,
     pub via: Via,
     #[serde(default)]
     pub version: String,
@@ -328,6 +334,7 @@ mod tests {
             alias: None,
             origins: vec![format!("http://{label}:3773")],
             ssh: None,
+            rex: None,
             via: Via::Link,
             version: String::new(),
         }

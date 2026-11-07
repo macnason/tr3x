@@ -241,7 +241,7 @@ pub const ALL: &[Action] = &[
         ..NONE
     },
     Action {
-        slash: slash("update", "Update tr3x and T3", None),
+        slash: slash("update", "Update tr3x, T3 and Rex", None),
         ..NONE
     },
     Action {
