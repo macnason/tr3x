@@ -541,6 +541,19 @@ fn hashed(text: &str) -> String {
     format!("t3#{hash:016x}")
 }
 
+/// A tr3x window's conversation pane: the block labelled with its tag.
+fn conversation(window: &Value) -> Option<&Value> {
+    window["layers"]
+        .as_array()?
+        .iter()
+        .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
+        .find(|b| {
+            b["label"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("t3:") || l.starts_with("t3#"))
+        })
+}
+
 /// Each window's tag, from its conversation pane's block label: what follows `t3:`, or a
 /// whole `t3#` tag.
 fn tagged(windows: &[Value]) -> Vec<(String, String)> {
@@ -548,19 +561,19 @@ fn tagged(windows: &[Value]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|w| {
             let id = w["window_id"].as_str()?;
-            let thread = w["layers"]
-                .as_array()?
-                .iter()
-                .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
-                .find_map(|b| {
-                    let label = b["label"].as_str()?;
-                    label
-                        .strip_prefix("t3:")
-                        .or(label.starts_with("t3#").then_some(label))
-                })?;
+            let label = conversation(w)?["label"].as_str()?;
+            let thread = label.strip_prefix("t3:").unwrap_or(label);
             Some((id.to_string(), thread.to_string()))
         })
         .collect()
+}
+
+/// Whether a pane's `process` answer has tr3x running in it, by the program's file name
+/// against `exe`'s, or `None` when it doesn't say. Rex can bring a session back after a
+/// restart with a shell where the conversation was, under the same label.
+fn runs_tr3x(process: &Value, exe: &std::path::Path) -> Option<bool> {
+    let path = process["child"]["path"].as_str()?;
+    Some(std::path::Path::new(path).file_name() == exe.file_name())
 }
 
 /// The `env/thread` a tag names, among `known` and the machines `envs`. A tag from before
@@ -634,8 +647,14 @@ fn adopt(
 }
 
 /// The windows in `group` whose shape isn't the one the setting asks for, Reply in a pane of
-/// its own or not, with what to run in their place.
-fn reshape(windows: &[Value], group: &Group, wants: &[Want], own_pane: bool) -> Vec<Rebuild> {
+/// its own or not, or whose conversation pane is `dead`, with what to run in their place.
+fn reshape(
+    windows: &[Value],
+    group: &Group,
+    wants: &[Want],
+    own_pane: bool,
+    dead: &HashSet<String>,
+) -> Vec<Rebuild> {
     group
         .windows
         .iter()
@@ -649,7 +668,7 @@ fn reshape(windows: &[Value], group: &Group, wants: &[Want], own_pane: bool) -> 
                 .filter(|l| l["kind"] != "floating")
                 .flat_map(|l| l["blocks"].as_array().into_iter().flatten())
                 .collect();
-            if crate::reply::shaped(window, own_pane) {
+            if !dead.contains(&w.window_id) && crate::reply::shaped(window, own_pane) {
                 return None;
             }
             Some(Rebuild {
@@ -857,6 +876,8 @@ pub struct Syncer {
     pub configs: HashMap<String, Value>,
     /// Threads whose window the user closed since the last reconcile, for `follow` to settle.
     pub closed: Vec<ThreadRef>,
+    /// Conversation panes seen running tr3x, by session, so each is asked only once.
+    pub verified: HashMap<String, HashSet<String>>,
 }
 
 /// A session tr3x keeps: the merged one, or one machine's.
@@ -949,6 +970,47 @@ impl Syncer {
         Ok(())
     }
 
+    /// The windows in `ours` whose conversation pane runs something other than tr3x. Each
+    /// pane is asked once: one seen running tr3x is remembered, so a pass with nothing new
+    /// asks Rex nothing more. A pane that can't say is asked again next time.
+    async fn dead(
+        &mut self,
+        session: &str,
+        windows: &[Value],
+        ours: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut dead = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut verified = self.verified.remove(session).unwrap_or_default();
+        for w in windows {
+            let (Some(id), Some(block)) = (
+                w["window_id"].as_str(),
+                conversation(w).and_then(|b| b["block_id"].as_str()),
+            ) else {
+                continue;
+            };
+            seen.insert(block.to_string());
+            if !ours.contains(id) || verified.contains(block) {
+                continue;
+            }
+            let Ok(process) = self.rex.block_method(session, block, "process").await else {
+                continue;
+            };
+            match runs_tr3x(&process, &self.exe) {
+                Some(true) => {
+                    verified.insert(block.to_string());
+                }
+                Some(false) => {
+                    dead.insert(id.to_string());
+                }
+                None => {}
+            }
+        }
+        verified.retain(|b| seen.contains(b));
+        self.verified.insert(session.to_string(), verified);
+        dead
+    }
+
     /// Brings one session in line with `wants`. Returns whether anything changed.
     pub async fn reconcile(
         &mut self,
@@ -971,6 +1033,19 @@ impl Syncer {
         let windows = view["windows"].as_array().unwrap_or(&none);
         let group = self.state.groups.entry(spec.key.clone()).or_default();
         let mut extra = adopt(windows, group, known, envs, home);
+        let ours: HashSet<String> = group
+            .windows
+            .values()
+            .map(|w| w.window_id.clone())
+            .collect();
+        let dead = self.dead(&session, windows, &ours).await;
+        if !dead.is_empty() {
+            eprintln!(
+                "tr3x: {} conversation pane(s) had something else running in them; starting them again",
+                dead.len()
+            );
+        }
+        let group = self.state.groups.entry(spec.key.clone()).or_default();
         let present: Vec<(String, String)> = windows
             .iter()
             .filter_map(|w| {
@@ -999,7 +1074,7 @@ impl Syncer {
         plan.close.append(&mut extra);
         let closing = plan.close.clone();
         let own_pane = crate::reply::own_pane();
-        plan.rebuild = reshape(windows, group, wants, own_pane);
+        plan.rebuild = reshape(windows, group, wants, own_pane, &dead);
         plan.rebuild.retain(|r| !closing.contains(&r.window));
         if plan.is_empty() {
             self.persist()?;
@@ -1285,6 +1360,7 @@ async fn follow(
         watchers: HashMap::new(),
         configs: HashMap::new(),
         closed: Vec::new(),
+        verified: HashMap::new(),
     };
     if !home.is_empty() {
         syncer.persist()?;
@@ -1882,15 +1958,48 @@ mod tests {
                 alone: None,
             })
             .collect();
-        let rebuild = reshape(&windows, &group, &wants, false);
+        let rebuild = reshape(&windows, &group, &wants, false, &HashSet::new());
         assert_eq!(rebuild.len(), 1);
         assert_eq!(rebuild[0].window, "w-a");
         assert_eq!(rebuild[0].blocks, vec!["b1".to_string(), "b2".to_string()]);
         assert_eq!(rebuild[0].want.key(), "home-env/a");
-        let rebuild = reshape(&windows, &group, &wants, true);
+        let rebuild = reshape(&windows, &group, &wants, true, &HashSet::new());
         assert_eq!(rebuild.len(), 1);
         assert_eq!(rebuild[0].window, "w-b");
         assert_eq!(rebuild[0].blocks, vec!["b9".to_string()]);
+    }
+
+    #[test]
+    fn a_pane_runs_tr3x_by_its_program_not_its_label() {
+        let exe = std::path::Path::new("/Users/me/.local/bin/tr3x");
+        let running = |path: &str| json!({"last_exit": null, "child": {"name": "x", "path": path}});
+        // Started under a provider's name, the program is still tr3x.
+        assert_eq!(
+            runs_tr3x(&running("/Users/me/.local/bin/tr3x"), exe),
+            Some(true)
+        );
+        // What Rex leaves after a restart: a shell under the conversation's label.
+        assert_eq!(runs_tr3x(&running("/bin/zsh"), exe), Some(false));
+        assert_eq!(
+            runs_tr3x(&json!({"last_exit": null, "child": null}), exe),
+            None
+        );
+        assert_eq!(runs_tr3x(&Value::Null, exe), None);
+    }
+
+    #[test]
+    fn a_window_with_a_dead_conversation_is_rebuilt_in_place() {
+        let mut group = Group::default();
+        group.windows.insert("home-env/a".into(), win("w-a", "A"));
+        let windows = vec![tagged_window("w-a", "home-env/a")];
+        let wants = vec![want("home-env/a", "A")];
+        // Already the shape the setting asks for: nothing to do while tr3x runs in it.
+        assert!(reshape(&windows, &group, &wants, true, &HashSet::new()).is_empty());
+        let dead: HashSet<String> = ["w-a".to_string()].into();
+        let rebuild = reshape(&windows, &group, &wants, true, &dead);
+        assert_eq!(rebuild.len(), 1);
+        assert_eq!(rebuild[0].window, "w-a");
+        assert_eq!(rebuild[0].blocks, vec!["b1".to_string(), "b2".to_string()]);
     }
 
     #[test]
@@ -2415,7 +2524,7 @@ mod tests {
                 &bin,
                 "#!/bin/sh\nd=$(dirname \"$0\")\necho \"$*\" >> \"$d/calls\"\n\
                  case \"$2\" in\n ls) cat \"$d/ls.json\";;\n session) cat \"$d/inspect.json\";;\n \
-                 do) cat > /dev/null;;\nesac\n",
+                 do) cat > /dev/null;;\n block) cat \"$d/process.json\" 2>/dev/null;;\nesac\n",
             )
             .unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2470,6 +2579,54 @@ mod tests {
             .unwrap()
     }
 
+    /// Rex brought the session back after a restart with a shell where the conversation was.
+    /// The window is rebuilt where it is, not settled as closed, and a pane seen running tr3x
+    /// isn't asked about again.
+    #[tokio::test]
+    async fn a_shell_left_under_a_conversation_label_is_replaced() {
+        let rex = FakeRex::new(json!([FakeRex::window("w9", "e/a")]));
+        let mut state = State {
+            version: 2,
+            ..State::default()
+        };
+        let mut group = Group {
+            session_id: Some("s1".into()),
+            ..Group::default()
+        };
+        group.windows.insert("e/a".into(), win("w9", "A"));
+        state.groups.insert(String::new(), group);
+        let mut syncer = Syncer {
+            rex: rex.bin(),
+            exe: PathBuf::from("/opt/tr3x/tr3x"),
+            disk: Disk::at(rex.dir.path().join("state.json"), State::default()),
+            state,
+            first: false,
+            watchers: HashMap::new(),
+            configs: HashMap::new(),
+            closed: Vec::new(),
+            verified: HashMap::new(),
+        };
+        let process = rex.dir.path().join("process.json");
+        let calls = || std::fs::read_to_string(rex.dir.path().join("calls")).unwrap_or_default();
+        let count = |what: &str| calls().lines().filter(|l| l.contains(what)).count();
+
+        std::fs::write(&process, json!({"child": {"path": "/bin/zsh"}}).to_string()).unwrap();
+        // Rebuilt: a pass with something to ask Rex for.
+        assert!(reconcile_once(&mut syncer).await);
+        assert!(syncer.closed.is_empty());
+        assert_eq!(syncer.state.groups[""].windows["e/a"].window_id, "w9");
+
+        std::fs::write(
+            &process,
+            json!({"child": {"path": "/opt/tr3x/tr3x"}}).to_string(),
+        )
+        .unwrap();
+        assert!(!reconcile_once(&mut syncer).await);
+        let asked = count("block call");
+        assert!(!reconcile_once(&mut syncer).await);
+        assert_eq!(count("block call"), asked);
+    }
+
     fn saved_windows(file: &std::path::Path) -> Vec<String> {
         let on_disk: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
         on_disk["groups"][""]["windows"]
@@ -2506,6 +2663,7 @@ mod tests {
             watchers: HashMap::new(),
             configs: HashMap::new(),
             closed: Vec::new(),
+            verified: HashMap::new(),
         };
         syncer.persist().unwrap();
         assert!(saved_windows(&file).is_empty());
