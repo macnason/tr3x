@@ -1,0 +1,1141 @@
+# Rex's documented surface (Preview 1853). Written by scripts/rex-surface.
+api	block.close
+api	block.close › block_id
+api	block.close › keep_last
+api	block.close › session_id
+api	block.close › window_id
+api	block.event
+api	block.event › block_id
+api	block.event › event
+api	block.event › session_id
+api	block.method
+api	block.method › args
+api	block.method › block_id
+api	block.method › method
+api	block.method › session_id
+api	block_creator.list
+api	client.action
+api	client.action › action
+api	client.action › args
+api	client.action › block_id
+api	client.action › origin
+api	client.action › server
+api	client.action › servers
+api	client.action › session_id
+api	client.inspect
+api	client.inspect › client_id
+api	client.key
+api	client.key › block_id
+api	client.key › key
+api	client.key › prefix
+api	client.key › session_id
+api	client.keymap
+api	client.keymap › actions
+api	client.keymap › defaults
+api	client.keymap › overrides
+api	client.keymap › server_actions
+api	client.list
+api	client.list › kinds
+api	client.list › session_id
+api	client.perform
+api	client.perform › action
+api	client.perform › args
+api	client.perform › block_id
+api	client.perform › client_id
+api	client.perform › origin
+api	client.perform › session_id
+api	client.perform › timeout_ms
+api	client.reply
+api	client.reply › call_id
+api	client.reply › error
+api	client.reply › result
+api	client.set_label
+api	client.set_label › label
+api	client.set_script
+api	client.set_script › scripts
+api	data.connect
+api	data.connect › block_id
+api	data.connect › data_ref_id
+api	data.connect › session_id
+api	data.connect › subprotocol
+api	help.all
+api	hosts.list
+api	hosts.put
+api	hosts.put › host
+api	hosts.remove
+api	hosts.remove › id
+api	server.apple.grant_file_access
+api	server.apple.grant_file_access › files
+api	server.apple.privacy_status
+api	server.config_reload
+api	server.status
+api	server.stop
+api	server.stop › if_idle
+api	server.tailscale.disable
+api	server.tailscale.enable
+api	server.tailscale.enable › advertise_tags
+api	server.tailscale.enable › allow_tailnet_members
+api	server.tailscale.enable › auth_key
+api	server.tailscale.enable › control_url
+api	server.tailscale.enable › hostname
+api	server.tailscale.login
+api	server.tailscale.logout
+api	server.tailscale.rename
+api	server.tailscale.rename › hostname
+api	server.version
+api	server.whoami
+api	session.attach
+api	session.attach › session_id
+api	session.attach_all
+api	session.attach_all › event_scope
+api	session.bootstrap
+api	session.bootstrap › attach_session_ids
+api	session.bootstrap › data_tickets
+api	session.bootstrap › event_scope
+api	session.bootstrap › preferred_session_id
+api	session.close_layer
+api	session.close_layer › layer_id
+api	session.close_layer › session_id
+api	session.close_window
+api	session.close_window › session_id
+api	session.close_window › window_id
+api	session.create
+api	session.create › initial_windows
+api	session.create › label
+api	session.describe_block
+api	session.describe_block › block_id
+api	session.describe_block › session_id
+api	session.destroy
+api	session.destroy › session_id
+api	session.detach
+api	session.detach › session_id
+api	session.detach_block
+api	session.detach_block › block_id
+api	session.detach_block › session_id
+api	session.disown_block
+api	session.disown_block › block_ids
+api	session.disown_block › session_id
+api	session.float_block
+api	session.float_block › block_id
+api	session.float_block › bounds
+api	session.float_block › session_id
+api	session.focus_block
+api	session.focus_block › block_id
+api	session.focus_block › session_id
+api	session.focus_direction
+api	session.focus_direction › direction
+api	session.focus_direction › session_id
+api	session.focus_direction › wrap
+api	session.focus_next_pane
+api	session.focus_next_pane › session_id
+api	session.focus_next_pane › wrap
+api	session.focus_next_window
+api	session.focus_next_window › session_id
+api	session.focus_next_window › wrap
+api	session.focus_previous_pane
+api	session.focus_previous_pane › session_id
+api	session.focus_previous_pane › wrap
+api	session.focus_previous_window
+api	session.focus_previous_window › session_id
+api	session.focus_previous_window › wrap
+api	session.focus_window
+api	session.focus_window › session_id
+api	session.focus_window › window_id
+api	session.help
+api	session.help › session_id
+api	session.list
+api	session.list_blocks
+api	session.list_blocks › session_id
+api	session.list_clients
+api	session.list_clients › session_id
+api	session.lower_layer
+api	session.lower_layer › layer_id
+api	session.lower_layer › relative_layer_id
+api	session.lower_layer › session_id
+api	session.move
+api	session.move › before_session_id
+api	session.move › session_id
+api	session.move_block
+api	session.move_block › anchor_block_id
+api	session.move_block › block_id
+api	session.move_block › direction
+api	session.move_block › ratio
+api	session.move_block › session_id
+api	session.move_block › side
+api	session.move_window
+api	session.move_window › before_window_id
+api	session.move_window › session_id
+api	session.move_window › window_id
+api	session.new_block
+api	session.new_block › flavor
+api	session.new_block › label
+api	session.new_block › options
+api	session.new_block › session_id
+api	session.new_layer
+api	session.new_layer › bounds
+api	session.new_layer › focus
+api	session.new_layer › layout
+api	session.new_layer › session_id
+api	session.new_layer › window_id
+api	session.new_split
+api	session.new_split › anchor_id
+api	session.new_split › direction
+api	session.new_split › focus
+api	session.new_split › layout
+api	session.new_split › ratio
+api	session.new_split › session_id
+api	session.new_split › side
+api	session.new_split › window_id
+api	session.new_window
+api	session.new_window › focus
+api	session.new_window › layout
+api	session.new_window › session_id
+api	session.new_window › window_label
+api	session.own_block
+api	session.own_block › block_ids
+api	session.own_block › mode
+api	session.own_block › session_id
+api	session.raise_layer
+api	session.raise_layer › layer_id
+api	session.raise_layer › relative_layer_id
+api	session.raise_layer › session_id
+api	session.resize_layer
+api	session.resize_layer › bounds
+api	session.resize_layer › layer_id
+api	session.resize_layer › session_id
+api	session.resize_pane
+api	session.resize_pane › after_block_id
+api	session.resize_pane › before_block_id
+api	session.resize_pane › direction
+api	session.resize_pane › ratio
+api	session.resize_pane › session_id
+api	session.set_block_label
+api	session.set_block_label › block_id
+api	session.set_block_label › label
+api	session.set_block_label › session_id
+api	session.set_label
+api	session.set_label › label
+api	session.set_label › session_id
+api	session.set_layer_state
+api	session.set_layer_state › focus
+api	session.set_layer_state › layer_id
+api	session.set_layer_state › session_id
+api	session.set_layer_state › state
+api	session.set_window_label
+api	session.set_window_label › label
+api	session.set_window_label › session_id
+api	session.set_window_label › window_id
+api	session.swap_blocks
+api	session.swap_blocks › block_id
+api	session.swap_blocks › other_block_id
+api	session.swap_blocks › session_id
+api	session.view
+api	session.view › session_id
+api	session.zoom_block
+api	session.zoom_block › block_id
+api	session.zoom_block › session_id
+api	session.zoom_block › window_id
+api	session.zoom_block › zoom
+api	target.complete
+api	target.complete › context
+api	target.complete › kinds
+api	target.complete › prefix
+api	target.complete › scope
+api	target.resolve
+api	target.resolve › context
+api	target.resolve › kinds
+api	target.resolve › queries
+api	target.resolve › scope
+cli	--autostart
+cli	--color WHEN
+cli	--timeout DURATION
+cli	-C, --client CLIENT
+cli	-S, --server SERVER
+cli	-v, --verbose count
+cli	rex actions
+cli	rex actions › --json
+cli	rex api
+cli	rex api call METHOD [ARGS]
+cli	rex api call METHOD [ARGS] › --session string
+cli	rex api describe METHOD
+cli	rex api describe METHOD › --json
+cli	rex api list
+cli	rex api list › --json
+cli	rex api list › --quiet
+cli	rex block
+cli	rex block call METHOD [ARGS]
+cli	rex block call METHOD [ARGS] › --block BLOCK
+cli	rex block call METHOD [ARGS] › --session string
+cli	rex block call METHOD [ARGS] › --window string
+cli	rex block capture
+cli	rex block capture › --block BLOCK
+cli	rex block capture › --format FORMAT
+cli	rex block capture › --session string
+cli	rex block capture › --trim
+cli	rex block capture › --unwrap
+cli	rex block capture › --window string
+cli	rex block close BLOCK...
+cli	rex block close BLOCK... › --session string
+cli	rex block close BLOCK... › --window string
+cli	rex block focus [BLOCK]
+cli	rex block focus [BLOCK] › --session string
+cli	rex block focus [BLOCK] › --window string
+cli	rex block inspect [BLOCK]
+cli	rex block inspect [BLOCK] › --json
+cli	rex block inspect [BLOCK] › --session string
+cli	rex block inspect [BLOCK] › --window string
+cli	rex block ls
+cli	rex block ls › --all
+cli	rex block ls › --json
+cli	rex block ls › --quiet
+cli	rex block ls › --session string
+cli	rex block ls › --short
+cli	rex block ls › --window string
+cli	rex block move [BLOCK] DIRECTION ANCHOR
+cli	rex block move [BLOCK] DIRECTION ANCHOR › --ratio PCT
+cli	rex block move [BLOCK] DIRECTION ANCHOR › --session string
+cli	rex block move [BLOCK] DIRECTION ANCHOR › --window string
+cli	rex block new FLAVOR
+cli	rex block rename [BLOCK] LABEL
+cli	rex block rename [BLOCK] LABEL › --session string
+cli	rex block rename [BLOCK] LABEL › --window string
+cli	rex block send [TEXT]
+cli	rex block send [TEXT] › --block string
+cli	rex block send [TEXT] › --session string
+cli	rex block send [TEXT] › --window string
+cli	rex block send-key KEY...
+cli	rex block send-key KEY... › --action ACTION
+cli	rex block send-key KEY... › --block string
+cli	rex block send-key KEY... › --session string
+cli	rex block send-key KEY... › --window string
+cli	rex block stream BLOCK [DATA_REF]
+cli	rex block swap BLOCK OTHER
+cli	rex block swap BLOCK OTHER › --session string
+cli	rex block swap BLOCK OTHER › --window string
+cli	rex block types
+cli	rex block types › --json
+cli	rex block zoom [BLOCK]
+cli	rex block zoom [BLOCK] › --block BLOCK
+cli	rex block zoom [BLOCK] › --off
+cli	rex block zoom [BLOCK] › --on
+cli	rex block zoom [BLOCK] › --session string
+cli	rex block zoom [BLOCK] › --window string
+cli	rex capture
+cli	rex capture › --block BLOCK
+cli	rex capture › --format FORMAT
+cli	rex capture › --session string
+cli	rex capture › --trim
+cli	rex capture › --unwrap
+cli	rex capture › --window string
+cli	rex client
+cli	rex client inspect [CLIENT]
+cli	rex client inspect [CLIENT] › --json
+cli	rex client ls
+cli	rex client ls › --all
+cli	rex client ls › --json
+cli	rex client ls › --quiet
+cli	rex client ls › --session string
+cli	rex client ls › --short
+cli	rex completion
+cli	rex completion bash
+cli	rex completion fish
+cli	rex completion nu
+cli	rex completion powershell
+cli	rex completion zsh
+cli	rex config
+cli	rex config check [PATH]
+cli	rex config check [PATH] › --json
+cli	rex config reload
+cli	rex config reload › --json
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...]
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --action NAME
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --all
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --args JSON
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --block BLOCK
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --eval CODE
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --fail-fast
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --for DURATION
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --json
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --origin ORIGIN
+cli	rex do (ACTION | SCRIPT | -e CODE) [KEY=VALUE...] › --session string
+cli	rex events
+cli	rex events › --all
+cli	rex events › --json
+cli	rex events › --session string
+cli	rex focus TARGET|DIRECTION
+cli	rex focus TARGET|DIRECTION › --session string
+cli	rex focus TARGET|DIRECTION › --window string
+cli	rex focus TARGET|DIRECTION › --wrap
+cli	rex home
+cli	rex home set ENDPOINT
+cli	rex home set ENDPOINT › --label NAME
+cli	rex home unset
+cli	rex home › --json
+cli	rex hosts
+cli	rex hosts add LABEL ENDPOINT...
+cli	rex hosts add LABEL ENDPOINT... › --icon NAME
+cli	rex hosts check [LABEL...]
+cli	rex hosts check [LABEL...] › --json
+cli	rex hosts edit LABEL
+cli	rex hosts edit LABEL › --endpoint ENDPOINT
+cli	rex hosts edit LABEL › --icon NAME
+cli	rex hosts edit LABEL › --label NEW
+cli	rex hosts list
+cli	rex hosts list › --json
+cli	rex hosts remove LABEL
+cli	rex hosts › --json
+cli	rex keymap
+cli	rex keymap › --json
+cli	rex keymap › --request FILE
+cli	rex kill SESSION...
+cli	rex login-server
+cli	rex login-server › --accounts FILE
+cli	rex login-server › --allow-anonymous
+cli	rex login-server › --extra-listen ENDPOINT
+cli	rex login-server › --listen ENDPOINT
+cli	rex login-server › --log-format FORMAT
+cli	rex login-server › --pam
+cli	rex login-server › --pam-service NAME
+cli	rex login-server › --runtime-root DIR
+cli	rex login-server › --tailscaled-socket PATH
+cli	rex ls
+cli	rex ls › --json
+cli	rex ls › --quiet
+cli	rex ls › --short
+cli	rex move [BLOCK] DIRECTION ANCHOR
+cli	rex move [BLOCK] DIRECTION ANCHOR › --ratio PCT
+cli	rex move [BLOCK] DIRECTION ANCHOR › --session string
+cli	rex move [BLOCK] DIRECTION ANCHOR › --window string
+cli	rex new [LABEL] [-- COMMAND...]
+cli	rex new [LABEL] [-- COMMAND...] › --cwd string
+cli	rex new [LABEL] [-- COMMAND...] › --interactive
+cli	rex new [LABEL] [-- COMMAND...] › --json
+cli	rex new [LABEL] [-- COMMAND...] › --keep-open
+cli	rex new [LABEL] [-- COMMAND...] › --shell SHELL
+cli	rex new [LABEL] [-- COMMAND...] › --window string
+cli	rex resize [BLOCK]
+cli	rex run [flags] -- COMMAND...
+cli	rex run [flags] -- COMMAND... › --block BLOCK
+cli	rex run [flags] -- COMMAND... › --cwd string
+cli	rex run [flags] -- COMMAND... › --focus
+cli	rex run [flags] -- COMMAND... › --interactive
+cli	rex run [flags] -- COMMAND... › --json
+cli	rex run [flags] -- COMMAND... › --keep-open
+cli	rex run [flags] -- COMMAND... › --label TEXT
+cli	rex run [flags] -- COMMAND... › --ratio PCT
+cli	rex run [flags] -- COMMAND... › --session string
+cli	rex run [flags] -- COMMAND... › --shell SHELL
+cli	rex run [flags] -- COMMAND... › --split DIRECTION
+cli	rex run [flags] -- COMMAND... › --wait
+cli	rex run [flags] -- COMMAND... › --window string
+cli	rex send [TEXT]
+cli	rex send [TEXT] › --block string
+cli	rex send [TEXT] › --session string
+cli	rex send [TEXT] › --window string
+cli	rex send-key KEY...
+cli	rex send-key KEY... › --action ACTION
+cli	rex send-key KEY... › --block string
+cli	rex send-key KEY... › --session string
+cli	rex send-key KEY... › --window string
+cli	rex server
+cli	rex server logs
+cli	rex server logs › --all
+cli	rex server logs › --follow
+cli	rex server logs › --lines N
+cli	rex server logs › --state-dir DIR
+cli	rex server run
+cli	rex server run › --allow-anonymous
+cli	rex server run › --block-dir DIR
+cli	rex server run › --block-plugin-reload
+cli	rex server run › --config PATH
+cli	rex server run › --exit-empty
+cli	rex server run › --extra-listen ENDPOINT
+cli	rex server run › --listen ENDPOINT
+cli	rex server run › --log-format FORMAT
+cli	rex server run › --max-blocks N
+cli	rex server run › --max-panes N
+cli	rex server run › --max-sessions N
+cli	rex server run › --max-windows N
+cli	rex server run › --restore
+cli	rex server run › --socket-mode MODE
+cli	rex server run › --state-dir DIR
+cli	rex server run › --tailnet-allow-identified
+cli	rex server run › --tailscale
+cli	rex server run › --tailscale-advertise-tag TAG
+cli	rex server run › --tailscale-allow-tailnet-members
+cli	rex server run › --tailscale-auth-key-file FILE
+cli	rex server run › --tailscale-control-url URL
+cli	rex server run › --tailscale-hostname NAME
+cli	rex server run › --tailscaled-socket PATH
+cli	rex server run › --websocket-origin-pattern PATTERN
+cli	rex server start
+cli	rex server start › --allow-anonymous
+cli	rex server start › --block-dir DIR
+cli	rex server start › --block-plugin-reload
+cli	rex server start › --config PATH
+cli	rex server start › --env NAME
+cli	rex server start › --extra-listen ENDPOINT
+cli	rex server start › --json
+cli	rex server start › --log-format FORMAT
+cli	rex server start › --log-max-size SIZE
+cli	rex server start › --max-blocks N
+cli	rex server start › --max-panes N
+cli	rex server start › --max-sessions N
+cli	rex server start › --max-windows N
+cli	rex server start › --restore
+cli	rex server start › --socket-mode MODE
+cli	rex server start › --state-dir DIR
+cli	rex server start › --tailnet-allow-identified
+cli	rex server start › --tailscale
+cli	rex server start › --tailscale-advertise-tag TAG
+cli	rex server start › --tailscale-allow-tailnet-members
+cli	rex server start › --tailscale-auth-key-file FILE
+cli	rex server start › --tailscale-control-url URL
+cli	rex server start › --tailscale-hostname NAME
+cli	rex server start › --tailscaled-socket PATH
+cli	rex server start › --websocket-origin-pattern PATTERN
+cli	rex server status
+cli	rex server status › --json
+cli	rex server stop
+cli	rex server stop › --discard
+cli	rex server stop › --if-idle
+cli	rex server stop › --state-dir DIR
+cli	rex server tailscale
+cli	rex server tailscale login
+cli	rex server tailscale login › --json
+cli	rex server tailscale logout
+cli	rex server tailscale logout › --json
+cli	rex server tailscale off
+cli	rex server tailscale off › --json
+cli	rex server tailscale on
+cli	rex server tailscale on › --advertise-tag TAG
+cli	rex server tailscale on › --allow-tailnet-members
+cli	rex server tailscale on › --auth-key-file FILE
+cli	rex server tailscale on › --control-url URL
+cli	rex server tailscale on › --hostname NAME
+cli	rex server tailscale on › --json
+cli	rex server tailscale pair
+cli	rex server tailscale pair › --json
+cli	rex server tailscale rename NAME
+cli	rex server tailscale rename NAME › --json
+cli	rex session
+cli	rex session inspect [SESSION]
+cli	rex session inspect [SESSION] › --json
+cli	rex session kill SESSION...
+cli	rex session ls
+cli	rex session ls › --json
+cli	rex session ls › --quiet
+cli	rex session ls › --short
+cli	rex session move [SESSION] (--before S | --after S | --index N)
+cli	rex session move [SESSION] (--before S | --after S | --index N) › --after S
+cli	rex session move [SESSION] (--before S | --after S | --index N) › --before S
+cli	rex session move [SESSION] (--before S | --after S | --index N) › --index N
+cli	rex session new [LABEL] [-- COMMAND...]
+cli	rex session new [LABEL] [-- COMMAND...] › --cwd string
+cli	rex session new [LABEL] [-- COMMAND...] › --interactive
+cli	rex session new [LABEL] [-- COMMAND...] › --json
+cli	rex session new [LABEL] [-- COMMAND...] › --keep-open
+cli	rex session new [LABEL] [-- COMMAND...] › --shell SHELL
+cli	rex session new [LABEL] [-- COMMAND...] › --window string
+cli	rex session rename [SESSION] LABEL
+cli	rex skill
+cli	rex skill remove
+cli	rex skill remove › --agent AGENT
+cli	rex skill remove › --dry-run
+cli	rex skill remove › --json
+cli	rex skill remove › --project
+cli	rex skill setup
+cli	rex skill setup › --agent AGENT
+cli	rex skill setup › --dry-run
+cli	rex skill setup › --force
+cli	rex skill setup › --json
+cli	rex skill setup › --project
+cli	rex skill setup › --session-naming
+cli	rex skill show
+cli	rex skill status
+cli	rex skill status › --json
+cli	rex skill status › --project
+cli	rex split [flags] [-- COMMAND...]
+cli	rex split [flags] [-- COMMAND...] › --block BLOCK
+cli	rex split [flags] [-- COMMAND...] › --cwd string
+cli	rex split [flags] [-- COMMAND...] › --focus
+cli	rex split [flags] [-- COMMAND...] › --interactive
+cli	rex split [flags] [-- COMMAND...] › --json
+cli	rex split [flags] [-- COMMAND...] › --keep-open
+cli	rex split [flags] [-- COMMAND...] › --label TEXT
+cli	rex split [flags] [-- COMMAND...] › --ratio PCT
+cli	rex split [flags] [-- COMMAND...] › --session string
+cli	rex split [flags] [-- COMMAND...] › --shell SHELL
+cli	rex split [flags] [-- COMMAND...] › --split DIRECTION
+cli	rex split [flags] [-- COMMAND...] › --wait
+cli	rex split [flags] [-- COMMAND...] › --window string
+cli	rex swap BLOCK OTHER
+cli	rex swap BLOCK OTHER › --session string
+cli	rex swap BLOCK OTHER › --window string
+cli	rex terminfo
+cli	rex terminfo host
+cli	rex terminfo host forget HOST
+cli	rex terminfo host install DESTINATION [-- SSH_OPTIONS...]
+cli	rex terminfo host ls
+cli	rex terminfo host ls › --json
+cli	rex terminfo remove
+cli	rex terminfo remove › --dry-run
+cli	rex terminfo remove › --json
+cli	rex terminfo remove › --system
+cli	rex terminfo setup
+cli	rex terminfo setup › --dry-run
+cli	rex terminfo setup › --entry-only
+cli	rex terminfo setup › --json
+cli	rex terminfo setup › --system
+cli	rex terminfo show
+cli	rex terminfo status
+cli	rex terminfo status › --json
+cli	rex version
+cli	rex version › --json
+cli	rex wait TARGET
+cli	rex wait TARGET › --for DURATION
+cli	rex wait TARGET › --json
+cli	rex wait TARGET › --session string
+cli	rex wait TARGET › --window string
+cli	rex whoami
+cli	rex whoami › --json
+cli	rex window
+cli	rex window close WINDOW...
+cli	rex window close WINDOW... › --session string
+cli	rex window focus [WINDOW|next|prev]
+cli	rex window focus [WINDOW|next|prev] › --session string
+cli	rex window focus [WINDOW|next|prev] › --wrap
+cli	rex window inspect [WINDOW]
+cli	rex window inspect [WINDOW] › --json
+cli	rex window inspect [WINDOW] › --session string
+cli	rex window ls
+cli	rex window ls › --all
+cli	rex window ls › --json
+cli	rex window ls › --quiet
+cli	rex window ls › --session string
+cli	rex window ls › --short
+cli	rex window move [WINDOW] (--before W | --after W | --index N) [-s SESSION]
+cli	rex window move [WINDOW] (--before W | --after W | --index N) [-s SESSION] › --after W
+cli	rex window move [WINDOW] (--before W | --after W | --index N) [-s SESSION] › --before W
+cli	rex window move [WINDOW] (--before W | --after W | --index N) [-s SESSION] › --index N
+cli	rex window move [WINDOW] (--before W | --after W | --index N) [-s SESSION] › --session string
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...]
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --cwd string
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --focus
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --interactive
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --json
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --keep-open
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --session string
+cli	rex window new [-s SESSION] [LABEL] [-- COMMAND...] › --shell SHELL
+cli	rex window rename [WINDOW] LABEL
+cli	rex window rename [WINDOW] LABEL › --session string
+cli	rex zoom [BLOCK]
+cli	rex zoom [BLOCK] › --block BLOCK
+cli	rex zoom [BLOCK] › --off
+cli	rex zoom [BLOCK] › --on
+cli	rex zoom [BLOCK] › --session string
+cli	rex zoom [BLOCK] › --window string
+events	active_window_changed
+events	block_closed
+events	block_created
+events	client_changed
+events	client_connected
+events	client_connection_changed
+events	client_disconnected
+events	client_joined
+events	client_left
+events	creator_changed
+events	ev.block_id
+events	ev.creator_name
+events	ev.name
+events	ev.payload
+events	ev.session_id
+events	ev.type
+events	hosts_changed
+events	keymap_changed
+events	rex events
+events	rex events --all
+events	rex events -s SESSION
+events	session_created
+events	session_destroyed
+events	session_label_changed
+events	session_view_changed
+events	tailscale_status_changed
+events	terminal.bell
+events	terminal.child_exited
+events	terminal.clipboard_written
+events	terminal.desktop_notification
+events	terminal.process_changed
+events	terminal.program_status_changed
+events	terminal.program_status_removed
+events	terminal.progress_report
+events	terminal.pwd_changed
+events	terminal.title_changed
+events	window_closed
+events	window_created
+events	window_label_changed
+ios-actions	client.agents.setup
+ios-actions	client.appearance.switch_mode
+ios-actions	client.close
+ios-actions	client.config.copy_path
+ios-actions	client.debug.copy
+ios-actions	client.diagnostics
+ios-actions	client.font.decrease
+ios-actions	client.font.increase
+ios-actions	client.font.reset
+ios-actions	client.host.add
+ios-actions	client.host.remove
+ios-actions	client.keyboard.hide
+ios-actions	client.keyboard.show
+ios-actions	client.palette.toggle
+ios-actions	client.prompt.next
+ios-actions	client.prompt.previous
+ios-actions	client.scroll.page_down
+ios-actions	client.scroll.page_up
+ios-actions	client.settings
+ios-actions	client.sidebar.activity.toggle
+ios-actions	client.sidebar.filter.focus
+ios-actions	client.sidebar.toggle
+ios-actions	client.tab.close
+ios-actions	client.tab.close_others
+ios-actions	client.tab.goto
+ios-actions	client.tab.move
+ios-actions	client.tab.move.backward
+ios-actions	client.tab.move.forward
+ios-actions	client.tab.move_to_new_window
+ios-actions	client.tab.new
+ios-actions	client.tab.next
+ios-actions	client.tab.previous
+ios-actions	client.tab.rename
+ios-actions	client.theme.change
+ios-actions	client.version.copy
+ios-actions	client.window.close
+ios-actions	client.window.new
+ios-actions	pane.balance
+ios-actions	pane.close
+ios-actions	pane.close_others
+ios-actions	pane.copy
+ios-actions	pane.copy_id
+ios-actions	pane.float
+ios-actions	pane.focus.down
+ios-actions	pane.focus.left
+ios-actions	pane.focus.right
+ios-actions	pane.focus.up
+ios-actions	pane.focus_next
+ios-actions	pane.focus_previous
+ios-actions	pane.go_to
+ios-actions	pane.go_to_directory
+ios-actions	pane.insert_path
+ios-actions	pane.minimize_all_floating
+ios-actions	pane.minimize_floating
+ios-actions	pane.move.down
+ios-actions	pane.move.left
+ios-actions	pane.move.right
+ios-actions	pane.move.up
+ios-actions	pane.move_to_new_tab
+ios-actions	pane.move_to_tab
+ios-actions	pane.new_floating
+ios-actions	pane.paste
+ios-actions	pane.rename
+ios-actions	pane.resize
+ios-actions	pane.select_all
+ios-actions	pane.send_key
+ios-actions	pane.split
+ios-actions	pane.split.auto
+ios-actions	pane.split.down
+ios-actions	pane.split.left
+ios-actions	pane.split.right
+ios-actions	pane.split.up
+ios-actions	pane.view_activity
+ios-actions	pane.zoom
+ios-actions	session.close
+ios-actions	session.new
+ios-actions	session.next
+ios-actions	session.open_on_web
+ios-actions	session.previous
+ios-actions	session.refresh
+ios-actions	session.rename
+ios-actions	session.select
+ios-actions	session.switch
+ios-settings	Autocorrect
+ios-settings	Blink speed
+ios-settings	Characters
+ios-settings	Color scheme
+ios-settings	Command palette
+ios-settings	Cursor shaders
+ios-settings	Cursor style
+ios-settings	Dark theme
+ios-settings	Font size
+ios-settings	Force style
+ios-settings	Force theme palette for text
+ios-settings	Haptic feedback
+ios-settings	Improve text contrast
+ios-settings	Keep keyboard open
+ios-settings	Key Bar Layout
+ios-settings	Light theme
+ios-settings	Match program backgrounds
+ios-settings	Network Diagnostics
+ios-settings	Prefer generated titles
+ios-settings	Shortcut Groups
+ios-settings	Smooth scrolling
+ios-settings	Smooth terminal resizing
+ios-settings	Terminal font
+ios-settings	Tint with theme
+ios-settings	Use symbols
+lua	rex.action
+lua	rex.action{ ... }
+lua	rex.action{ ... } › args
+lua	rex.action{ ... } › category
+lua	rex.action{ ... } › description
+lua	rex.action{ ... } › keywords
+lua	rex.action{ ... } › name
+lua	rex.action{ ... } › repeats
+lua	rex.action{ ... } › run
+lua	rex.action{ ... } › title
+lua	rex.after
+lua	rex.after(seconds, fn)
+lua	rex.args
+lua	rex.bind
+lua	rex.bind(key, action[, args])
+lua	rex.bind(key, fn)
+lua	rex.bindings([filter])
+lua	rex.bindings([filter]) › action
+lua	rex.bindings([filter]) › args
+lua	rex.bindings([filter]) › fn
+lua	rex.bindings([filter]) › key
+lua	rex.bindings([filter]) › mode
+lua	rex.bindings([filter]) › source
+lua	rex.block.call(creator, method[, args])
+lua	rex.block.call(creator, method[, args]) › format
+lua	rex.block.call(creator, method[, args]) › list_dir
+lua	rex.block.call(creator, method[, args]) › process
+lua	rex.block.call(creator, method[, args]) › program_status
+lua	rex.block.call(creator, method[, args]) › pwd
+lua	rex.block.call(creator, method[, args]) › reset
+lua	rex.block.call(creator, method[, args]) › resize
+lua	rex.block.call(creator, method[, args]) › set_theme
+lua	rex.block.call(creator, method[, args]) › size
+lua	rex.block.call(creator, method[, args]) › title
+lua	rex.block.call(creator, method[, args]) › write
+lua	rex.block_id
+lua	rex.call
+lua	rex.call(method[, args])
+lua	rex.client.queue
+lua	rex.client.queue(name[, args])
+lua	rex.every(seconds, fn)
+lua	rex.every(seconds, fn) › t:active()
+lua	rex.every(seconds, fn) › t:cancel()
+lua	rex.exec
+lua	rex.exec(argv[, opts])
+lua	rex.exec(argv[, opts]) › clear_env
+lua	rex.exec(argv[, opts]) › code
+lua	rex.exec(argv[, opts]) › cwd
+lua	rex.exec(argv[, opts]) › env
+lua	rex.exec(argv[, opts]) › ok
+lua	rex.exec(argv[, opts]) › signal
+lua	rex.exec(argv[, opts]) › stdin
+lua	rex.exec(argv[, opts]) › stdout
+lua	rex.exec(argv[, opts]) › text
+lua	rex.exec(argv[, opts]) › timed_out
+lua	rex.exec(argv[, opts]) › timeout
+lua	rex.exec.start(argv[, opts])
+lua	rex.exec.start(argv[, opts]) › detach
+lua	rex.exec.start(argv[, opts]) › h.pid
+lua	rex.exec.start(argv[, opts]) › h:close_stdin()
+lua	rex.exec.start(argv[, opts]) › h:kill([signal])
+lua	rex.exec.start(argv[, opts]) › h:running()
+lua	rex.exec.start(argv[, opts]) › h:wait([seconds])
+lua	rex.exec.start(argv[, opts]) › h:write(data)
+lua	rex.exec.start(argv[, opts]) › stdin
+lua	rex.exec.start(argv[, opts]) › stdout
+lua	rex.host
+lua	rex.host{ ... }
+lua	rex.host{ ... } › endpoint
+lua	rex.host{ ... } › endpoints
+lua	rex.host{ ... } › icon
+lua	rex.host{ ... } › id
+lua	rex.host{ ... } › label
+lua	rex.invoke
+lua	rex.invoke(name[, args])
+lua	rex.json.decode(text)
+lua	rex.json.encode(value[, opts])
+lua	rex.layout
+lua	rex.layout › b)
+lua	rex.layout › command
+lua	rex.layout › cwd
+lua	rex.layout › exit
+lua	rex.layout › initial_input
+lua	rex.layout › options }
+lua	rex.layout › shell
+lua	rex.layout.*
+lua	rex.log([level, ]message)
+lua	rex.mode
+lua	rex.mode(name[, options])
+lua	rex.modes()
+lua	rex.on
+lua	rex.on(event, fn)
+lua	rex.server(label)
+lua	rex.servers()
+lua	rex.session.<method>(args)
+lua	rex.session.<method>(args) › attach
+lua	rex.session.<method>(args) › close_layer
+lua	rex.session.<method>(args) › close_window
+lua	rex.session.<method>(args) › describe_block
+lua	rex.session.<method>(args) › detach_block
+lua	rex.session.<method>(args) › float_block
+lua	rex.session.<method>(args) › focus_block
+lua	rex.session.<method>(args) › focus_direction
+lua	rex.session.<method>(args) › focus_next_pane
+lua	rex.session.<method>(args) › focus_next_window
+lua	rex.session.<method>(args) › focus_window
+lua	rex.session.<method>(args) › help
+lua	rex.session.<method>(args) › list_blocks
+lua	rex.session.<method>(args) › list_clients
+lua	rex.session.<method>(args) › move_block
+lua	rex.session.<method>(args) › move_window
+lua	rex.session.<method>(args) › new_block
+lua	rex.session.<method>(args) › new_layer
+lua	rex.session.<method>(args) › new_split
+lua	rex.session.<method>(args) › new_window
+lua	rex.session.<method>(args) › raise_layer
+lua	rex.session.<method>(args) › resize_layer
+lua	rex.session.<method>(args) › resize_pane
+lua	rex.session.<method>(args) › set_block_label
+lua	rex.session.<method>(args) › set_label
+lua	rex.session.<method>(args) › set_window_label
+lua	rex.session.<method>(args) › swap_blocks
+lua	rex.session.<method>(args) › view
+lua	rex.session.<method>(args) › zoom_block
+lua	rex.session_id
+lua	rex.sleep
+lua	rex.sleep(seconds)
+lua	rex.stop([code])
+lua	rex.unbind(binding)
+lua	rex.unbind(key[, target])
+lua	rex.unbind{ mode = name }
+lua	rex.wait(event[, filter][, timeout])
+mac-actions	client.agents.setup
+mac-actions	client.appearance.switch_mode
+mac-actions	client.close
+mac-actions	client.config.copy_path
+mac-actions	client.config.reload
+mac-actions	client.debug.copy
+mac-actions	client.diagnostics
+mac-actions	client.find.next
+mac-actions	client.find.open
+mac-actions	client.find.previous
+mac-actions	client.font.decrease
+mac-actions	client.font.increase
+mac-actions	client.font.reset
+mac-actions	client.host.add
+mac-actions	client.host.remove
+mac-actions	client.host.switch
+mac-actions	client.key.forward
+mac-actions	client.mode.enter
+mac-actions	client.mode.exit
+mac-actions	client.mode.exit_all
+mac-actions	client.notice.dismiss
+mac-actions	client.onboarding
+mac-actions	client.pair_device
+mac-actions	client.palette.toggle
+mac-actions	client.permissions
+mac-actions	client.prompt.next
+mac-actions	client.prompt.previous
+mac-actions	client.quick_look	[Bleeding Edge]
+mac-actions	client.scroll.page_down
+mac-actions	client.scroll.page_up
+mac-actions	client.server.restart
+mac-actions	client.settings
+mac-actions	client.shortcuts.edit
+mac-actions	client.sidebar.activity.by_priority
+mac-actions	client.sidebar.activity.by_session
+mac-actions	client.sidebar.activity.toggle
+mac-actions	client.sidebar.filter.focus
+mac-actions	client.sidebar.toggle
+mac-actions	client.tab.close
+mac-actions	client.tab.close_others
+mac-actions	client.tab.goto
+mac-actions	client.tab.move
+mac-actions	client.tab.move.backward
+mac-actions	client.tab.move.forward
+mac-actions	client.tab.move_to_new_window
+mac-actions	client.tab.new
+mac-actions	client.tab.next
+mac-actions	client.tab.previous
+mac-actions	client.tab.rename
+mac-actions	client.tab_style.toggle
+mac-actions	client.theme.change
+mac-actions	client.theme.import
+mac-actions	client.update.accept
+mac-actions	client.update.accept_when_idle
+mac-actions	client.update.check
+mac-actions	client.update.install
+mac-actions	client.update.set_automation
+mac-actions	client.update.set_channel
+mac-actions	client.update.status
+mac-actions	client.version.copy
+mac-actions	client.visibility.toggle
+mac-actions	client.window.close
+mac-actions	client.window.fullscreen.toggle
+mac-actions	client.window.new
+mac-actions	pane.balance
+mac-actions	pane.close
+mac-actions	pane.close_others
+mac-actions	pane.copy
+mac-actions	pane.copy_id
+mac-actions	pane.float
+mac-actions	pane.focus
+mac-actions	pane.focus.down
+mac-actions	pane.focus.left
+mac-actions	pane.focus.right
+mac-actions	pane.focus.up
+mac-actions	pane.focus_next
+mac-actions	pane.focus_previous
+mac-actions	pane.go_to
+mac-actions	pane.go_to_directory
+mac-actions	pane.insert_path
+mac-actions	pane.minimize_all_floating
+mac-actions	pane.minimize_floating
+mac-actions	pane.move
+mac-actions	pane.move.down
+mac-actions	pane.move.left
+mac-actions	pane.move.right
+mac-actions	pane.move.up
+mac-actions	pane.move_to_new_tab
+mac-actions	pane.move_to_tab
+mac-actions	pane.new_floating
+mac-actions	pane.paste
+mac-actions	pane.rename
+mac-actions	pane.resize
+mac-actions	pane.select_all
+mac-actions	pane.send_key
+mac-actions	pane.split
+mac-actions	pane.split.auto
+mac-actions	pane.split.down
+mac-actions	pane.split.left
+mac-actions	pane.split.right
+mac-actions	pane.split.up
+mac-actions	pane.view_activity
+mac-actions	pane.zoom
+mac-actions	session.close
+mac-actions	session.collapse
+mac-actions	session.collapse_others
+mac-actions	session.expand
+mac-actions	session.new
+mac-actions	session.next
+mac-actions	session.open_on_web
+mac-actions	session.previous
+mac-actions	session.refresh
+mac-actions	session.rename
+mac-actions	session.select
+mac-actions	session.switch
+mac-settings	Allowed origins
+mac-settings	Animate active pane highlight
+mac-settings	Animation style
+mac-settings	App Icon
+mac-settings	Autobalance splits
+mac-settings	Badge Dock icon
+mac-settings	Blink interval
+mac-settings	Blink speed
+mac-settings	Blocked
+mac-settings	Bold and italic
+mac-settings	Character spacing
+mac-settings	Color scheme
+mac-settings	Commit
+mac-settings	Compatibility
+mac-settings	Control Server
+mac-settings	Copy on selection
+mac-settings	Cursor shaders
+mac-settings	Cursor style
+mac-settings	Dark theme
+mac-settings	Developer Mode
+mac-settings	Done
+mac-settings	Download new updates when available
+mac-settings	Error
+mac-settings	Fade inactive panes
+mac-settings	Fade panes for inactive windows
+mac-settings	Fallback fonts
+mac-settings	Fill available space
+mac-settings	Final SHA-256
+mac-settings	Focus follows mouse
+mac-settings	Font size
+mac-settings	Font smoothing
+mac-settings	Font style
+mac-settings	Font weight
+mac-settings	Force style
+mac-settings	Force theme palette for text
+mac-settings	Highlight active pane edges
+mac-settings	Highlight color
+mac-settings	Highlight opacity
+mac-settings	Improve text contrast
+mac-settings	Include idle processes in activity
+mac-settings	Install updates automatically
+mac-settings	Installation status
+mac-settings	Integrate with available agents
+mac-settings	Interface style
+mac-settings	Label
+mac-settings	Let agents name sessions
+mac-settings	Ligatures
+mac-settings	Light theme
+mac-settings	Limit access to your Tailscale account
+mac-settings	Line height
+mac-settings	Links that open apps
+mac-settings	Local API URL
+mac-settings	Location
+mac-settings	Match program backgrounds
+mac-settings	New quick switcher
+mac-settings	Notification position
+mac-settings	Option key
+mac-settings	Origin pattern
+mac-settings	Padding X
+mac-settings	Padding Y
+mac-settings	Padding color
+mac-settings	Pane style
+mac-settings	Play animation on copy
+mac-settings	Play sounds
+mac-settings	Prefer generated titles
+mac-settings	Preferred Hostname
+mac-settings	Preserve width when resizing sidebar
+mac-settings	Quick Look links	[Bleeding Edge]
+mac-settings	Remote Address
+mac-settings	Remote Control
+mac-settings	Rounded corners
+mac-settings	Selection background
+mac-settings	Selection foreground
+mac-settings	Serve over Tailscale
+mac-settings	Server status
+mac-settings	Shell icon theme
+mac-settings	Show activity in tabs
+mac-settings	Show app icon
+mac-settings	Show each process in tabs
+mac-settings	Show key sequence hints
+mac-settings	Show pane headers
+mac-settings	Show recently used paths
+mac-settings	Show system notifications
+mac-settings	Show tab icons
+mac-settings	Show window on launch
+mac-settings	Sidebar text size
+mac-settings	Sign in to Tailscale
+mac-settings	Smooth scrolling
+mac-settings	Smooth terminal resizing
+mac-settings	Source Directory
+mac-settings	Startup command
+mac-settings	Tab style
+mac-settings	Tags
+mac-settings	Tailscale device approval
+mac-settings	Tailscale failures
+mac-settings	Tailscale sign-in
+mac-settings	Terminal anchoring
+mac-settings	Terminal font
+mac-settings	Terminal notifications
+mac-settings	Tint with theme
+mac-settings	Trusted links
+mac-settings	Update Channel
+mac-settings	Use Display P3 color space
+mac-settings	Use a gesture to toggle the sidebar
+mac-settings	Use color for tab icons
+mac-settings	Use extended theme palette
+mac-settings	Use glass for panes
+mac-settings	Use trackpad gestures
+mac-settings	Version
+mac-settings	Working

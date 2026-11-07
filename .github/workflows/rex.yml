@@ -1,0 +1,106 @@
+name: rex surface
+
+# Each day, what Rex's reference docs say it can do against rex/surface.txt: commands, flags,
+# API methods and fields, Lua, events, actions and settings, Bleeding Edge included. Rex's
+# release notes are in its beta Discord, out of reach here; its docs change with each build. A
+# change pushes the new surface to the rex-surface branch and keeps one issue up to date.
+
+on:
+  schedule:
+    - cron: "41 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: rex-surface
+  cancel-in-progress: true
+
+jobs:
+  surface:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TITLE: Rex can do something new
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Newest Rex build
+        run: |
+          feed=https://blob.superlogical.com/public/rex-app/preview-arm64/appcast.xml
+          build=$(curl -fsSL "$feed" | grep -m1 -o '<sparkle:version>[0-9]*' | grep -o '[0-9]*$')
+          echo "LABEL=Preview $build" >> "$GITHUB_ENV"
+
+      - name: Compare
+        run: |
+          python3 -I scripts/rex-surface --label "$LABEL" \
+            --check rex/surface.txt --write rex/surface.txt > "$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md"
+          # A new build alone changes only the label.
+          if git diff --quiet -I '^# ' rex/surface.txt; then
+            echo "CHANGED=" >> "$GITHUB_ENV"
+          else
+            echo "CHANGED=1" >> "$GITHUB_ENV"
+          fi
+
+      # Skipped until the repo has an ANTHROPIC_API_KEY secret; the issue then carries only the diff.
+      - name: Weigh it against tr3x
+        timeout-minutes: 15
+        if: env.CHANGED
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [ -n "$ANTHROPIC_API_KEY" ] || exit 0
+          {
+            echo "Rex, the terminal tr3x draws T3 Code threads into, changed what it documents."
+            echo "The diff is below. Read tr3x (README.md, docs/, tr3x/src/rex.rs, tr3x/src/chat.rs,"
+            echo "rex/tr3x.lua and whatever else you need) and Rex's reference docs at"
+            echo "https://www.superlogical.com/rex/docs/reference/ (add .md to a page's address)."
+            echo
+            echo "List up to five changes that would make tr3x better to use or to work on: an event"
+            echo "that could replace polling, a field or call that removes a workaround, an action or"
+            echo "setting a tr3x action could use, or a removal that breaks something tr3x calls."
+            echo "For each: one bold line naming it, then two or three sentences on what tr3x would"
+            echo "do differently, with the files it touches. Strongest first. Skip anything that"
+            echo "doesn't help tr3x; if nothing does, say so in one line. Markdown only, no preamble."
+            echo
+            cat "$RUNNER_TEMP/report.md"
+          } > "$RUNNER_TEMP/prompt.md"
+          npx -y @anthropic-ai/claude-code -p --model claude-sonnet-5-5 \
+            --allowedTools "Read,Grep,Glob,WebFetch(domain:www.superlogical.com)" \
+            < "$RUNNER_TEMP/prompt.md" > "$RUNNER_TEMP/triage.md" || rm -f "$RUNNER_TEMP/triage.md"
+          cat "$RUNNER_TEMP/triage.md" 2>/dev/null || true
+
+      - name: Push the branch and update the issue
+        if: env.CHANGED
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C rex-surface
+          git commit -qam "chore: Rex surface from $LABEL"
+          git push -qf origin rex-surface
+          {
+            echo "Rex's reference docs at $LABEL against \`rex/surface.txt\` on master."
+            echo
+            echo "Look for what makes tr3x easier to use or to work on: an event that could replace"
+            echo "polling, an API field or Lua call that removes a workaround, an action or setting a"
+            echo "tr3x action could use. Bleeding Edge items aren't in Preview yet. Rex's"
+            echo "[release notes](https://www.superlogical.com/rex/docs/beta/community-mcp) say why."
+            echo
+            if [ -s "$RUNNER_TEMP/triage.md" ]; then
+              echo "### What tr3x could do with it"
+              echo
+              cat "$RUNNER_TEMP/triage.md"
+              echo
+            fi
+            cat "$RUNNER_TEMP/report.md"
+            echo "[Open a pull request](${{ github.server_url }}/${{ github.repository }}/compare/master...rex-surface?expand=1) · [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$TITLE" --label compat --body-file "$RUNNER_TEMP/body.md"
+          fi

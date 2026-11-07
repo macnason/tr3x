@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""What Rex documents it can do, as one line per command, flag, API method and field, Lua
+function, event, action and setting, read from the reference pages of Rex's docs.
+
+  rex-surface [--check FILE] [--write FILE] [--label TEXT]
+
+--check prints, as markdown, what was added, removed or promoted to Preview since FILE, and
+marks what tr3x already uses. --write saves the new surface to FILE.
+"""
+import argparse, html, os, re, sys, urllib.request
+
+DOCS = "https://www.superlogical.com/rex/docs/reference/"
+PAGES = ["cli", "api", "lua", "events", "mac-actions", "mac-settings", "ios-actions", "ios-settings"]
+CHANNEL = re.compile(r'api-tag channel">\[([^\]]+)\]')
+SPAN = re.compile(r'<span id="(?:action|setting)-[^"]*" data-entry="([^"]+)"')
+CODE = re.compile(r"`([^`]+)`")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def fetch(page):
+    req = urllib.request.Request(DOCS + page + ".md", headers={"User-Agent": "tr3x-rex-surface"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read().decode()
+
+
+def entries(page, text):
+    """(name, channel) for each entry on a page; channel is '' once it's in Preview."""
+    out, parent, in_code = [], None, False
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if line.startswith("## "):
+            parent = None
+        elif line.startswith("### "):
+            m = CODE.search(line)
+            parent = m.group(1) if m else None
+            if parent:
+                # A heading's tag sits on it or in the paragraph under it.
+                near = " ".join(lines[i : i + 3])
+                tag = CHANNEL.search(near)
+                out.append((parent, tag.group(1) if tag else ""))
+        elif line.startswith("| ") and not line.startswith("| ---"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            tag = CHANNEL.search(line)
+            tag = tag.group(1) if tag else ""
+            span = SPAN.search(cells[0])
+            if span:
+                # An action is named by its id; a setting by its label.
+                ident = CODE.search(cells[1]) if len(cells) > 1 and page.endswith("actions") else None
+                name = ident.group(1) if ident else html.unescape(span.group(1))
+                out.append((name, tag))
+                continue
+            first = CODE.fullmatch(cells[0]) or CODE.match(cells[0])
+            if not first:
+                continue
+            name = first.group(1).split(",")[-1].strip() if parent else first.group(1)
+            out.append((f"{parent} › {name}" if parent else name, tag))
+    return out
+
+
+def surface():
+    lines = set()
+    for page in PAGES:
+        for name, tag in entries(page, fetch(page)):
+            lines.add(f"{page}\t{name}" + (f"\t[{tag}]" if tag else ""))
+    return sorted(lines)
+
+
+def load(path):
+    with open(path) as f:
+        return [l.rstrip("\n") for l in f if l.strip() and not l.startswith("#")]
+
+
+def key(line):
+    return "\t".join(line.split("\t")[:2])
+
+
+def used_names():
+    """Text of everything tr3x hands Rex, to mark entries it relies on."""
+    blob = []
+    for d in ("tr3x/src", "rex"):
+        for dirpath, _, files in os.walk(os.path.join(ROOT, d)):
+            for f in files:
+                with open(os.path.join(dirpath, f), errors="ignore") as fh:
+                    blob.append(fh.read())
+    return "\n".join(blob)
+
+
+def ident(line):
+    name = line.split("\t")[1].split(" › ")[0]
+    # `rex.session.new_window{ ... }` → rex.session.new_window, `rex do ACTION` → rex do
+    m = re.match(r"[\w.]+(?: [a-z][\w-]*)?", name)
+    return m.group(0) if m else name
+
+
+def report(old, new, label):
+    old_k = {key(l): l for l in old}
+    new_k = {key(l): l for l in new}
+    added = [new_k[k] for k in new_k if k not in old_k]
+    removed = [old_k[k] for k in old_k if k not in new_k]
+    promoted = [new_k[k] for k in new_k if k in old_k and old_k[k] != new_k[k] and len(new_k[k].split("\t")) == 2]
+    retagged = [new_k[k] for k in new_k if k in old_k and old_k[k] != new_k[k] and len(new_k[k].split("\t")) == 3]
+    uses = used_names()
+
+    def row(line, kids=()):
+        page, name, *tag = line.split("\t")
+        i = ident(line)
+        mark = f" · **tr3x calls `{i}`**" if re.search(r"(?<![\w.])" + re.escape(i) + r"(?!\w)", uses) else ""
+        t = f" · {tag[0][1:-1]}" if tag else ""
+        k = " (" + ", ".join(f"`{c}`" for c in kids) + ")" if kids else ""
+        return f"- `{name}`{k}{t}{mark}"
+
+    out = [f"### Rex docs {label}".rstrip(), ""]
+    for title, items in (
+        ("Added", added),
+        ("In Preview now", promoted),
+        ("Channel changed", retagged),
+        ("Removed", removed),
+    ):
+        if not items:
+            continue
+        out.append(f"#### {title} ({len(items)})")
+        # A new or removed entry lists its flags or fields on its own line.
+        parents = {key(l) for l in items}
+        kids = {}
+        for l in items:
+            page, name = key(l).split("\t")
+            if " › " in name and f"{page}\t{name.split(' › ')[0]}" in parents:
+                kids.setdefault(f"{page}\t{name.split(' › ')[0]}", []).append(name.split(" › ", 1)[1])
+        page = None
+        for line in sorted(items):
+            p, name = key(line).split("\t")
+            if " › " in name and f"{p}\t{name.split(' › ')[0]}" in parents:
+                continue
+            if p != page:
+                out += ["", f"[{p}]({DOCS}{p}):"] if page else [f"[{p}]({DOCS}{p}):"]
+                page = p
+            out.append(row(line, kids.get(key(line), ())))
+        out.append("")
+    if len(out) == 2:
+        out.append("No change.")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check")
+    ap.add_argument("--write")
+    ap.add_argument("--label", default="")
+    a = ap.parse_args()
+    new = surface()
+    if not new:
+        sys.exit("rex-surface: the docs listed nothing; their format changed")
+    if a.check:
+        old = load(a.check) if os.path.exists(a.check) else []
+        sys.stdout.write(report(old, new, a.label))
+    else:
+        sys.stdout.write("\n".join(new) + "\n")
+    if a.write:
+        with open(a.write, "w") as f:
+            f.write(f"# Rex's documented surface ({a.label}). Written by scripts/rex-surface.\n")
+            f.write("\n".join(new) + "\n")
+
+
+if __name__ == "__main__":
+    main()

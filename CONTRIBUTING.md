@@ -47,6 +47,16 @@ tests still pass. Check it locally with:
 target/release/tr3x surface --check tr3x/t3-surface.json
 ```
 
+Rex does the same at a slower pace. `rex/surface.txt` lists every command, flag, API method and
+field, Lua call, event, action and setting in Rex's reference docs, Bleeding Edge included. A
+[daily workflow](.github/workflows/rex.yml) keeps one issue up to date with what was added,
+removed or promoted to Preview, and marks what tr3x already calls. Rex's release notes are in
+its beta Discord, so the docs are the part a workflow can read. Check it locally with:
+
+```sh
+scripts/rex-surface --check rex/surface.txt
+```
+
 ## Releasing
 
 Push a tag such as `v0.2.0` and `release.yml` builds each platform, checks every archive, puts
