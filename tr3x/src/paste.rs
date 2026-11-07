@@ -411,4 +411,34 @@ mod tests {
         assert_eq!(unescape_url("/a/Shot%201.png"), "/a/Shot 1.png");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn rex_upload_paste() {
+        // What Rex 1853 pastes on the host after a drop or paste from another device: the
+        // upload's path, shell-escaped, then a space.
+        let dir = std::env::temp_dir()
+            .join(format!("tr3x-upload-test-{}", std::process::id()))
+            .join("uploads/108642-b45c3ce270a4107f/01a1b838/71b19945");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("Screen Shot 1.webp"), dir.join("it's.png"));
+        std::fs::write(&a, b"RIFF").unwrap();
+        std::fs::write(&b, b"\x89PNG").unwrap();
+        let escape = |p: &Path| p.to_string_lossy().replace(' ', "\\ ").replace('\'', "\\'");
+        let pasted = format!("{} {} ", escape(&a), escape(&b));
+        let Some(Got::Images(images)) = dropped(&pasted) else {
+            panic!("not attached: {pasted}");
+        };
+        let names: Vec<_> = images
+            .iter()
+            .map(|i| (i.name.as_str(), i.mime.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Screen Shot 1.webp", "image/webp"),
+                ("it's.png", "image/png")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir.ancestors().nth(4).unwrap());
+    }
 }

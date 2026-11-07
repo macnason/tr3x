@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Pictures pasted or dropped into Reply from another device attach, with Rex 1853 or later: Rex copies them to the host. tr3x no longer receives pictures by Taildrop.
 - `/clear` starts a fresh session in the same thread, as in T3 0.1.8. The next message goes to a new provider session, the conversation marks it **New session**, and Esc keeps the current one. It replaces the agent's own `/clear`, which ended a session T3 still treated as live.
 - When an agent asks for a secret, Reply asks for it. What you type shows as dots, Enter gives it to T3 and Decline says no; the thread only says what was asked for. Before, the request didn't show and the agent waited. Rex marks the tab `?` while it waits.
 - A request to link another machine shows in the conversation, with what became of it.

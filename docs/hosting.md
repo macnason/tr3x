@@ -53,12 +53,9 @@ own, and its threads show twice, under **This Mac** and under the host.
 
 ## Pictures from another device
 
-Rex carries text into a pane on another machine, but not pictures or files: a picture's ⌘V
-arrives as a bare key, and a drop as nothing. Send pictures to the host with Taildrop instead:
-Share → Tailscale → the host, on a Mac or a phone, or `tailscale file cp shot.png <host>:`. Sync
-takes them in and attaches each to the Reply of the thread whose window is active, as if it had
-been pasted. Files that aren't pictures are kept in tr3x's state folder, in `taildrop-kept`.
-Taildrop must be on for your tailnet.
+Paste or drop a picture into Reply from any device. Rex 1853 and later copy it to the machine the
+pane runs on and paste its path there, and Reply attaches the picture. An older Rex carries only
+text across machines: Reply says to update it.
 
 ## When something looks wrong
 
