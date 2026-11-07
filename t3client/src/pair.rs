@@ -21,11 +21,8 @@ pub enum How {
     Ssh(String),
     /// A pairing link the user pasted, in any form T3 accepts.
     Link(String),
-    /// A code a machine minted and posted to Rex's join address, from `origins`.
-    Joined {
-        origins: Vec<String>,
-        minted: auth::Minted,
-    },
+    /// The T3 CLI on a Rex host, by its label in `rex hosts`.
+    Rex(String),
 }
 
 /// Pairs with a machine and saves it. Returns the machine as saved.
@@ -39,6 +36,7 @@ pub(crate) async fn again_locked(store: &Store, machine: &Machine) -> Result<Mac
     let how = match (machine.via, &machine.ssh) {
         (Via::Local, _) => How::Local,
         (Via::Ssh, Some(host)) => How::Ssh(host.clone()),
+        (Via::Rex, _) if machine.rex.is_some() => How::Rex(machine.rex.clone().unwrap_or_default()),
         _ => return Err(crate::env::needs_pairing(machine)),
     };
     pair_locked(store, how, Some(&machine.id)).await
@@ -63,7 +61,7 @@ async fn reach(origins: &[String], expect: Option<&str>) -> Result<Descriptor> {
 
 async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Machine> {
     let label = client_label();
-    let (origins, code, known_id, via, ssh) = match &how {
+    let (origins, code, known_id, via, ssh, rex) = match &how {
         How::Local => {
             let local = Local::read();
             let code = auth::local_code(&local, &label).await?;
@@ -72,6 +70,7 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
                 code,
                 local.environment_id.clone(),
                 Via::Local,
+                None,
                 None,
             )
         }
@@ -94,19 +93,42 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
                 found.environment_id,
                 Via::Ssh,
                 Some(host.clone()),
+                None,
             )
         }
         How::Link(text) => {
             let target = parse_link(text)?;
-            (vec![target.origin], target.code, None, Via::Link, None)
+            (
+                vec![target.origin],
+                target.code,
+                None,
+                Via::Link,
+                None,
+                None,
+            )
         }
-        How::Joined { origins, minted } => (
-            origins.clone(),
-            minted.code.clone(),
-            minted.environment_id.clone(),
-            Via::Join,
-            None,
-        ),
+        How::Rex(host) => {
+            let minted = auth::rex_code(host, &label).await?;
+            let port = minted.port.unwrap_or(3773);
+            let mut origins: Vec<String> = minted
+                .host
+                .iter()
+                .map(|h| format!("http://{}:{port}", h.trim_end_matches('.')))
+                .collect();
+            for origin in tailnet_origins(port).await {
+                if !origins.contains(&origin) {
+                    origins.push(origin);
+                }
+            }
+            (
+                origins,
+                minted.code,
+                minted.environment_id,
+                Via::Rex,
+                None,
+                Some(host.clone()),
+            )
+        }
     };
     if let (Some(expect), Some(known)) = (expect, known_id.as_deref())
         && expect != known
@@ -126,7 +148,7 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
         revoke(
             &found.origin,
             via,
-            ssh.as_deref(),
+            ssh.as_deref().or(rex.as_deref()),
             &previous,
             replacement.as_ref(),
         )
@@ -148,6 +170,7 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
         alias,
         origins,
         ssh,
+        rex,
         via,
         version: found.server_version.clone(),
     });
@@ -162,11 +185,12 @@ async fn pair_locked(store: &Store, how: How, expect: Option<&str>) -> Result<Ma
 }
 
 /// Revokes `credential`'s session at `origin`: with the token that replaces it where there is
-/// one, else through the machine's CLI. Returns whether it did.
+/// one, else through the machine's CLI, over SSH or through Rex at `host`. Returns whether it
+/// did.
 async fn revoke(
     origin: &str,
     via: Via,
-    ssh: Option<&str>,
+    host: Option<&str>,
     credential: &Credential,
     replacement: Option<&Credential>,
 ) -> bool {
@@ -178,9 +202,10 @@ async fn revoke(
         return true;
     }
     let local = Local::read();
-    let cli = match (via, ssh) {
+    let cli = match (via, host) {
         (Via::Local, _) => auth::Cli::Local(&local),
         (Via::Ssh, Some(host)) => auth::Cli::Ssh(host),
+        (Via::Rex, Some(host)) => auth::Cli::Rex(host),
         _ => return false,
     };
     auth::revoke(cli, credential).await.unwrap_or(false)
@@ -219,7 +244,7 @@ pub async fn forget(store: &Store, machine: &Machine) -> Result<Forgot> {
         if revoke(
             &origin,
             machine.via,
-            machine.ssh.as_deref(),
+            machine.ssh.as_deref().or(machine.rex.as_deref()),
             &credential,
             None,
         )
@@ -249,6 +274,8 @@ pub struct Candidate {
     pub origin: String,
     /// An SSH host from `~/.ssh/config` that reaches it, for pairing without a link.
     pub ssh: Option<String>,
+    /// A Rex host (its label in `rex hosts`) on the same machine, which pairs it without SSH.
+    pub rex: Option<String>,
 }
 
 pub fn tailscale_bin() -> Option<String> {
@@ -402,6 +429,7 @@ pub async fn candidates(home: Option<&Env>, registry: &Registry) -> Vec<Candidat
     let mut seen: HashSet<String> = registry.machines.iter().map(|m| m.id.clone()).collect();
     seen.extend(registry.home.clone());
     let hosts = ssh_hosts().await;
+    let rex_hosts = rex_hosts().await;
     let mut out = Vec::new();
     for d in found {
         if !seen.insert(d.environment_id.clone()) {
@@ -414,6 +442,7 @@ pub async fn candidates(home: Option<&Env>, registry: &Registry) -> Vec<Candidat
             .and_then(|h| h.split(':').next())
             .unwrap_or_default()
             .to_ascii_lowercase();
+        let rex = rex_host_for(&rex_hosts, &host, d.name());
         let ssh = hosts
             .iter()
             .find(|(_, reaches)| *reaches == host)
@@ -424,22 +453,103 @@ pub async fn candidates(home: Option<&Env>, registry: &Registry) -> Vec<Candidat
             label: d.name().to_string(),
             origin: d.origin.clone(),
             ssh,
+            rex,
         });
     }
-    // A tailnet name with no SSH config entry counts only once SSH gets in with a key.
+    // A tailnet name with no SSH config entry counts only once SSH gets in with a key, and a
+    // Rex host only once it runs a script.
     let checks = out.iter().map(|c| async move {
-        match &c.ssh {
-            Some(host) if host.ends_with(".ts.net") => auth::ssh_reaches(host).await,
-            _ => true,
-        }
+        let ssh = async {
+            match &c.ssh {
+                Some(host) if host.ends_with(".ts.net") => auth::ssh_reaches(host).await,
+                _ => true,
+            }
+        };
+        let rex = async {
+            match &c.rex {
+                Some(host) => auth::rex_reaches(host).await,
+                None => false,
+            }
+        };
+        tokio::join!(ssh, rex)
     });
     let reaches = futures_util::future::join_all(checks).await;
-    for (c, ok) in out.iter_mut().zip(reaches) {
-        if !ok {
+    for (c, (ssh, rex)) in out.iter_mut().zip(reaches) {
+        if !ssh {
             c.ssh = None;
+        }
+        if !rex {
+            c.rex = None;
         }
     }
     out
+}
+
+/// Your Rex hosts, from `rex hosts --json`: each one's label and the machine names its
+/// addresses give, without the `-rex` Rex's own tailnet device adds.
+async fn rex_hosts() -> Vec<(String, Vec<String>)> {
+    let Ok(Ok(output)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(auth::rex_path())
+            .args(["--autostart=false", "hosts", "--json"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Value>(&output.stdout)
+        .map(|v| read_rex_hosts(&v))
+        .unwrap_or_default()
+}
+
+fn read_rex_hosts(list: &Value) -> Vec<(String, Vec<String>)> {
+    list["hosts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            let host = &h["host"];
+            let label = host["label"]
+                .as_str()
+                .filter(|l| !l.is_empty())?
+                .to_string();
+            let names = host["endpoints"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.as_str())
+                .filter_map(|e| {
+                    let name = e
+                        .split("://")
+                        .nth(1)
+                        .unwrap_or(e)
+                        .split([':', '/'])
+                        .next()?;
+                    let first = name.split('.').next()?.to_ascii_lowercase();
+                    Some(first.strip_suffix("-rex").unwrap_or(&first).to_string())
+                })
+                .collect();
+            Some((label, names))
+        })
+        .collect()
+}
+
+/// The Rex host on the machine at `host` (an address) that T3 calls `label`: one whose address
+/// names the same machine, else one labelled the same.
+fn rex_host_for(hosts: &[(String, Vec<String>)], host: &str, label: &str) -> Option<String> {
+    let first = host.split('.').next().unwrap_or(host).to_ascii_lowercase();
+    hosts
+        .iter()
+        .find(|(_, names)| names.contains(&first))
+        .or_else(|| {
+            hosts
+                .iter()
+                .find(|(l, _)| l.eq_ignore_ascii_case(label) || l.eq_ignore_ascii_case(&first))
+        })
+        .map(|(l, _)| l.clone())
 }
 
 #[cfg(test)]
@@ -464,6 +574,31 @@ mod tests {
         let mut aliases = Vec::new();
         ssh_aliases(&outer, 0, &mut aliases);
         assert_eq!(aliases, ["box", "one", "two"]);
+    }
+
+    #[test]
+    fn a_rex_host_is_found_by_its_machine_or_its_label() {
+        let list = serde_json::json!({"hosts": [
+            {"host": {"label": "Omarchy", "endpoints": ["https://omarchy-rex.tail1.ts.net"]}},
+            {"host": {"label": "air", "endpoints": ["https://livbook-rex.tail1.ts.net"]}},
+            {"host": {"label": "studio", "endpoints": ["http://10.0.0.4:7297"]}},
+            {"host": {"label": "", "endpoints": ["https://nolabel.tail1.ts.net"]}},
+        ]});
+        let hosts = read_rex_hosts(&list);
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(
+            rex_host_for(&hosts, "omarchy.tail1.ts.net", "Omarchy").as_deref(),
+            Some("Omarchy")
+        );
+        assert_eq!(
+            rex_host_for(&hosts, "livbook.tail1.ts.net", "Liv's MacBook").as_deref(),
+            Some("air")
+        );
+        assert_eq!(
+            rex_host_for(&hosts, "studio.tail1.ts.net", "Studio").as_deref(),
+            Some("studio")
+        );
+        assert_eq!(rex_host_for(&hosts, "other.tail1.ts.net", "other"), None);
     }
 
     #[test]

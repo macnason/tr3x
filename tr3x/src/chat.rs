@@ -494,10 +494,16 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(embed) = ctx.embeds.get(&block.item_id) {
         lines.push(String::new());
-        let open = crate::link::osc8(ctx.link, "Open in T3 Code ↗");
+        let mut open = crate::link::osc8(ctx.link, "Open in T3 Code ↗");
+        // The page itself, where this Mac keeps it: a click opens it, and Rex's Quick Look
+        // (⇧⌘-click) previews it in place.
+        if let Some(html) = ctx.media.and_then(|m| m.html_file(&embed.attachment)) {
+            let url = format!("file://{}", percent(&html.to_string_lossy()));
+            open = format!("{}  {open}", crate::link::osc8(&url, "Preview"));
+        }
         lines.push(format!(
             "{BOLD}◇ {}{RESET}  {DIM}{open}{RESET}",
-            fit(&one_line(&embed.title), width.saturating_sub(22))
+            fit(&one_line(&embed.title), width.saturating_sub(32))
         ));
         if let Some(media) = ctx.media
             && let Some(png) = media.snapshots.get(&embed.attachment)
@@ -825,14 +831,23 @@ fn within(text: &str, max: usize) -> String {
     out
 }
 
+/// The `app` Rex knows the provider the thread's next message goes to by, for its icon.
+fn app_of(composer: &crate::compose::Composer) -> &'static str {
+    let instance = composer.next_instance();
+    crate::icons::program_name(crate::icons::driver_of(composer.config.as_ref(), &instance))
+        .unwrap_or("t3code")
+}
+
 /// OSC 7501 for T3's status word, as Rex's tabs and sidebar show it under the window's label,
-/// which already names the thread. `msg` is that line: what the thread is waiting on you for,
+/// which already names the thread. `app` names the provider, so Rex shows its icon and name
+/// (`claude`, `codex`, …), else `t3code`. `msg` is that line: what the thread is waiting on you for,
 /// when it is, else the project and the status word, or the project alone when idle. `title`
 /// is the thread's `name`, else the project: Go to Anything's Activity list and Rex's
 /// notifications have no window label to go by. `shown` is the word the line says, which can differ from `word`, the one
 /// the state comes from: a finished run you've already seen still says Done, at rest. Both
 /// are cut to the protocol's limits: 2048 and 192 bytes.
 fn status_sequence(
+    app: &str,
     word: Option<&str>,
     shown: Option<&str>,
     ask: Option<&str>,
@@ -848,7 +863,7 @@ fn status_sequence(
         _ => ("idle", ""),
     };
     let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    let mut seq = format!("\x1b]7501;state={state}{extra}:app=t3code");
+    let mut seq = format!("\x1b]7501;state={state}{extra}:app={app}");
     let title = within(name.or(project).unwrap_or_default(), 192);
     if !title.is_empty() {
         seq.push_str(&format!(":title={}", b64(&title)));
@@ -1346,6 +1361,7 @@ impl Pane {
         shell: &ShellState,
         thread: Option<&Value>,
         state: Option<&ThreadState>,
+        app: &str,
     ) {
         let Some(thread) = thread else { return };
         let now = t3::now_ms();
@@ -1371,6 +1387,7 @@ impl Pane {
         let ask = state.and_then(crate::ask::line);
         let name = thread["title"].as_str().map(one_line);
         let seq = status_sequence(
+            app,
             word,
             shown,
             ask.as_deref(),
@@ -1507,7 +1524,6 @@ async fn event_loop(
     // Reply draws again only when something it shows may have changed.
     let mut reply = true;
     let mut focused = true;
-    let mut renamed = false;
     // The binary was replaced by an update: start again on it once nothing is typed.
     let mut stale = false;
     // Whether clicks are on, and when the wheel last turned them off for the scrollback.
@@ -1569,7 +1585,7 @@ async fn event_loop(
                 shell.apply(&item);
                 if role != Role::Reply {
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
-                    pane.set_status(&shell, thread, composer.state.as_ref());
+                    pane.set_status(&shell, thread, composer.state.as_ref(), app_of(&composer));
                 }
             },
             Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
@@ -1746,30 +1762,6 @@ async fn event_loop(
             dirty = true;
             reply = true;
         }
-        // A thread that moved to another provider: once nothing is typed, start again under
-        // that provider's name, so Rex's sidebar shows its glyph. The thread prints again from
-        // the top.
-        if !renamed && composer.idle() && composer.state.is_some() {
-            // The provider the next message goes to: the thread's, or the one picked for it
-            // while it worked.
-            let instance = composer.next_instance();
-            let driver = crate::icons::driver_of(composer.config.as_ref(), &instance);
-            let want = crate::icons::program_name(driver).unwrap_or("tr3x");
-            if !instance.is_empty()
-                && composer.config.is_some()
-                && crate::icons::started_as() != want
-            {
-                renamed = true;
-                out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
-                let _ = crossterm::terminal::disable_raw_mode();
-                crate::icons::become_program(driver);
-                // Still here: the pane couldn't start again, so it carries on as it was.
-                let _ = crossterm::terminal::enable_raw_mode();
-                pane.reflow = true;
-                dirty = true;
-                reply = true;
-            }
-        }
         // Reply's rows at the bottom, and the conversation's above them.
         composer.cols = pane.cols;
         composer.rows = pane.rows;
@@ -1810,7 +1802,7 @@ async fn event_loop(
                 pane.parent = parent;
             }
             pane.set_title(s, thread.and_then(|t| project_name(&shell, t)));
-            pane.set_status(&shell, thread, Some(s));
+            pane.set_status(&shell, thread, Some(s), app_of(&composer));
             text.push_str(&pane.draw(s, thread));
             dirty = false;
         }
@@ -2135,6 +2127,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_html_embed_on_this_mac_links_its_page() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("page 1.html"), "<p>hi</p>").unwrap();
+        let mut media = Media::new(None);
+        media.attachments = Some(dir.path().to_path_buf());
+        let block = tool("command_execution", "$ ls", "ls", "");
+        let embed = |attachment: &str| media::Embed {
+            attachment: attachment.into(),
+            title: "Options".into(),
+            height: 400,
+        };
+        let line = |attachment: &str| {
+            let embeds = HashMap::from([(block.item_id.clone(), embed(attachment))]);
+            let ctx = Ctx {
+                width: 80,
+                frame: 0,
+                offset: 0,
+                embeds: &embeds,
+                media: Some(&media),
+                link: "https://t3/env/thread",
+                files: &crate::link::FileLinks::default(),
+            };
+            block_lines(&block, &ctx).join("\n")
+        };
+        let url = format!(
+            "file://{}/page%201.html",
+            percent(&dir.path().to_string_lossy())
+        );
+        assert!(line("page 1").contains(&format!("\x1b]8;;{url}\x1b\\Preview")));
+        assert!(!line("elsewhere").contains("Preview"));
+    }
+
     #[test]
     fn activity_names_the_pane_after_its_thread() {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
@@ -2146,6 +2171,7 @@ mod tests {
         assert_eq!(terminal_title(None, None), "T3");
         assert_eq!(
             status_sequence(
+                "t3code",
                 Some("Working"),
                 Some("Working"),
                 None,
@@ -2163,28 +2189,52 @@ mod tests {
     #[test]
     fn status_maps_to_rex_states() {
         assert!(
-            status_sequence(Some("Approval"), Some("Approval"), None, Some("t"), None)
-                .contains("state=blocked:kind=permission")
+            status_sequence(
+                "t3code",
+                Some("Approval"),
+                Some("Approval"),
+                None,
+                Some("t"),
+                None
+            )
+            .contains("state=blocked:kind=permission")
         );
         assert!(
-            status_sequence(Some("Input"), Some("Input"), None, Some("t"), None)
-                .contains("state=blocked:kind=question")
+            status_sequence(
+                "t3code",
+                Some("Input"),
+                Some("Input"),
+                None,
+                Some("t"),
+                None
+            )
+            .contains("state=blocked:kind=question")
         );
         assert!(
-            status_sequence(Some("Working"), Some("Working"), None, Some("t"), None)
-                .contains("state=working")
+            status_sequence(
+                "t3code",
+                Some("Working"),
+                Some("Working"),
+                None,
+                Some("t"),
+                None
+            )
+            .contains("state=working")
         );
         assert!(
-            status_sequence(Some("Done"), Some("Done"), None, Some("t"), None)
+            status_sequence("t3code", Some("Done"), Some("Done"), None, Some("t"), None)
                 .contains("state=done")
         );
-        assert!(status_sequence(None, None, None, Some("t"), None).contains("state=idle"));
+        assert!(
+            status_sequence("t3code", None, None, None, Some("t"), None).contains("state=idle")
+        );
     }
 
     #[test]
     fn status_says_what_is_asked_within_the_limits() {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
         let seq = status_sequence(
+            "t3code",
             Some("Approval"),
             Some("Approval"),
             Some("Run pnpm test?"),
@@ -2202,6 +2252,7 @@ mod tests {
         // Not blocked: the project and the status word, whatever was asked before.
         assert!(
             status_sequence(
+                "t3code",
                 Some("Working"),
                 Some("Working"),
                 Some("x"),
@@ -2212,7 +2263,7 @@ mod tests {
         );
         // Idle: the project alone, on the line under the label; no project, the word alone.
         assert_eq!(
-            status_sequence(None, None, None, Some("tr3x"), None),
+            status_sequence("t3code", None, None, None, Some("tr3x"), None),
             format!(
                 "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
                 b64("tr3x"),
@@ -2220,12 +2271,12 @@ mod tests {
             )
         );
         assert_eq!(
-            status_sequence(None, None, None, None, None),
+            status_sequence("t3code", None, None, None, None, None),
             "\x1b]7501;state=idle:app=t3code\x1b\\"
         );
         // A finished run you've seen: Done on the line, at rest in Rex.
         assert_eq!(
-            status_sequence(None, Some("Done"), None, Some("tr3x"), None),
+            status_sequence("t3code", None, Some("Done"), None, Some("tr3x"), None),
             format!(
                 "\x1b]7501;state=idle:app=t3code:title={}:msg={}\x1b\\",
                 b64("tr3x"),
@@ -2233,12 +2284,19 @@ mod tests {
             )
         );
         assert!(
-            status_sequence(Some("Done"), Some("Done"), None, None, None)
+            status_sequence("t3code", Some("Done"), Some("Done"), None, None, None)
                 .ends_with(&format!(":app=t3code:msg={}\x1b\\", b64("Done")))
         );
         // Over the limits: cut on a character, never mid-way through one.
         let long = "é".repeat(2000);
-        let seq = status_sequence(Some("Input"), Some("Input"), Some(&long), Some(&long), None);
+        let seq = status_sequence(
+            "t3code",
+            Some("Input"),
+            Some("Input"),
+            Some(&long),
+            Some(&long),
+            None,
+        );
         let field = |key: &str| {
             let at = seq.find(&format!(":{key}=")).unwrap() + key.len() + 2;
             let end = seq[at..].find([':', '\x1b']).unwrap() + at;
@@ -2353,6 +2411,7 @@ mod tests {
         let b64 = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
         assert_eq!(
             status_sequence(
+                "t3code",
                 Some("Limited"),
                 Some("Limited · resumes 3pm"),
                 None,

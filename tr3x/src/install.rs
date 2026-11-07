@@ -18,7 +18,7 @@ const LABEL: &str = "com.t3rex.sync";
 const LUA: &str = include_str!("../../rex/tr3x.lua");
 const REQUIRE: &str = "require(\"tr3x\") -- T3 Code in Rex, added by tr3x install";
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
@@ -308,10 +308,7 @@ fn log_tail(n: usize) -> Vec<String> {
 
 /// A line of sync's log that says something went wrong, rather than what it synced.
 fn is_error(line: &str) -> bool {
-    !(line.contains(" thread(s)")
-        || line.ends_with(" is back")
-        || line.ends_with(" joined")
-        || line.contains(": following "))
+    !(line.contains(" thread(s)") || line.ends_with(" is back") || line.contains(": following "))
 }
 
 /// Waits for a sync that started after `since` to have the session. A session that hasn't
@@ -405,9 +402,20 @@ pub async fn install(update: bool) -> Result<()> {
         "Rex config",
         &format!("{}/tr3x.lua, {what}", dir.display()),
     );
-    // Earlier versions turned Rex's pane fading off for every session.
-    if !fade::enabled() && fade::restore() {
+    // Earlier versions could turn Rex's pane fading off.
+    if fade::restore() {
         step(true, "Put Rex's pane fading back", "");
+    }
+    if crate::platform::MAC {
+        match crate::finder::install(&bin) {
+            Ok(true) => step(
+                true,
+                "Finder Quick Action",
+                "New T3 Thread Here, for a folder",
+            ),
+            Ok(false) => {}
+            Err(e) => mark(Mark::Warn, "Finder Quick Action", &format!("{e:#}")),
+        }
     }
 
     std::fs::create_dir_all(state::dir())?;
@@ -456,8 +464,8 @@ pub async fn install(update: bool) -> Result<()> {
     Ok(())
 }
 
-/// Offers to pair the machines on the tailnet that run T3: over SSH with one confirm where an
-/// SSH host reaches them, else with a pasted link. Without a terminal to ask in, says how.
+/// Offers to pair the machines on the tailnet that run T3: through their Rex host or over SSH
+/// with one confirm where one reaches them, else with a pasted link. Without a terminal to ask in, says how.
 async fn other_machines() {
     let hub = crate::t3::hub();
     let home = hub.home();
@@ -471,21 +479,13 @@ async fn other_machines() {
             mark(
                 Mark::Warn,
                 &format!("{} runs T3 too", c.label),
-                &pair_hint(c).await,
+                &crate::machines::way_hint(c),
             );
         }
         return;
     }
     for c in &found {
         crate::machines::offer(&hub, c).await;
-    }
-}
-
-/// How to pair a machine found on the tailnet: over SSH where it reaches, else joining.
-async fn pair_hint(c: &t3client::pair::Candidate) -> String {
-    match &c.ssh {
-        Some(host) => format!("`tr3x pair {host}`"),
-        None => crate::machines::join_hint(&c.label).await,
     }
 }
 
@@ -497,6 +497,9 @@ pub async fn uninstall() -> Result<()> {
     let _ = std::fs::remove_file(dir.join("tr3x.lua"));
     let _ = reload(&rex).await;
     step(true, "Removed the Rex config", "");
+    if crate::finder::remove() {
+        step(true, "Removed the Finder Quick Action", "");
+    }
     retire_launchd().await;
     sync::stop().await;
     step(true, "Stopped sync", "");
@@ -573,6 +576,26 @@ pub async fn doctor() -> Result<()> {
                 println!(
                     "  Run `rex server stop`, then open Rex Beta. Its server starts on the new version, and tr3x puts its tabs back."
                 );
+            }
+        }
+    }
+    // Each Rex app for Mac on this server: its build, and an update it's holding.
+    if sessions.is_ok() {
+        for app in rex.mac_apps().await.unwrap_or_default() {
+            let what = format!("Rex app · {}", app.name);
+            match rex.app_action(&app.id, "client.update.status").await {
+                Ok(status) => match crate::rex::rex_update(&status) {
+                    None => step(true, &what, &crate::rex::rex_build(&status)),
+                    Some(to) => {
+                        mark(
+                            Mark::Warn,
+                            &format!("{what} has an update"),
+                            &format!("{} → {to}", crate::rex::rex_build(&status)),
+                        );
+                        println!("  Run `tr3x update`.");
+                    }
+                },
+                Err(e) => mark(Mark::Warn, &what, &format!("{e:#}")),
             }
         }
     }
@@ -700,10 +723,7 @@ pub async fn doctor() -> Result<()> {
                     mark(
                         Mark::Warn,
                         &format!("Rex's pairing with {name} ends within a week"),
-                        &format!(
-                            "To pair it again, {}",
-                            crate::machines::join_hint(&name).await
-                        ),
+                        &format!("To pair it again, {}", crate::machines::link_hint(&name)),
                     );
                 }
             }
@@ -722,7 +742,7 @@ pub async fn doctor() -> Result<()> {
         mark(
             Mark::Warn,
             &format!("{} runs T3 and isn't paired", c.label),
-            &pair_hint(&c).await,
+            &crate::machines::way_hint(&c),
         );
     }
 

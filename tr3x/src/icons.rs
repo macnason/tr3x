@@ -354,8 +354,8 @@ pub async fn provider(provider: &Value, dark: bool) -> Icon {
     }
 }
 
-/// The program name Rex shows a provider's glyph for, by T3 provider driver. Rex picks a
-/// window's sidebar icon from the name its focused pane's program was started as.
+/// The name Rex shows a provider's icon for, by T3 provider driver: a thread's pane reports
+/// it as OSC 7501's `app`, so the window takes that provider's icon and name.
 pub fn program_name(driver: &str) -> Option<&'static str> {
     Some(match driver {
         "claudeAgent" => "claude",
@@ -383,56 +383,10 @@ pub fn driver_of<'a>(config: Option<&'a Value>, instance: &'a str) -> &'a str {
         .unwrap_or(instance)
 }
 
-/// `exe` under the name Rex knows `driver` by: a link in tr3x's state folder, made or fixed
-/// as needed. `exe` itself for a provider Rex has no glyph for.
-pub fn as_program(exe: &Path, driver: &str) -> PathBuf {
-    let Some(name) = program_name(driver) else {
-        return exe.to_path_buf();
-    };
-    let dir = crate::state::dir().join("bin");
-    let link = dir.join(name);
-    if std::fs::read_link(&link).ok().as_deref() != Some(exe) {
-        let _ = std::fs::create_dir_all(&dir);
-        let tmp = dir.join(format!(".{name}.{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        if std::os::unix::fs::symlink(exe, &tmp).is_err() || std::fs::rename(&tmp, &link).is_err() {
-            return exe.to_path_buf();
-        }
-    }
-    link
-}
-
 /// The real tr3x binary, through any provider link this process was started from.
 pub fn real_exe() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     std::fs::canonicalize(&exe).unwrap_or(exe)
-}
-
-/// The name this process was started as.
-pub fn started_as() -> String {
-    std::env::args_os()
-        .next()
-        .map(PathBuf::from)
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_default()
-}
-
-/// Starts this pane's program again under the name Rex shows `driver`'s glyph for, keeping
-/// its arguments, when it isn't running as that already. Returns only if it didn't.
-pub fn become_program(driver: &str) {
-    let want = program_name(driver).unwrap_or("tr3x");
-    if started_as() == want {
-        return;
-    }
-    let exe = real_exe();
-    let program = as_program(&exe, driver);
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    crate::scheme::stop();
-    use std::os::unix::process::CommandExt;
-    let _ = std::process::Command::new(&program)
-        .arg0(&program)
-        .args(args)
-        .exec();
 }
 
 /// The file this process started from, as device and inode, so a binary swapped in by an

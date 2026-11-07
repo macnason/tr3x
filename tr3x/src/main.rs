@@ -8,6 +8,7 @@ mod compose;
 mod draft;
 mod fade;
 mod find;
+mod finder;
 mod fold;
 mod icons;
 mod install;
@@ -23,6 +24,7 @@ mod picture;
 mod platform;
 mod pr;
 mod prompt;
+mod quick;
 mod render;
 mod reply;
 mod rex;
@@ -98,6 +100,19 @@ enum Command {
         /// The machine to start on.
         #[arg(long)]
         env: Option<String>,
+        /// Launch at once with this message, without the composer: for Shortcuts, Siri or a
+        /// script. `-` reads it from standard input.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// With --prompt: the project, by name or id. Default: the one worked in last.
+        #[arg(long, requires = "prompt")]
+        project: Option<String>,
+        /// With --prompt: the project whose folder holds this one, made a project if none does.
+        #[arg(long, requires = "prompt", conflicts_with = "project")]
+        folder: Option<std::path::PathBuf>,
+        /// With --prompt: don't go to the new thread's tab.
+        #[arg(long, requires = "prompt")]
+        no_open: bool,
     },
     /// The model picker, as the floating layer `model` opens runs it.
     #[command(hide = true)]
@@ -286,7 +301,8 @@ enum Command {
         #[arg(long, hide = true)]
         update: bool,
     },
-    /// Update tr3x, and T3 on each machine Rex follows. Asks before anything restarts.
+    /// Update tr3x, T3 on each machine Rex follows, and the Rex apps for Mac attached here. Asks
+    /// before anything restarts.
     Update {
         /// Only say what's out.
         #[arg(long)]
@@ -403,6 +419,8 @@ fn main() {
             unsafe { std::env::set_var(key, value) };
         }
     }
+    // Pairing through a Rex host uses the same `rex` as everything else.
+    t3client::auth::use_rex(crate::rex::Rex::find().bin);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -517,7 +535,31 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Compose { thread, passive } => chat::run(thread, passive, chat::Role::Reply).await,
         Command::Find { client } => find::run(client).await,
         Command::Reopen { client } => find::reopen_last(client).await,
-        Command::New { welcome, env } => new::run(welcome, env).await,
+        Command::New {
+            prompt: Some(prompt),
+            env,
+            project,
+            folder,
+            no_open,
+            ..
+        } => {
+            let prompt = if prompt == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                text
+            } else {
+                prompt
+            };
+            quick::run(quick::Ask {
+                prompt,
+                env,
+                project,
+                folder,
+                open: !no_open,
+            })
+            .await
+        }
+        Command::New { welcome, env, .. } => new::run(welcome, env).await,
         Command::Pick { thread, field } => pick::run(thread, field).await,
         Command::Model(t) => {
             let thread = t.resolve().await?;

@@ -18,14 +18,15 @@ its own: every message, approval and setting goes to T3.
   chips. Approvals and questions are buttons: one click, or one tap on a phone.
 - **A real terminal.** Rex's scrollback, find, selection and links all work. Markdown, tables,
   code, pictures and HTML previews render inline.
-- **Rex's markers are T3's.** A tab's dot and label show what its thread waits on: `●` approval,
-  `?` question, `✕` failed, `✓` done.
+- **Rex's markers are T3's.** A tab's dot shows what its thread waits on, and its icon the
+  provider: Claude, Codex, Cursor and the rest, as Rex shows them for their own CLIs.
 - **Every machine.** Threads from each machine you run T3 on share one session, in one order.
 - **Any screen.** Rex's Mac and iPhone apps watch the same session. **Fit to This Device** sizes
   it to the one you're on.
 - **Usage limits.** A thread stopped on its limit says when it resets. Reply shows what's left.
 - **Pull requests.** `/pr create` commits, pushes and opens one; `/pr` shows it in a drawer.
-- **Updates itself.** tr3x updates in the background, and `/update` updates T3 on any machine.
+- **Updates itself.** tr3x updates in the background, and `/update` updates T3 on any machine
+  and the Rex app on each Mac attached to it.
 
 ## Install
 

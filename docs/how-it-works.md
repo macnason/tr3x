@@ -20,7 +20,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - The order is T3's own sidebar logic, a port of `Sidebar.logic.ts` and `threadInbox.ts`
   in `t3client`, over every machine's threads at once. A pinned thread stays put while it
   works, as in T3.
-- A window the user closes is noticed on sync's next pass (at most 5 seconds). Sync settles the
+- A window the user closes is noticed at once: each session's watcher (`rex do`) prints on Rex's
+  `window_closed` event, and sync's 5-second pass catches anything it missed. Sync settles the
   thread with a plain `thread.settle`, never stopping a run. A thread that's running or waiting
   on you is only hidden until it changes. Every window going at once is the session closing,
   so nothing is settled then.
@@ -105,10 +106,9 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - Reply follows the machine's config subscription (`subscribeServerConfig`), so the usage
   beside its chip stays current: provider `usageLimits` windows appear at 20% remaining or
   less, or only the tightest when they don't all fit beside the chip whole. A used-up window says when it resets.
-- A window's label starts with a mark for T3's status word: `●` Approval, `?` Input, `✕`
-  Failed or Limited, `✓` Done or Woke. Working, Goal and Waiting have none, since Rex's spinner
-  shows them. Labels are plain text, so the mark has no colour. Sync relabels only when the
-  mark or title changes.
+- A window's label is the thread's title. What it waits on is Rex's own dot from the pane's
+  OSC 7501 report, on the Mac and on iPhone and iPad, and in Rex's Activity list. Sync
+  relabels only when the title changes.
 - Every input turns on the kitty keyboard protocol's first level (`CSI > 1 u`), and turns it off
   on every way out, a signal or a panic too. Without it Rex sends Shift+Enter as
   `CSI 27 ; 2 ; 13 ~`, which crossterm drops; with it Shift+Enter is `CSI 13 ; 2 u`.
@@ -240,7 +240,7 @@ for its notice.
   running there it asks first, since a restart stops them until T3 continues them
   (`threadRestartContinuation`). A background service hands the version to its launcher.
   Both need `environment:maintain`, which Rex asks for when it pairs. A token from before then
-  pairs again on its own where tr3x can (this Mac, SSH); a joined or linked machine is told
+  pairs again on its own where tr3x can (this Mac, a Rex host, SSH); a linked machine is told
   to pair again.
 
 ## Find Thread
@@ -257,10 +257,11 @@ of these brings it back.
 
 ## Provider glyphs
 
-Rex picks a window's sidebar glyph from the name its focused pane's program was started as. So
-tr3x starts the pane through a link named for the provider (`~/.local/state/tr3x/bin/claude`
-→ `tr3x`), without a login shell in between. A thread that moves to another provider takes the
-new glyph: the pane starts again under the new name once nothing is typed in Reply. Rex has no glyph for a project, and no way to set a custom one.
+A thread's pane names its provider in the OSC 7501 report it already sends, as `app` (`claude`,
+`codex`, `cursor`, `grok`, `gemini`, `opencode`, `pi`, …; `t3code` for one Rex doesn't know).
+Rex shows that provider's icon and name for the window. A thread that moves to another provider
+takes the new icon with its next report; nothing starts again. Rex has no glyph for a project,
+and no way to set a custom one.
 
 ## New threads
 
@@ -293,11 +294,11 @@ tr3x pairs with T3 the way T3's own apps do. A one-time pairing code is traded a
 
 - **This Mac**: T3's own CLI, `t3 auth pairing create`. The first tr3x process that needs T3
   does it, so there's nothing to set up.
-- **Joining**: `curl -fsSL http://<this Mac>:3779/join | sh` on the other machine. Sync
-  listens on this Mac's tailnet addresses only, and answers only machines `tailscale whois`
-  says are the same person's. The script runs the same command against that machine's own T3
-  and posts the code back; sync trades it with T3 at the machine's tailnet address, never one
-  the request names. `TR3X_JOIN_PORT` moves the port.
+- **A Rex host**: the same command on the other machine, through the Rex server there:
+  `rex -S <host> do` runs a Lua script whose `rex.exec` runs it with `sh`, as the account Rex's
+  server runs as, and hands back what it printed. Rex's own connection to the host does the
+  work, so there's no SSH, no keys and nothing listening here. Its `hostname` and the tailnet
+  give the addresses to try.
 - **SSH**: the same command on the other machine, over `ssh -o BatchMode=yes <host>`, as T3's
   desktop app does for its SSH machines. It finds `t3` on the PATH, in `~/.local/bin` or in
   `~/.t3/runtime/versions`. SSH never prompts; a host that wants a password says so and stops.
@@ -309,7 +310,9 @@ tr3x pairs with T3 the way T3's own apps do. A one-time pairing code is traded a
 (`peerLinks.list`), each checked at `:3773/.well-known/t3/environment`, and matches them to
 the hosts in `~/.ssh/config` (and the files it includes) by `ssh -G`. A machine with no entry
 there is tried at its tailnet name, and counts as SSH-reachable once `ssh` gets in with a key.
-The rest are offered the join command. Before a code is traded, the server's descriptor has to
+Each is matched to a Rex host too (`rex hosts --json`), by the machine its address names
+(without the `-rex` of Rex's own tailnet device) or by label, and counts once a script runs
+there; a Rex host goes first. The rest are asked for a link. Before a code is traded, the server's descriptor has to
 name the machine it came from.
 
 Each machine's id, name, alias, addresses and how it was paired are in `envs.json`; its token,
@@ -319,8 +322,8 @@ was issued for, checked on every connection. A day from running out, a token ren
 it mints a pairing code at `/api/auth/pairing-token`, trades it, and the new token revokes the
 old session (T3 lets a token revoke another session, not its own). That needs `access:write`,
 so it works however the machine was paired. A token without it, or one that's rejected, is
-replaced the way the machine was paired: again through the CLI here or over SSH, while a
-joined or linked machine needs joining again. Either way it happens under `pair.lock`, so
+replaced the way the machine was paired: again through the CLI here, through its Rex host or
+over SSH, while a linked machine (or one joined before 0.1.3) needs pairing again. Either way it happens under `pair.lock`, so
 panes that find it at once pair only once, and a failed renewal waits 10 minutes before the
 next try. `tr3x env forget` revokes Rex's session through the machine's CLI where tr3x can
 run it. Rex asks for `orchestration:read`, `orchestration:operate`, `access:read`,
@@ -348,8 +351,8 @@ command line as `--set-env`.
 5. reloads Rex's config, which starts sync,
 6. waits for the first sync and switches Rex to the **T3 Code** session. If sync doesn't
    arrive in 20 seconds, it prints the end of `sync.log` and exits with an error,
-7. offers each machine on the tailnet that runs T3: over SSH with one confirm, else the join
-   command to run there, or a link.
+7. offers each machine on the tailnet that runs T3: through its Rex host or over SSH with one
+   confirm, else a link.
 
 `tr3x uninstall` undoes all of it: it removes the `require` line and the actions, stops sync,
 closes only the sessions tr3x made, revokes Rex's session on each machine it can, and deletes
@@ -362,26 +365,12 @@ machine that needs pairing is a ✗; one that's out of reach, or a token that ca
 and ends within a week, is a warning. Machines on the tailnet that run T3 and aren't paired are listed. Each ✗ comes with its fix, and
 any ✗ exits non-zero. A missing headless Chromium is only a warning.
 
-## Pane fading
-
-Rex fades inactive panes, which dims the conversation while you type in Reply. It's one
-setting for the whole app (Settings → Interface → Pane Behavior → Fade inactive panes), and
-tr3x leaves it alone by default. With `"paneFade": "auto"` in `~/.config/tr3x/settings.json`,
-sync turns fading off while the Rex app on this Mac shows **T3 Code** and puts your own setting
-back everywhere else. A change you make in Rex's settings outside T3 Code becomes your
-setting. Taking the key out puts your setting back.
-
-Rex's server can't say which session an app shows, since every app is attached to every
-session. The app's own `Workspace.lastFocusedSession` preference follows it within a second, so
-sync reads that. Whether the running app applies a changed fade setting without a restart is
-the open question; the app only links the in-process change notification for its preferences.
-
 ## Repo layout
 
 | Path | |
 |---|---|
 | `tr3x/` | The crate: `sync.rs`, `machines.rs` (pair, envs, sessions), `chat.rs`, `compose.rs`, `ask.rs` (what a thread waits on), `actions.rs` (every action, for the palette and `/`), `slash.rs` (the `/` menu), `prompt.rs` (Rename and Delete's question), `surface.rs` (`tr3x surface`), `new.rs` (new thread), `find.rs` (Find Thread), `pick.rs` (model picker), `picker.rs` (chips, buttons and menus), `icons.rs`, `render.rs` (Markdown to ANSI), `media.rs`, `scheme.rs` (light or dark), `link.rs` (where a thread opens), `install.rs` (install, uninstall, doctor), `fade.rs`, `rex.rs`, `t3.rs`, `state.rs`, `width.rs`. |
-| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`, `join.rs`), the machines tr3x knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch, transcripts, and what a T3 build offers (`surface.rs`). The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
+| `t3client/` | The T3 client: pairing (`auth.rs`, `pair.rs`), the machines tr3x knows and their tokens (`store.rs`), one connection per machine (`env.rs`, `hub.rs`), T3's wire protocol (`rpc.rs`, `http.rs`, `descriptor.rs`), its state and sidebar logic (`projection.rs`, `inbox.rs`), models, launch, transcripts, and what a T3 build offers (`surface.rs`). The wire client, projection, models, launch, transcript and sidebar code started from [krishhgg/t3term](https://github.com/krishhgg/t3term) at d1d33e8 (MIT). |
 | `rex/tr3x.lua` | The Rex config `install` writes out: sync, actions and key bindings. |
 | `install.sh` | The one-command install: checks Rex and T3, gets the binary, runs `tr3x install`. |
 | `.github/workflows/` | `ci.yml` runs rustfmt, clippy and the tests. `surface.yml` checks each T3 nightly against `tr3x/t3-surface.json`. `release.yml` builds a universal macOS binary and Linux x86_64 and aarch64 binaries for a `v*` tag, checks them (`scripts/release-check`), stages them in a draft release with their SHA-256s and licenses, and publishes it once all are there. |
@@ -411,7 +400,6 @@ the workflow publishes the draft it staged, and `install.sh` downloads the lates
 - Rex has no per-pane setting for its pane-header buttons (split, float, zoom, close), so a
   thread's pane still shows them. The app has a global `Workspace.hiddenPaneButtons` preference,
   but `defaults write` with the button names didn't take effect in Rex 0.1.0 (1642) while it
-  ran, and hiding them everywhere would also hide them in your other sessions. Fading is
-  likewise only global; see [pane fading](#pane-fading).
+  ran, and hiding them everywhere would also hide them in your other sessions.
 - Other machines' pictures and HTML snapshots: attachments are read from T3's folder on this
   Mac. Over HTTP, `attachments` and `assets.createUrl` would serve them; not wired up yet.

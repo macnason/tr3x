@@ -184,15 +184,19 @@ else
   TR3X_REX="$REX" "$BIN" install
 fi
 
-# A machine that stays on is the one other devices follow. Say how, once. The first time, Rex's
-# tailnet device needs approving in a browser; its HTTPS name appears a minute after.
+# A machine that stays on is the one other devices follow. Say how, once: Rex's own QR code
+# for its tailnet address. The first time, Rex's tailnet device needs approving in a browser;
+# its HTTPS name appears a minute after.
 if [ "$OS" = Linux ] && "$REX" --autostart=false ls >/dev/null 2>&1; then
   i=0; URL=""; AUTH=""
   while [ $i -lt 12 ]; do
-    STATUS=$("$REX" --autostart=false server status 2>/dev/null || true)
-    URL=$(printf '%s\n' "$STATUS" | sed -n 's/^ *https: \(https:\/\/.*\)$/\1/p' | head -1)
-    AUTH=$(printf '%s\n' "$STATUS" | sed -n 's/^ *authenticate: //p' | head -1)
+    URL=$("$REX" --autostart=false server tailscale pair --json 2>/dev/null | sed -n 's/^ *"url": *"\(https:[^"]*\)".*$/\1/p' | head -1)
     [ -n "$URL" ] && break
+    STATUS=$("$REX" --autostart=false server status 2>/dev/null || true)
+    # A Rex from before `server tailscale pair` lists the address in its status.
+    URL=$(printf '%s\n' "$STATUS" | sed -n 's/^ *https: \(https:\/\/.*\)$/\1/p' | head -1)
+    [ -n "$URL" ] && break
+    AUTH=$(printf '%s\n' "$STATUS" | sed -n 's/^ *authenticate: //p' | head -1)
     [ -n "$AUTH" ] && break
     printf '%s\n' "$STATUS" | grep -q '^tailscale:' || break
     i=$((i+1)); sleep 2
@@ -201,10 +205,12 @@ if [ "$OS" = Linux ] && "$REX" --autostart=false ls >/dev/null 2>&1; then
     say ""
     say "Approve this machine on your tailnet so Rex on your other devices can follow it:"
     say "  $AUTH"
-    say "then run \`rex server status\` for the https address to add with \`rex hosts add\`."
+    say "then run \`rex server tailscale pair\` and scan its code with Rex on each device."
   elif [ -n "$URL" ]; then
     say ""
-    say "To follow this machine from Rex on another device:"
-    say "  rex hosts add $(hostname -s 2>/dev/null || echo host) $URL"
+    say "To follow this machine from Rex on another device, scan this with Pair via QR Code:"
+    "$REX" --autostart=false server tailscale pair 2>/dev/null || say "  $URL"
+    say "Or on a computer: rex hosts add $(hostname -s 2>/dev/null || echo host) $URL"
   fi
 fi
+

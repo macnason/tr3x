@@ -195,6 +195,136 @@ impl Rex {
         }
         Ok(())
     }
+
+    /// The Rex apps for Mac attached to this server, which update themselves through
+    /// `client.update.*`: each one's client id and its label, else its version.
+    pub async fn mac_apps(&self) -> Result<Vec<MacApp>> {
+        let clients = self.json(&["client", "ls", "--json"], None).await?;
+        Ok(mac_apps_in(&clients))
+    }
+
+    /// One of a client's own actions, such as `client.update.status`, and what it returns.
+    pub async fn app_action(&self, client: &str, action: &str) -> Result<Value> {
+        self.json(&["-C", client, "do", action, "--json"], None)
+            .await
+            .map_err(|e| {
+                let said = format!("{e:#}");
+                if said.to_lowercase().contains("remote control") {
+                    anyhow::anyhow!("turn on Remote Control in Rex's settings there")
+                } else {
+                    e
+                }
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacApp {
+    pub id: String,
+    /// The app's label, such as `Mini`, else its version.
+    pub name: String,
+}
+
+fn mac_apps_in(clients: &Value) -> Vec<MacApp> {
+    clients["clients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["info"]["kind"] == "app"
+                && c["info"]["platform"] == "macos"
+                && c["connection_state"] != "lost"
+        })
+        .filter_map(|c| {
+            let id = c["client_id"].as_str()?.to_string();
+            let name = c["info"]["label"]
+                .as_str()
+                .or(c["info"]["version"].as_str())
+                .unwrap_or("Rex")
+                .to_string();
+            Some(MacApp { id, name })
+        })
+        .collect()
+}
+
+/// What `client.update.check` or `.status` found, in a few words: `None` when it's up to date.
+pub fn rex_update(found: &Value) -> Option<String> {
+    let build = |v: &Value| {
+        let version = v["version"].as_str()?;
+        Some(match v["build"].as_str() {
+            Some(b) => format!("{version} ({b})"),
+            None => version.to_string(),
+        })
+    };
+    if found["update_downloaded"] == true {
+        return Some("downloaded".into());
+    }
+    match found["result"].as_str() {
+        None | Some("up_to_date") => None,
+        Some(other) => Some(
+            ["update", "available", "latest"]
+                .iter()
+                .find_map(|k| build(&found[*k]))
+                .unwrap_or_else(|| other.replace('_', " ")),
+        ),
+    }
+}
+
+/// The running build a `client.update` answer names, such as `0.1.0 (1853)`.
+pub fn rex_build(found: &Value) -> String {
+    let current = &found["current"];
+    match (current["version"].as_str(), current["build"].as_str()) {
+        (Some(v), Some(b)) => format!("{v} ({b})"),
+        (Some(v), None) => v.to_string(),
+        _ => "?".into(),
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_connected_mac_apps_update() {
+        let clients = json!({"clients": [
+            {"client_id": "c1", "info": {"kind": "cli", "platform": "macos"}},
+            {"client_id": "c2", "info": {"kind": "app", "platform": "macos", "label": "Mini", "version": "0.1.0 (1853)"}, "connection_state": "connected"},
+            {"client_id": "c3", "info": {"kind": "app", "platform": "ios", "label": "Phone"}},
+            {"client_id": "c4", "info": {"kind": "app", "platform": "macos", "version": "0.1.0 (1850)"}, "connection_state": "lost"},
+            {"client_id": "c5", "info": {"kind": "app", "platform": "macos", "version": "0.1.0 (1856)"}},
+        ]});
+        let apps = mac_apps_in(&clients);
+        assert_eq!(
+            apps,
+            vec![
+                MacApp {
+                    id: "c2".into(),
+                    name: "Mini".into()
+                },
+                MacApp {
+                    id: "c5".into(),
+                    name: "0.1.0 (1856)".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_what_the_updater_found() {
+        let up = json!({"current": {"build": "1853", "version": "0.1.0"}, "result": "up_to_date"});
+        assert_eq!(rex_update(&up), None);
+        assert_eq!(rex_build(&up), "0.1.0 (1853)");
+        let found =
+            json!({"result": "update_available", "update": {"version": "0.1.0", "build": "1860"}});
+        assert_eq!(rex_update(&found).as_deref(), Some("0.1.0 (1860)"));
+        let bare = json!({"result": "update_available"});
+        assert_eq!(rex_update(&bare).as_deref(), Some("update available"));
+        let status = json!({"phase": "idle", "update_downloaded": true});
+        assert_eq!(rex_update(&status).as_deref(), Some("downloaded"));
+        let idle = json!({"phase": "idle", "update_downloaded": false});
+        assert_eq!(rex_update(&idle), None);
+    }
 }
 
 /// The settings a pane needs from the process that starts it, which Rex doesn't pass on: a

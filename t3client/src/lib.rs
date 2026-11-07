@@ -11,7 +11,6 @@ pub mod error;
 pub mod http;
 pub mod hub;
 pub mod inbox;
-pub mod join;
 pub mod launch;
 pub mod models;
 pub mod pair;

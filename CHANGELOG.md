@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `tr3x update`, `/update` and **Update tr3x, T3 and Rex…** also update the Rex app on each Mac attached here, with Rex's own updater. It goes last, and the app relaunches with your tabs still running. It needs Remote Control on in that Rex. `tr3x doctor` shows each Rex app's build, and says when one holds an update.
+- `tr3x new --prompt "…"` starts a thread without the composer and opens its tab: for Shortcuts' Run Command (with Dictate Text, that's Siri), a widget or a script. `--project`, `--folder` and `--env` pick where; `--prompt -` reads standard input.
+- **New T3 Thread Here** in Finder's Quick Actions, for a folder. `tr3x install` adds it on a Mac.
+- `tr3x pair` pairs a machine through its Rex host (`rex -S <host>`), no SSH or keys needed. It goes first when `rex hosts` has the machine, and `tr3x pair <rex host>` names one.
+- A tab shows its provider's icon and name (Claude, Codex, Cursor, Grok, Gemini, OpenCode, Pi…) from the pane's own status report. A thread that changes provider no longer restarts its pane for it.
+- Tab labels are the thread's title. Rex's own dot shows what a thread waits on, on the Mac, iPhone and iPad, so the `●` `?` `✕` `✓` marks are gone.
+- A closed tab settles its thread at once, on Rex's `window_closed` event, rather than on sync's next pass.
+- An HTML preview links its page, **Preview**, when it's on this Mac: a click opens it, and Rex's Quick Look (⇧⌘-click) previews it.
+- On Linux the installer ends with Rex's QR code for the host's tailnet address (`rex server tailscale pair`), to scan with **Pair via QR Code** in Rex on a phone or iPad.
+- Removed: joining with `curl …/join | sh`. Sync no longer listens on port 3779. A machine joined that way pairs again through its Rex host, SSH or a link.
+- Removed: `"paneFade": "auto"`. Rex's Settings → Interface → Active Pane covers it; installing puts back the setting tr3x saved, if it changed one.
+
 - `/clear` starts a fresh session in the same thread, as in T3 0.1.8. The next message goes to a new provider session, the conversation marks it **New session**, and Esc keeps the current one. It replaces the agent's own `/clear`, which ended a session T3 still treated as live.
 - When an agent asks for a secret, Reply asks for it. What you type shows as dots, Enter gives it to T3 and Decline says no; the thread only says what was asked for. Before, the request didn't show and the agent waited. Rex marks the tab `?` while it waits.
 - A request to link another machine shows in the conversation, with what became of it.

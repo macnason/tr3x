@@ -20,10 +20,8 @@ paired with. That's the job, so it's worth knowing exactly what it holds and who
 - **T3** on this Mac, over loopback, and on the machines you paired, at the addresses T3
   publishes for them.
 - **Rex** on this Mac, through Rex's own CLI.
-- **Joining**: while sync runs, it takes `curl -fsSL http://<this Mac>:3779/join | sh` from
-  other machines. It listens on this Mac's tailnet addresses only, answers only machines that
-  `tailscale whois` says belong to the same person, and trades the code with T3 at the
-  machine's tailnet address, never one the request names.
+- **Rex hosts**, only when you pair through one: `rex -S <host> do` runs T3's CLI there, on
+  Rex's own connection to that host. tr3x listens on no port of its own.
 - **SSH**, only when you pair over it, with `BatchMode=yes`: it never prompts for a password.
   A tailnet host's first key is accepted, since Tailscale has already checked the machine.
 - **GitHub**, for the install script's download, checked against the release's SHA-256;
