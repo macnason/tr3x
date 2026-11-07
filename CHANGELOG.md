@@ -11,6 +11,7 @@
 - A closed tab settles its thread at once, on Rex's `window_closed` event, rather than on sync's next pass.
 - An HTML preview links its page, **Preview**, when it's on this Mac: a click opens it, and Rex's Quick Look (⇧⌘-click) previews it.
 - On Linux the installer ends with Rex's QR code for the host's tailnet address (`rex server tailscale pair`), to scan with **Pair via QR Code** in Rex on a phone or iPad.
+- Pictures pasted or dropped into Reply from another device attach, with Rex 1853 or later: Rex copies them to the host. tr3x no longer receives pictures by Taildrop.
 - Removed: joining with `curl …/join | sh`. Sync no longer listens on port 3779. A machine joined that way pairs again through its Rex host, SSH or a link.
 - Removed: `"paneFade": "auto"`. Rex's Settings → Interface → Active Pane covers it; installing puts back the setting tr3x saved, if it changed one.
 
