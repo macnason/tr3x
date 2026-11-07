@@ -1250,8 +1250,6 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
     }
     // Once a day: tr3x's and each machine's T3's updates. On `auto`, tr3x installs its own.
     tokio::spawn(crate::update::follow());
-    // Pictures sent to this machine with Taildrop go to the thread in front.
-    tokio::spawn(crate::taildrop::follow());
     let mut pause = 2;
     loop {
         let started = Instant::now();
@@ -2550,7 +2548,6 @@ mod tests {
             state,
             first: false,
             watchers: HashMap::new(),
-            configs: HashMap::new(),
             closed: Vec::new(),
             verified: HashMap::new(),
         };

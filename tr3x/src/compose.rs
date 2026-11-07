@@ -359,8 +359,6 @@ pub(crate) enum Done {
     Logos(HashMap<String, Icon>),
     /// A link to open the thread with, on the device it's clicked on.
     Link(String),
-    /// Pictures sent to the host with Taildrop, as if pasted.
-    Dropped(Got),
     /// A fresh-session message that failed to send: the next one starts fresh again.
     Fresh,
 }
@@ -1468,7 +1466,7 @@ impl Composer {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
         if key.modifiers.contains(KeyModifiers::SUPER) && key.code == KeyCode::Char('v') {
-            return self.note(across_machines(), true);
+            return self.note(ACROSS_MACHINES, true);
         }
         let again = self.escape.again(&key);
         if self.focus.is_none() {
@@ -1779,65 +1777,9 @@ async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
     follow(client.watch_config(), Some(config), &tx).await;
 }
 
-/// Pictures sync puts in this thread's inbox, from Taildrop: attached as if pasted, and gone
-/// from the inbox once read.
-async fn follow_inbox(dir: std::path::PathBuf, tx: mpsc::UnboundedSender<Done>) {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {},
-            _ = tx.closed() => return,
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut paths: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        if paths.is_empty() {
-            continue;
-        }
-        paths.sort();
-        let got = paste::files(&paths);
-        for path in &paths {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Some(got) = got
-            && tx.send(Done::Dropped(got)).is_err()
-        {
-            return;
-        }
-    }
-}
-
-/// What to say when ⌘V arrives as a key. Rex pastes on the device for a pane on that
-/// device, so the key only reaches Reply when the pane runs on another machine and the
-/// clipboard holds a picture or a file, which Rex doesn't carry across.
-fn across_machines() -> String {
-    match taildrop_name() {
-        Some(name) => format!(
-            "Pictures don't paste across machines. Send them here with Share → Tailscale → {name}."
-        ),
-        None => "Pictures don't paste across machines. Click the title to add them in T3.".into(),
-    }
-}
-
-/// This machine's name on the tailnet, as Taildrop lists it.
-fn taildrop_name() -> Option<String> {
-    let bin = t3client::pair::tailscale_bin()?;
-    let out = std::process::Command::new(bin)
-        .args(["status", "--self", "--json"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let status: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let dns = status["Self"]["DNSName"].as_str()?;
-    dns.split('.')
-        .next()
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
-}
+/// What to say when ⌘V arrives as a key: the pane runs on another machine, and this Rex is
+/// too old to upload what the clipboard holds there.
+const ACROSS_MACHINES: &str = "Update Rex to paste pictures from another device.";
 
 /// Follows T3's config subscription, `events`, from `config`: the whole config to Reply after
 /// each item that changes it, until the subscription stops or Reply goes.
@@ -1876,11 +1818,6 @@ impl Composer {
     ) -> (Composer, mpsc::UnboundedReceiver<Done>) {
         let (tx, done) = mpsc::unbounded_channel();
         tokio::spawn(follow_config(client.clone(), tx.clone()));
-        let key = format!("{}/{}", client.id(), thread_id);
-        tokio::spawn(follow_inbox(
-            crate::taildrop::inbox(&crate::state::dir(), &key),
-            tx.clone(),
-        ));
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let slash = Slash::new(client.clone());
         let mut composer = Composer {
@@ -2004,13 +1941,6 @@ impl Composer {
             Done::Config(config) => self.config = Some(config),
             Done::Link(url) => self.link = Some(url),
             Done::Logos(logos) => self.logos = logos,
-            Done::Dropped(got) => {
-                let pictures = matches!(got, Got::Images(_));
-                self.pasted(got);
-                if pictures {
-                    self.note("Picture from Taildrop", false);
-                }
-            }
         }
     }
 
