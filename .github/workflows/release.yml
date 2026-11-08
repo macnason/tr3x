@@ -138,6 +138,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           pattern: tr3x-*
@@ -150,8 +151,11 @@ jobs:
           if [ -z "$found" ]; then
             flags=""
             case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+            # The notes are the version's section of CHANGELOG.md, or GitHub's PR list without one.
+            awk -v h="## ${GITHUB_REF_NAME#v}" '$0 == h {f=1; next} /^## /{if (f) exit} f' CHANGELOG.md > notes.md
+            if grep -q '[^[:space:]]' notes.md; then notes="--notes-file notes.md"; else notes="--generate-notes"; fi
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag $flags \
-              --title "$GITHUB_REF_NAME" --generate-notes
+              --title "$GITHUB_REF_NAME" $notes
           fi
           gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 --clobber
 
