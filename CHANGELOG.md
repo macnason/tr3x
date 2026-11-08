@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.3
+
 - `tr3x update`, `/update` and **Update tr3x, T3 and Rex…** also update the Rex app on each Mac attached here, with Rex's own updater. It goes last, and the app relaunches with your tabs still running. It needs Remote Control on in that Rex. `tr3x doctor` shows each Rex app's build, and says when one holds an update.
 - `tr3x new --prompt "…"` starts a thread without the composer and opens its tab: for Shortcuts' Run Command (with Dictate Text, that's Siri), a widget or a script. `--project`, `--folder` and `--env` pick where; `--prompt -` reads standard input.
 - **New T3 Thread Here** in Finder's Quick Actions, for a folder. `tr3x install` adds it on a Mac.
