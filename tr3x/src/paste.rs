@@ -204,6 +204,94 @@ fn request(mimes: &[String], meta: &str) -> String {
     )
 }
 
+/// A ⌘V that reached Reply as a key, which Rex sends when it didn't paste: a clipboard its
+/// paste has no use for, or paste events (mode 5522) on a pane another device is typing in.
+/// From this Mac, the clipboard is read here. From another device, Rex is asked to paste
+/// again with paste events off, so it uploads the picture and pastes its path.
+pub async fn by_hand() -> Got {
+    let rex = crate::rex::Rex::find();
+    let owner = match std::env::var("REX_BLOCK") {
+        Ok(block) => rex.owner(&block).await.ok().flatten(),
+        Err(_) => None,
+    };
+    match owner {
+        Some((client, false)) => replay(&rex, &client).await,
+        _ => here().await,
+    }
+}
+
+async fn replay(rex: &crate::rex::Rex, client: &str) -> Got {
+    let events = crate::scheme::filtering();
+    if events {
+        crate::term::out(OFF);
+    }
+    let done = rex.app_action(client, "pane.paste").await;
+    if events {
+        // Rex reads the mode as the paste starts; give it the moment it takes to get there.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        crate::term::out(ON);
+    }
+    match done {
+        Ok(_) => Got::Nothing(None),
+        Err(e) => Got::Nothing(Some(format!("Couldn't paste: {e:#}"))),
+    }
+}
+
+/// What this Mac's clipboard holds: its files, else a picture, else the text.
+#[cfg(target_os = "macos")]
+async fn here() -> Got {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("tr3x-clipboard-{}-{n}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Got::Nothing(Some(format!("Couldn't read the clipboard: {e}")));
+    }
+    let out = tokio::process::Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", include_str!("clipboard.js")])
+        .arg(&dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    let got = match out {
+        Ok(out) if out.status.success() => read_by_hand(&out.stdout),
+        _ => Got::Nothing(Some("Couldn't read the clipboard".into())),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn here() -> Got {
+    Got::Nothing(Some(
+        "Couldn't read the clipboard. Drag the picture in instead.".into(),
+    ))
+}
+
+/// What `clipboard.js` printed: `{files}`, `{text}` or nothing.
+#[cfg(any(target_os = "macos", test))]
+fn read_by_hand(json: &[u8]) -> Got {
+    let said: Value = serde_json::from_slice(json).unwrap_or_default();
+    let paths: Vec<PathBuf> = said["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(PathBuf::from))
+        .collect();
+    if !paths.is_empty() {
+        return files(&paths).unwrap_or_else(|| {
+            let escaped: Vec<String> = paths
+                .iter()
+                .map(|p| p.to_string_lossy().replace(' ', "\\ "))
+                .collect();
+            Got::Text(escaped.join(" "))
+        });
+    }
+    match said["text"].as_str() {
+        Some(text) => Got::Text(text.to_string()),
+        None => Got::Nothing(None),
+    }
+}
+
 /// Pasted text that is only paths to pictures, as dropping files pastes them: those pictures.
 pub fn dropped(text: &str) -> Option<Got> {
     let paths = split_paths(text.trim())?;
@@ -384,6 +472,26 @@ mod tests {
         );
         r.feed("type=read:status=EPERM");
         assert!(!r.reading);
+    }
+
+    #[test]
+    fn by_hand_reads() {
+        assert_eq!(read_by_hand(br#"{"text":"hi"}"#), Got::Text("hi".into()));
+        assert_eq!(read_by_hand(b"{}"), Got::Nothing(None));
+        assert_eq!(
+            read_by_hand(br#"{"files":["/a/My Notes.txt"]}"#),
+            Got::Text(r"/a/My\ Notes.txt".into())
+        );
+        let dir = std::env::temp_dir().join(format!("tr3x-by-hand-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("image.webp");
+        std::fs::write(&shot, b"RIFF").unwrap();
+        let json = serde_json::json!({ "files": [shot] }).to_string();
+        let Got::Images(images) = read_by_hand(json.as_bytes()) else {
+            panic!("not attached");
+        };
+        assert_eq!(images[0].mime, "image/webp");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

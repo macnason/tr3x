@@ -203,6 +203,18 @@ impl Rex {
         Ok(mac_apps_in(&clients))
     }
 
+    /// The client that has `block`, and whether it's connected from this machine.
+    pub async fn owner(&self, block: &str) -> Result<Option<(String, bool)>> {
+        let inspect = self
+            .json(&["block", "inspect", block, "--json"], None)
+            .await?;
+        let Some(owner) = inspect["block"]["owner"].as_str() else {
+            return Ok(None);
+        };
+        let clients = self.json(&["client", "ls", "--json"], None).await?;
+        Ok(owner_in(&clients, owner).map(|here| (owner.to_string(), here)))
+    }
+
     /// One of a client's own actions, such as `client.update.status`, and what it returns.
     pub async fn app_action(&self, client: &str, action: &str) -> Result<Value> {
         self.json(&["-C", client, "do", action, "--json"], None)
@@ -216,6 +228,15 @@ impl Rex {
                 }
             })
     }
+}
+
+/// Whether `owner`, among `clients`, is connected from this machine.
+fn owner_in(clients: &Value, owner: &str) -> Option<bool> {
+    clients["clients"]
+        .as_array()?
+        .iter()
+        .find(|c| c["client_id"] == owner)
+        .map(|c| c["principal"]["transport"] == "unix")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -372,7 +393,18 @@ pub fn lua_str(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::lua_str;
+    use super::{lua_str, owner_in};
+
+    #[test]
+    fn owner_here_or_not() {
+        let clients = serde_json::json!({ "clients": [
+            { "client_id": "client:mini", "principal": { "transport": "unix" } },
+            { "client_id": "client:air", "principal": { "transport": "tailscale" } },
+        ]});
+        assert_eq!(owner_in(&clients, "client:mini"), Some(true));
+        assert_eq!(owner_in(&clients, "client:air"), Some(false));
+        assert_eq!(owner_in(&clients, "client:gone"), None);
+    }
 
     #[test]
     fn lua_str_escapes_closing_brackets() {
