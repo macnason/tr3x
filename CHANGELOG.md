@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- ⌘V of a picture no longer says "Update Rex to paste pictures from another device" when Rex is up to date. When Rex passes ⌘V on as a key, Reply reads the clipboard on this Mac itself, or asks Rex on the other device to paste again.
+
 ## 0.1.3
 
 - `tr3x update`, `/update` and **Update tr3x, T3 and Rex…** also update the Rex app on each Mac attached here, with Rex's own updater. It goes last, and the app relaunches with your tabs still running. It needs Remote Control on in that Rex. `tr3x doctor` shows each Rex app's build, and says when one holds an update.

@@ -107,6 +107,11 @@ fn rex_theme(dark: bool) -> Option<[u8; 3]> {
     Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
+/// Whether input passes through the filter, so paste events are on.
+pub fn filtering() -> bool {
+    FILTER.lock().unwrap().is_some()
+}
+
 /// The terminal's clipboard replies, once input passes through the filter. `None` without it,
 /// where they would reach crossterm as keys, so nothing should ask for them.
 pub fn clipboard() -> Option<mpsc::UnboundedReceiver<String>> {

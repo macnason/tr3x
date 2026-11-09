@@ -56,8 +56,9 @@ own, and its threads show twice, under **This Mac** and under the host.
 ## Pictures from another device
 
 Paste or drop a picture into Reply from any device. Rex 1853 and later copy it to the machine the
-pane runs on and paste its path there, and Reply attaches the picture. An older Rex carries only
-text across machines: Reply says to update it.
+pane runs on and paste its path there, and Reply attaches the picture. When Rex passes ⌘V on
+as a key instead (a clipboard its paste can't use, such as a WebP screenshot), Reply reads this
+Mac's clipboard itself, or asks Rex on the other device to paste again.
 
 ## When something looks wrong
 

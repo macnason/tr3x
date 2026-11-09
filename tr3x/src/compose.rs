@@ -361,6 +361,8 @@ pub(crate) enum Done {
     Link(String),
     /// A fresh-session message that failed to send: the next one starts fresh again.
     Fresh,
+    /// What a ⌘V that arrived as a key came to, read by hand.
+    Pasted(Got),
 }
 
 /// Reply's rows at most, as a share of a pane it shares with the conversation, and the
@@ -1466,7 +1468,12 @@ impl Composer {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.note = None;
         if key.modifiers.contains(KeyModifiers::SUPER) && key.code == KeyCode::Char('v') {
-            return self.note(ACROSS_MACHINES, true);
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let got = paste::by_hand().await;
+                let _ = tx.send(Done::Pasted(got));
+            });
+            return;
         }
         let again = self.escape.again(&key);
         if self.focus.is_none() {
@@ -1777,10 +1784,6 @@ async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
     follow(client.watch_config(), Some(config), &tx).await;
 }
 
-/// What to say when ⌘V arrives as a key: the pane runs on another machine, and this Rex is
-/// too old to upload what the clipboard holds there.
-const ACROSS_MACHINES: &str = "Update Rex to paste pictures from another device.";
-
 /// Follows T3's config subscription, `events`, from `config`: the whole config to Reply after
 /// each item that changes it, until the subscription stops or Reply goes.
 async fn follow(
@@ -1941,6 +1944,7 @@ impl Composer {
             Done::Config(config) => self.config = Some(config),
             Done::Link(url) => self.link = Some(url),
             Done::Logos(logos) => self.logos = logos,
+            Done::Pasted(got) => self.pasted(got),
         }
     }
 
