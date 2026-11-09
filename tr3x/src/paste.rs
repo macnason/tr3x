@@ -268,6 +268,7 @@ async fn here() -> Got {
 }
 
 /// What `clipboard.js` printed: `{files}`, `{text}` or nothing.
+#[cfg(any(target_os = "macos", test))]
 fn read_by_hand(json: &[u8]) -> Got {
     let said: Value = serde_json::from_slice(json).unwrap_or_default();
     let paths: Vec<PathBuf> = said["files"]
