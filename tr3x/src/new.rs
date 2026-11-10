@@ -90,7 +90,7 @@ struct NewThread {
     recent: HashMap<String, Value>,
     project: String,
     settings: Settings,
-    worktree: bool,
+    mode: Mode,
     /// The project's branches, by project id, and whether its folder is a git repository.
     branches: HashMap<String, (Vec<Value>, bool)>,
     base: Option<String>,
@@ -119,6 +119,34 @@ struct NewThread {
     image_row: u16,
     image_spans: Vec<usize>,
     clipboard: paste::Reader,
+}
+
+/// Where a new thread works: the project's folder, a new worktree, or a worktree already there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Mode {
+    Local,
+    New,
+    Existing(String),
+}
+
+/// The start of a workspace menu item that picks an existing worktree, before its path.
+const EXISTING: &str = "\u{0}worktree:";
+
+/// The project's other worktrees, from its refs: each branch checked out somewhere other than
+/// the project's own folder, as its path and branch.
+fn worktrees<'a>(refs: &'a [Value], root: Option<&str>) -> Vec<(&'a str, &'a str)> {
+    let root = root.map(|r| r.trim_end_matches('/'));
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    for r in refs {
+        let (Some(path), Some(name)) = (r["worktreePath"].as_str(), r["name"].as_str()) else {
+            continue;
+        };
+        if Some(path.trim_end_matches('/')) == root || out.iter().any(|(p, _)| *p == path) {
+            continue;
+        }
+        out.push((path, name));
+    }
+    out
 }
 
 /// The project menu's item that adds a folder instead.
@@ -270,6 +298,20 @@ impl NewThread {
             .find(|p| p["id"].as_str() == Some(self.project.as_str()))
     }
 
+    /// The project's worktrees other than its own folder, as path and branch.
+    fn existing(&self) -> Vec<(&str, &str)> {
+        let refs = self
+            .branches
+            .get(&self.project)
+            .map(|(refs, _)| refs.as_slice())
+            .unwrap_or_default();
+        worktrees(
+            refs,
+            self.project_value()
+                .and_then(|p| p["workspaceRoot"].as_str()),
+        )
+    }
+
     fn is_repo(&self) -> bool {
         self.branches
             .get(&self.project)
@@ -289,7 +331,7 @@ impl NewThread {
         out.push(Field::Setting(pick::Field::Access));
         if self.is_repo() {
             out.push(Field::Workspace);
-            if self.worktree {
+            if self.mode == Mode::New {
                 out.push(Field::Branch);
             }
         }
@@ -324,12 +366,16 @@ impl NewThread {
             Field::Setting(f) => return self.settings.chip(f, &self.config, &self.logos),
             Field::Workspace => (
                 None,
-                if self.worktree {
-                    "New worktree"
-                } else {
-                    "Local"
-                }
-                .to_string(),
+                match &self.mode {
+                    Mode::Local => "Local".to_string(),
+                    Mode::New => "New worktree".to_string(),
+                    Mode::Existing(path) => self
+                        .existing()
+                        .into_iter()
+                        .find(|(p, _)| p == path)
+                        .map(|(_, branch)| branch.to_string())
+                        .unwrap_or_else(|| crate::chat::short_home(path)),
+                },
             ),
             Field::Branch => (
                 None,
@@ -394,11 +440,22 @@ impl NewThread {
             ),
             Field::Setting(f) => self.settings.menu(f, &self.config, &self.logos),
             Field::Workspace => (
-                vec![
+                [
                     Item::new("local", "Local"),
                     Item::new("worktree", "New worktree"),
-                ],
-                Some(if self.worktree { "worktree" } else { "local" }.into()),
+                ]
+                .into_iter()
+                .chain(self.existing().into_iter().map(|(path, branch)| {
+                    let mut item = Item::new(format!("{EXISTING}{path}"), branch);
+                    item.detail = crate::chat::short_home(path);
+                    item
+                }))
+                .collect(),
+                Some(match &self.mode {
+                    Mode::Local => "local".into(),
+                    Mode::New => "worktree".into(),
+                    Mode::Existing(path) => format!("{EXISTING}{path}"),
+                }),
             ),
             Field::Branch => (
                 self.branches
@@ -432,7 +489,13 @@ impl NewThread {
             Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
             Field::Setting(f) => self.settings.choose(f, &self.config, id),
-            Field::Workspace => self.worktree = id == "worktree",
+            Field::Workspace => {
+                self.mode = match id.strip_prefix(EXISTING) {
+                    Some(path) => Mode::Existing(path.to_string()),
+                    None if id == "worktree" => Mode::New,
+                    None => Mode::Local,
+                }
+            }
             Field::Branch => self.base = Some(id),
         }
     }
@@ -456,7 +519,7 @@ impl NewThread {
             recent: HashMap::new(),
             project: String::new(),
             settings: Settings::default(),
-            worktree: false,
+            mode: Mode::Local,
             branches: HashMap::new(),
             base: None,
             icons: HashMap::new(),
@@ -628,7 +691,11 @@ return {{}}"#,
         self.project = id;
         if let Some(p) = self.project_value().cloned() {
             self.settings = defaults(&self.config, &p, self.recent.get(&self.project));
-            self.worktree = starts_in_worktree(&self.config, &p);
+            self.mode = if starts_in_worktree(&self.config, &p) {
+                Mode::New
+            } else {
+                Mode::Local
+            };
         }
         self.base = None;
         self.pick_base();
@@ -1154,8 +1221,10 @@ return {{}}"#,
                     return;
                 }
             };
-        let workspace = if self.worktree && self.is_repo() {
-            match &self.base {
+        let workspace = match &self.mode {
+            _ if !self.is_repo() => Workspace::Root,
+            Mode::Local => Workspace::Root,
+            Mode::New => match &self.base {
                 Some(base) => Workspace::Worktree {
                     base_ref: base.clone(),
                     branch: None,
@@ -1165,9 +1234,15 @@ return {{}}"#,
                     self.note = Some(("Choose a branch to start the worktree from".into(), true));
                     return;
                 }
-            }
-        } else {
-            Workspace::Root
+            },
+            Mode::Existing(path) => Workspace::Existing {
+                branch: self
+                    .existing()
+                    .into_iter()
+                    .find(|(p, _)| p == path)
+                    .map(|(_, b)| b.to_string()),
+                path: path.clone(),
+            },
         };
         let request = match LaunchRequest::new(
             &self.client,
@@ -1590,6 +1665,26 @@ pub async fn logos(providers: &[Value]) -> HashMap<String, Icon> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Each branch checked out outside the project's folder is a worktree to pick, once.
+    #[test]
+    fn worktrees_are_the_refs_checked_out_elsewhere() {
+        let refs = vec![
+            json!({"name": "main", "worktreePath": "/src/app/"}),
+            json!({"name": "fix/build", "worktreePath": "/src/app-wt/fix"}),
+            json!({"name": "idle", "worktreePath": null}),
+            json!({"name": "feat/x", "worktreePath": "/src/app-wt/x"}),
+            json!({"name": "dupe", "worktreePath": "/src/app-wt/x"}),
+        ];
+        assert_eq!(
+            worktrees(&refs, Some("/src/app")),
+            vec![
+                ("/src/app-wt/fix", "fix/build"),
+                ("/src/app-wt/x", "feat/x")
+            ]
+        );
+        assert_eq!(worktrees(&refs, None).len(), 3);
+    }
 
     #[test]
     fn a_typed_path_lists_the_folders_it_could_be() {

@@ -26,6 +26,7 @@
 - Rex's Go to Anything lists a thread by its title. It showed `T3 · project · branch`, the pane's terminal title.
 - An action on a thread, run from Shortcuts' Run Rex Action or `rex do` without one in front, says "Go to a T3 thread first".
 - `tr3x doctor` warns when Rex's server is older than the app, and says how to restart it.
+- A new thread's workspace menu lists the project's existing worktrees, by branch, under Local and New worktree. Pick one and the thread starts there, as T3 does.
 - Long lines in code blocks wrap, with continuation rows indented past the gutter. They were cut off with `…`.
 - A thread's tab that Rex brought back after a restart with a shell where the conversation was starts the conversation again, in the same place. Before, it stayed a bare shell, and closing it by hand settled the thread.
 
