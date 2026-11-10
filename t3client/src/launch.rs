@@ -47,21 +47,38 @@ pub enum Workspace {
         branch: Option<String>,
         start_from_origin: bool,
     },
+    /// A git worktree that already exists, at `path`, checked out on `branch` when it has one.
+    /// T3 makes nothing and runs no setup script.
+    Existing {
+        path: String,
+        branch: Option<String>,
+    },
 }
 
 impl Workspace {
     /// The workspace with its base ref and branch trimmed, as T3's schema trims them. A blank
     /// one is a usage error, since T3 would refuse it.
     pub fn checked(self) -> Result<Workspace> {
-        let Workspace::Worktree {
-            base_ref,
-            branch,
-            start_from_origin,
-        } = self
-        else {
-            return Ok(Workspace::Root);
-        };
         let invalid = |message: &str| err_exit("INVALID_WORKSPACE", exit::USAGE, message);
+        let (base_ref, branch, start_from_origin) = match self {
+            Workspace::Root => return Ok(Workspace::Root),
+            Workspace::Existing { path, branch } => {
+                if is_blank(&path) {
+                    return Err(invalid("The worktree's path is empty."));
+                }
+                return Ok(Workspace::Existing {
+                    path: js_trim(&path).to_string(),
+                    branch: branch
+                        .filter(|b| !is_blank(b))
+                        .map(|b| js_trim(&b).to_string()),
+                });
+            }
+            Workspace::Worktree {
+                base_ref,
+                branch,
+                start_from_origin,
+            } => (base_ref, branch, start_from_origin),
+        };
         if is_blank(&base_ref) {
             return Err(invalid("The worktree needs a base ref, such as main."));
         }
@@ -80,6 +97,13 @@ impl Workspace {
     pub fn strategy(&self) -> Value {
         match self {
             Workspace::Root => json!({"type": "root"}),
+            Workspace::Existing { path, branch } => {
+                let mut strategy = json!({"type": "existing_worktree", "worktreePath": path});
+                if let Some(branch) = branch {
+                    strategy["branch"] = json!(branch);
+                }
+                strategy
+            }
             Workspace::Worktree {
                 base_ref,
                 branch,
@@ -104,6 +128,11 @@ impl fmt::Debug for Workspace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Workspace::Root => f.write_str("Root"),
+            Workspace::Existing { path, branch } => f
+                .debug_struct("Existing")
+                .field("path_chars", &path.chars().count())
+                .field("branch_chars", &branch.as_ref().map(|b| b.chars().count()))
+                .finish(),
             Workspace::Worktree {
                 base_ref,
                 branch,
@@ -683,6 +712,38 @@ mod tests {
         let request = launch_of(&client, "Fix it", None, bare);
         let strategy = json!({"type": "worktree", "baseRef": "main"});
         assert_eq!(request.payload()["workspaceStrategy"], strategy);
+    }
+
+    /// An existing worktree goes by its trimmed path, with its branch only when it has one.
+    #[test]
+    fn an_existing_worktree_launch_sends_its_path_and_branch() {
+        let client = Env::offline();
+        let existing = Workspace::Existing {
+            path: " /src/app-worktrees/fix ".into(),
+            branch: Some("fix/build".into()),
+        };
+        let request = launch_of(&client, "Fix it", None, existing);
+        let strategy = json!({
+            "type": "existing_worktree", "worktreePath": "/src/app-worktrees/fix",
+            "branch": "fix/build"
+        });
+        assert_eq!(request.payload()["workspaceStrategy"], strategy);
+
+        let detached = Workspace::Existing {
+            path: "/src/app-worktrees/fix".into(),
+            branch: Some(" ".into()),
+        };
+        let request = launch_of(&client, "Fix it", None, detached);
+        let strategy =
+            json!({"type": "existing_worktree", "worktreePath": "/src/app-worktrees/fix"});
+        assert_eq!(request.payload()["workspaceStrategy"], strategy);
+
+        let blank = Workspace::Existing {
+            path: " ".into(),
+            branch: None,
+        };
+        let error = blank.checked().unwrap_err();
+        assert_eq!(t3(&error).code, "INVALID_WORKSPACE");
     }
 
     #[test]
