@@ -128,11 +128,61 @@ impl ThreadState {
                     if key == "turnItems" && self.projection.contains_key("visibleTurnItems") {
                         self.update_visible_item(&payload);
                     }
+                    let payload = match event_type.as_str() {
+                        "provider-turn.updated" => self.keep_token_usage(payload),
+                        "provider-thread.updated" => {
+                            self.follow_provider_thread(&payload);
+                            payload
+                        }
+                        _ => payload,
+                    };
                     upsert(array_mut(&mut self.projection, key), payload);
                 }
                 Applied::Event(event_type)
             }
             _ => Applied::Ignored,
+        }
+    }
+
+    /// A provider turn's update without token usage keeps the usage the turn last reported, as
+    /// the nightly's reducer does (`orchestrationV2Projection.ts`, `provider-turn.updated`): the
+    /// update that ends a turn needn't say it again.
+    fn keep_token_usage(&self, mut payload: Value) -> Value {
+        if !payload.get("tokenUsage").is_none_or(Value::is_null) {
+            return payload;
+        }
+        let id = payload.get("id");
+        let kept = self
+            .projection
+            .get("providerTurns")
+            .and_then(Value::as_array)
+            .and_then(|turns| turns.iter().find(|t| id.is_some() && t.get("id") == id))
+            .and_then(|t| t.get("tokenUsage"))
+            .filter(|u| !u.is_null())
+            .cloned();
+        if let (Some(usage), Some(object)) = (kept, payload.as_object_mut()) {
+            object.insert("tokenUsage".into(), usage);
+        }
+        payload
+    }
+
+    /// A provider thread of this thread that's more than a queued placeholder becomes the
+    /// active one, as the nightly's reducer has it (`provider-thread.updated`).
+    fn follow_provider_thread(&mut self, payload: &Value) {
+        let placeholder = payload["status"] == "not_loaded"
+            && payload["firstRunOrdinal"].is_null()
+            && payload["nativeThreadRef"].is_null()
+            && payload["providerSessionId"].is_null();
+        let ours = payload.get("appThreadId").and_then(Value::as_str) == Some(self.thread_id());
+        let (Some(id), true, false) = (payload.get("id").cloned(), ours, placeholder) else {
+            return;
+        };
+        if let Some(thread) = self
+            .projection
+            .get_mut("thread")
+            .and_then(Value::as_object_mut)
+        {
+            thread.insert("activeProviderThreadId".into(), id);
         }
     }
 
@@ -647,6 +697,51 @@ mod tests {
 
     fn event(sequence: u64, event_type: &str, payload: Value) -> Value {
         json!({"kind": "event", "sequence": sequence, "event": {"type": event_type, "payload": payload}})
+    }
+
+    #[test]
+    fn a_turn_update_without_token_usage_keeps_the_last_report() {
+        let mut state = ThreadState::from_snapshot(&snapshot()).unwrap();
+        let usage = json!({"usedTokens": 34_799, "maxTokens": 475_000});
+        state.apply(&event(
+            11,
+            "provider-turn.updated",
+            json!({"id": "pt1", "status": "running", "tokenUsage": usage}),
+        ));
+        state.apply(&event(
+            12,
+            "provider-turn.updated",
+            json!({"id": "pt1", "status": "completed"}),
+        ));
+        let turn = &state.list("providerTurns")[0];
+        assert_eq!(
+            (&turn["status"], &turn["tokenUsage"]),
+            (&json!("completed"), &usage)
+        );
+        let newer = json!({"usedTokens": 40_000, "maxTokens": 475_000});
+        state.apply(&event(
+            13,
+            "provider-turn.updated",
+            json!({"id": "pt1", "tokenUsage": newer}),
+        ));
+        assert_eq!(state.list("providerTurns")[0]["tokenUsage"], newer);
+    }
+
+    #[test]
+    fn a_provider_thread_of_this_thread_becomes_the_active_one() {
+        let mut state = ThreadState::from_snapshot(&snapshot()).unwrap();
+        let placeholder = json!({"id": "q", "appThreadId": "t1", "status": "not_loaded",
+            "firstRunOrdinal": null, "nativeThreadRef": null, "providerSessionId": null});
+        state.apply(&event(11, "provider-thread.updated", placeholder));
+        assert!(state.thread()["activeProviderThreadId"].is_null());
+        let other = json!({"id": "x", "appThreadId": "t2", "status": "active"});
+        state.apply(&event(12, "provider-thread.updated", other));
+        assert!(state.thread()["activeProviderThreadId"].is_null());
+        let real =
+            json!({"id": "p2", "appThreadId": "t1", "status": "active", "firstRunOrdinal": 1});
+        state.apply(&event(13, "provider-thread.updated", real));
+        assert_eq!(state.thread()["activeProviderThreadId"], "p2");
+        assert_eq!(state.list("providerThreads").len(), 3);
     }
 
     #[test]
