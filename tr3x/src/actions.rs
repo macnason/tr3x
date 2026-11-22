@@ -235,6 +235,14 @@ pub const ALL: &[Action] = &[
     },
     Action {
         slash: slash(
+            "status",
+            "How the status line under Reply reads",
+            Some("auto, full, compact, chip"),
+        ),
+        ..NONE
+    },
+    Action {
+        slash: slash(
             "reply",
             "Reply inline or in its own pane",
             Some("inline, pane"),

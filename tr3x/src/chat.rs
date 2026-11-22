@@ -1878,7 +1878,10 @@ async fn event_loop(
                     }
                     pane.set_status(&shell, thread, composer.state.as_ref(), app_of(&composer));
                 }
-                if ticks.is_multiple_of(8) && role != Role::Conversation && composer.usage_moved() {
+                if ticks.is_multiple_of(8)
+                    && role != Role::Conversation
+                    && (composer.status_changed() || composer.usage_moved())
+                {
                     reply = true;
                 }
                 if ticks.is_multiple_of(40) && !stale && crate::icons::replaced() {

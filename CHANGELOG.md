@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A status line under Reply shows what T3 Code's thread details do. Beside the model: how much of the context window is left, as a bar, its tokens (`100k/1M`), and how long the prompt cache lasts. Under it: the machine, branch, pull request with what it changes and its checks, and what's left of each usage limit. Shares left turn yellow at 20% and red at 10%, and the cache in its last 10 minutes. `/status compact` puts the most of it on one line, dropping the rest as the pane narrows; `/status chip` keeps the model alone, as before. `auto`, the default, is full where it fits and compact where it doesn't, as on a phone. `tr3x status` sets it from a terminal.
+
 ## 0.1.6
 
 - Works with Rex, not only Rex Beta. Once Rex replaced Rex Beta, sync couldn't reach Rex, so `/settle`, `/snooze` and `/archive` left the thread's tab open, and new threads got no tab. A running sync now finds Rex again without a restart.
