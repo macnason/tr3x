@@ -424,7 +424,7 @@ impl Target {
             bail!("tr3x hasn't synced yet");
         }
         // The session the action ran in first.
-        if let Ok(here) = std::env::var("REX_SESSION")
+        if let Some(here) = crate::rex::session_here().await
             && let Some(at) = sessions.iter().position(|s| *s == here)
         {
             sessions.swap(0, at);
@@ -734,8 +734,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Pick { thread, field } => pick::run(thread, field).await,
         Command::Model(t) => {
             let thread = t.resolve().await?;
-            let session = std::env::var("REX_SESSION")
-                .ok()
+            let session = crate::rex::session_here()
+                .await
                 .or(State::load().session())
                 .context("tr3x hasn't synced yet")?;
             pick::float(&session, &thread, pick::Field::Model).await

@@ -780,7 +780,7 @@ async fn commit(env: &t3client::env::Env, token: &str, target: &str) -> Result<(
 /// `/update`: **Update tr3x, T3 and Rex…** in a floating window over the thread `block` is in.
 pub async fn open_layer(block: &str) -> Result<()> {
     let rex = crate::rex::Rex::find();
-    let session = std::env::var("REX_SESSION").context("not in a Rex session")?;
+    let session = rex.session_of(block).await?;
     let view = rex.inspect(&session).await?;
     let window = view["windows"]
         .as_array()

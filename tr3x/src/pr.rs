@@ -35,7 +35,7 @@ pub async fn open(thread: &str, block: &str, create: bool) -> Result<()> {
     let rex = Rex::find();
     let mut sessions = crate::state::State::load().sessions();
     // The session the action ran in first.
-    if let Ok(here) = std::env::var("REX_SESSION") {
+    if let Some(here) = crate::rex::session_here().await {
         sessions.insert(0, here);
     }
     let mut found = None;

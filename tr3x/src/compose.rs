@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -801,11 +801,14 @@ impl Composer {
 
     /// Opens the model picker over the window, on `field`.
     fn pick(&mut self, field: Field) {
-        let Ok(session) = std::env::var("REX_SESSION") else {
+        if std::env::var_os("REX_BLOCK").is_none() {
             return self.note("Open this in Rex to choose a model", true);
-        };
+        }
         let thread = self.thread_key();
         self.spawn(async move {
+            let session = crate::rex::session_here()
+                .await
+                .context("couldn't find this pane's Rex session")?;
             crate::pick::float(&session, &thread, field).await?;
             Ok(String::new())
         });
