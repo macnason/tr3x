@@ -21,8 +21,8 @@ its own: every message, approval and setting goes to T3.
 - **Rex's markers are T3's.** A tab's dot shows what its thread waits on, and its icon the
   provider: Claude, Codex, Cursor and the rest, as Rex shows them for their own CLIs.
 - **Every machine.** Threads from each machine you run T3 on share one session, in one order.
-- **Any screen.** Rex's Mac and iPhone apps watch the same session. **Fit to This Device** sizes
-  it to the one you're on.
+- **Any screen.** Rex's Mac and iPhone apps watch the same session. ⌃⌘T (**Fit to This Device**)
+  sizes it to the one you're on.
 - **Usage limits.** A thread stopped on its limit says when it resets. Reply shows what's left.
 - **Status line.** `/status on` adds what's left of the context window, the prompt cache, the
   pull request and its checks, and your usage limits under Reply. Off, Reply warns when the

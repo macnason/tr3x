@@ -192,7 +192,10 @@ over the tailnet only draws.
 - **Size.** Rex sizes a pane to the client that owns it. **Fit to This Device** (`t3_fit`) calls
   `session.own_block` with `take` for every block in the session, as the client that ran it
   (`ctx.client_id`), so the panes take its size at once. The other clients keep the size they
-  asked for and get the panes back when that client leaves.
+  asked for and get the panes back when that client leaves. ⌃⌘T runs it. Rex's app takes a
+  pane by itself only when it switches to that tab: not when its window comes forward, nor when
+  a tab it already shows is clicked again. Nothing else can give a pane to a device: a pane
+  given up goes back to its last owner.
 - **Light or dark.** Each pane turns on mode 2031, and Rex reports the owning client's scheme
   (`CSI ? 997 ; 1 n` dark, `2 n` light) and reports it again when it changes. Snapshots and
   logos follow it, else the Mac's `AppleInterfaceStyle`. crossterm would take that report for
