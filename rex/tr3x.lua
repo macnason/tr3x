@@ -409,8 +409,9 @@ rex.action{
   run = function(ctx) tr3x({}, { "reopen", "--client", ctx.client_id }) end,
 }
 
--- Six keys, for what you reach for from anywhere. Everything else is in the palette under T3 Code
--- and in Reply's `/` commands; bind any of it yourself in init.lua.
+-- Six keys, for what you reach for from anywhere (⌃⌘T is bound with Fit to This Device).
+-- Everything else is in the palette under T3 Code and in Reply's `/` commands; bind any of it
+-- yourself in init.lua.
 rex.bind("ctrl+cmd+i", "t3_inbox")
 rex.bind("ctrl+cmd+n", "t3_new")
 rex.bind("ctrl+cmd+o", "t3_project")
@@ -445,6 +446,8 @@ rex.action{
 
 -- The device that runs this takes the T3 Code session's panes, so they size to its screen and
 -- follow its appearance. The others show that size until one of them takes the panes back.
+-- Rex's app takes a pane only when it switches to that tab, so coming back to a device that
+-- still shows the thread leaves it sized by the last one: ⌃⌘T fixes that.
 rex.action{
   name = "t3_fit",
   title = "Fit to This Device",
@@ -459,6 +462,7 @@ rex.action{
     end
   end,
 }
+rex.bind("ctrl+cmd+t", "t3_fit")
 
 -- Pairs another machine that runs T3, in a floating window: over SSH, or with a pasted link.
 rex.action{
