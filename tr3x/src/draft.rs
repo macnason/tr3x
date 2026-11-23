@@ -70,11 +70,15 @@ pub fn save(thread: &str, draft: &Draft) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, serde_json::to_vec(draft)?)?;
+    // The thread's panes read it again now.
+    crate::panes::notify("draft", Some(thread));
     Ok(())
 }
 
 pub fn clear(thread: &str) {
-    let _ = std::fs::remove_file(path(thread));
+    if std::fs::remove_file(path(thread)).is_ok() {
+        crate::panes::notify("draft", Some(thread));
+    }
 }
 
 #[cfg(test)]

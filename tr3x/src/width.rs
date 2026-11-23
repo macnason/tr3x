@@ -154,7 +154,10 @@ pub fn set_setting(key: &str, value: Option<Value>) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let text = serde_json::to_string_pretty(&Value::Object(map))? + "\n";
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    // Sync and every pane read the settings again now, rather than finding out on a timer.
+    crate::panes::notify("settings", None);
+    Ok(())
 }
 
 /// What `/width` and `tr3x width` take: a width, or `t3` to follow T3 Code again.
@@ -209,7 +212,7 @@ pub struct Follow {
     checked: Instant,
 }
 
-fn stamps() -> [Option<SystemTime>; 2] {
+pub fn stamps() -> [Option<SystemTime>; 2] {
     [ours(), t3s()].map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
@@ -223,11 +226,17 @@ impl Follow {
         }
     }
 
-    /// Whether the width or the details setting changed since the last look.
+    /// Whether the width or the details setting changed since the last look, looking at most
+    /// every couple of seconds. A pane sync tells about settings calls `look` instead.
     pub fn changed(&mut self) -> bool {
         if self.checked.elapsed() < Duration::from_secs(2) {
             return false;
         }
+        self.look()
+    }
+
+    /// Whether the width or the details setting changed, looking now.
+    pub fn look(&mut self) -> bool {
         self.checked = Instant::now();
         let now = stamps();
         if now == self.stamps {

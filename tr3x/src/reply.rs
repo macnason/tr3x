@@ -88,6 +88,11 @@ impl Fit {
         }
     }
 
+    /// When the next move is due, if one is waiting.
+    pub fn at(&self) -> Option<Instant> {
+        self.at.filter(|_| !self.busy)
+    }
+
     /// The move to make now, if one is due. It comes back true when it took.
     pub fn due(&mut self) -> Option<impl Future<Output = bool> + use<>> {
         if self.busy || self.at.is_none_or(|at| Instant::now() < at) {

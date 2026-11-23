@@ -331,6 +331,12 @@ impl Env {
         Ok(rpc)
     }
 
+    /// Lets go of the connection, which closes once nothing else uses it: no subscription, and
+    /// no call in flight. The next call or subscription opens another.
+    pub async fn release(&self) {
+        self.rpc.lock().await.take();
+    }
+
     async fn open(&self) -> Result<RpcClient> {
         if let Some(api) = &self.fixed {
             return RpcClient::connect(api).await;

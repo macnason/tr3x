@@ -403,6 +403,11 @@ pub fn note_binary() {
     STARTED_ON.get_or_init(|| identity(&real_exe()));
 }
 
+/// The binary at the path this process started from, as it is now.
+pub fn binary() -> Option<(u64, u64)> {
+    identity(&real_exe())
+}
+
 /// Whether the binary at the path this process started from is no longer the one it runs.
 pub fn replaced() -> bool {
     match (STARTED_ON.get().copied().flatten(), identity(&real_exe())) {
@@ -413,17 +418,40 @@ pub fn replaced() -> bool {
 
 /// Starts this pane's program again, as it was started, on whatever binary is there now.
 /// Returns only if it couldn't.
-pub fn start_again() {
+/// `resumed` starts it dozing on the screen it left, which stays as it is.
+pub fn start_again(resumed: bool) {
     let mut args = std::env::args_os();
     let Some(program) = args.next() else {
         return;
     };
     crate::scheme::stop();
     use std::os::unix::process::CommandExt;
-    let _ = std::process::Command::new(&program)
-        .arg0(&program)
-        .args(args)
-        .exec();
+    let mut command = std::process::Command::new(&program);
+    command.arg0(&program).args(args);
+    if resumed {
+        command.env(RESUMED, "1");
+    } else {
+        command.env_remove(RESUMED);
+    }
+    let _ = command.exec();
+}
+
+/// Set on a pane that started itself again to doze, so it leaves the screen as it was.
+const RESUMED: &str = "TR3X_RESUMED";
+static WAS_RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Notes whether this process is a pane that started again to doze. Call before any other
+/// thread starts.
+pub fn note_resumed() {
+    if std::env::var_os(RESUMED).is_some() {
+        WAS_RESUMED.store(true, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::remove_var(RESUMED) };
+    }
+}
+
+pub fn resumed() -> bool {
+    WAS_RESUMED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Draws icons with kitty graphics. Each frame sends each picture again as a file path, which

@@ -50,6 +50,11 @@ impl Drop for Forwards {
 }
 
 impl Forwards {
+    /// Whether any port is forwarded, or being tried: starting the pane again would stop it.
+    pub fn holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
     pub fn of(env: &Env) -> Forwards {
         let machine = env.machine();
         let ssh = (machine.via == Via::Ssh)

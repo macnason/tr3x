@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::compose::Composer;
 use crate::media::{self, Embed, Media};
+use crate::panes::Note;
 use crate::paste::{self, Got};
 use crate::render::{self, visible_width};
 use crate::t3;
@@ -73,6 +74,8 @@ struct Pane {
     status: String,
     /// When `status` last went to Rex.
     status_at: Option<std::time::Instant>,
+    /// A newer status waits for `STATUS_EVERY` to pass since the last.
+    status_held: bool,
     title: String,
     header: bool,
     /// Set by a resize or a new chat width: the whole thread prints again at the new width.
@@ -836,8 +839,11 @@ fn within(text: &str, max: usize) -> String {
 /// The `app` Rex knows the provider the thread's next message goes to by, for its icon.
 fn app_of(composer: &crate::compose::Composer) -> &'static str {
     let instance = composer.next_instance();
-    crate::icons::program_name(crate::icons::driver_of(composer.config.as_ref(), &instance))
-        .unwrap_or("t3code")
+    crate::icons::program_name(crate::icons::driver_of(
+        composer.config.as_deref(),
+        &instance,
+    ))
+    .unwrap_or("t3code")
 }
 
 /// What the working run is doing now, in a few words: its latest tool call as its row reads
@@ -1175,6 +1181,7 @@ impl Pane {
             spilled: 0,
             status: String::new(),
             status_at: None,
+            status_held: false,
             title: String::new(),
             header: false,
             reflow: false,
@@ -1538,17 +1545,40 @@ impl Pane {
         // `STATUS_EVERY`, and at once when anything but the line changes.
         let same_but_msg = |a: &str| a.split(":msg=").next().map(str::to_string);
         let soon = self.status_at.is_some_and(|at| at.elapsed() < STATUS_EVERY);
-        if seq != self.status && !(soon && same_but_msg(&seq) == same_but_msg(&self.status)) {
-            out(&seq);
-            self.status = seq;
-            self.status_at = Some(std::time::Instant::now());
+        self.status_held = false;
+        if seq == self.status {
+            return;
         }
+        if soon && same_but_msg(&seq) == same_but_msg(&self.status) {
+            self.status_held = true;
+            return;
+        }
+        out(&seq);
+        self.status = seq;
+        self.status_at = Some(std::time::Instant::now());
+    }
+
+    /// When a status held back by `STATUS_EVERY` may go to Rex.
+    fn status_due(&self) -> Option<tokio::time::Instant> {
+        let at = self.status_at.filter(|_| self.status_held)?;
+        Some(tokio::time::Instant::from_std(at + STATUS_EVERY))
     }
 
     /// The terminal's title is the thread's, as Go to Anything's Activity list names the pane
     /// by it. The project and status are on the line under it.
-    fn set_title(&mut self, state: &ThreadState, project: Option<&str>) {
-        let title = terminal_title(state.thread()["title"].as_str(), project);
+    /// Lets go of the thread as drawn, for a pane that dozes. Rex keeps what's on screen; on
+    /// waking the thread prints again in full.
+    fn forget(&mut self) {
+        self.display = None;
+        self.live = Vec::new();
+        self.committed = Vec::new();
+        self.media.forget();
+        self.files = crate::link::FileLinks::default();
+        self.reflow = true;
+    }
+
+    fn set_title(&mut self, title: Option<&str>, project: Option<&str>) {
+        let title = terminal_title(title, project);
         if title != self.title {
             out(&format!(
                 "\x1b]2;{}\x07",
@@ -1606,7 +1636,12 @@ pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     if role == Role::Reply {
         out("\x1b]2;Reply\x07\x1b[?1049h");
     }
-    out("\x1b[H\x1b[2J\x1b[3J\x1b[?1004h\x1b[?2004h");
+    // A pane that started again to doze leaves the screen as it was: Rex shows the conversation
+    // until it wakes and prints it again.
+    if !crate::icons::resumed() {
+        out("\x1b[H\x1b[2J\x1b[3J");
+    }
+    out("\x1b[?1004h\x1b[?2004h");
     if clipboard.is_some() {
         out(paste::ON);
     }
@@ -1633,6 +1668,86 @@ pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
     result
 }
 
+/// How long a dozing pane waits for sync to come back before following T3 itself.
+const SYNC_GONE: Duration = Duration::from_secs(30);
+
+/// How long a pane's window is out of sight before the pane dozes.
+const DOZE_AFTER: Duration = Duration::from_secs(20);
+
+/// Waiting on you: an approval or a question. A pane never dozes through one, and wakes for one,
+/// since what it asks is what the user will look at.
+fn needs_you(thread: Option<&Value>) -> bool {
+    thread.is_some_and(|t| {
+        matches!(
+            t3client::inbox::status_label(t, t3::now_ms()),
+            Some("Approval" | "Input")
+        )
+    })
+}
+
+/// Follows T3 again after dozing: the thread, from a snapshot that prints it again in full, and
+/// the machine's config.
+fn wake(
+    dozing: &mut bool,
+    thread_events: &mut Option<mpsc::Receiver<WatchEvent>>,
+    composer: &mut Composer,
+    client: &std::sync::Arc<t3client::env::Env>,
+    thread_id: &str,
+) {
+    *dozing = false;
+    *thread_events = Some(client.watch_thread(thread_id, None));
+    composer.follow_config_again();
+}
+
+/// Lets go of T3 and of everything it can send again: the subscriptions, the connection, the
+/// thread, the config and what was drawn from them. Rex holds the scrollback, so a pane out of
+/// sight needs none of it. What the user typed stays.
+fn doze(
+    dozing: &mut bool,
+    thread_events: &mut Option<mpsc::Receiver<WatchEvent>>,
+    composer: &mut Composer,
+    pane: &mut Pane,
+    client: &std::sync::Arc<t3client::env::Env>,
+) {
+    *dozing = true;
+    *thread_events = None;
+    composer.forget();
+    pane.forget();
+    let client = client.clone();
+    tokio::spawn(async move {
+        client.release().await;
+        // The subscriptions' tasks end as they notice; then the freed memory goes back.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        give_back_memory();
+    });
+}
+
+/// Hands freed memory back to the system. The allocator keeps what a pane freed for reuse, so
+/// a pane that dozed after loading a long thread would go on counting it.
+fn give_back_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone asks every malloc zone in this process; a goal of 0 asks for all.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: glibc's malloc_trim takes only the padding to keep.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// The provider Rex's icon names, kept for while the pane holds no config.
+fn app_now(composer: &Composer, kept: &mut &'static str) -> &'static str {
+    if composer.config.is_some() {
+        *kept = app_of(composer);
+    }
+    kept
+}
+
 async fn event_loop(
     passive: bool,
     role: Role,
@@ -1641,15 +1756,37 @@ async fn event_loop(
     mut scheme: tokio::sync::watch::Receiver<Option<bool>>,
     mut clipboard: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
-    let mut thread_events = client.watch_thread(thread_id, None);
-    let mut shell_events = (role != Role::Reply).then(|| client.watch_shell(None));
+    // Sync sends the pane its thread's row of the shell and says when its window is on screen.
+    // A pane follows the shell from T3 itself only while it can't join sync.
+    let key = format!("{}/{}", client.id(), thread_id);
+    let mut sync_notes = crate::panes::join(&key).await;
+    let mut rejoining = sync_notes
+        .is_none()
+        .then(|| crate::panes::rejoin(key.clone()));
+    // A pane that joined sync loads nothing until sync says its window is on screen: a tab
+    // that's never looked at never holds its thread. Sync answers at once; `deciding` covers a
+    // sync that can't say. A pane that started again to doze, as on an update, dozes on while
+    // sync starts again too.
+    let starts_dozing = sync_notes.is_some() || crate::icons::resumed();
+    let mut thread_events = (!starts_dozing).then(|| client.watch_thread(thread_id, None));
+    let mut shell_events =
+        (role != Role::Reply && !starts_dozing).then(|| client.watch_shell(None));
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel();
     // Reply asks for the machine's config: the provider's driver for each instance, so the pane
     // can take its provider's name, and the address T3 serves its web app at, for the
     // thread's link.
-    let (mut composer, mut done) = Composer::new(client.clone(), thread_id.to_string());
+    let (mut composer, mut done) = Composer::new(
+        client.clone(),
+        thread_id.to_string(),
+        thread_events.is_none(),
+    );
     if role == Role::Reply {
         composer.share = 1.0;
+    }
+    let mut app = app_of(&composer);
+    // Reply alone, without sync, reads no shell: the `/` menu's project folders come from T3.
+    if role == Role::Reply && sync_notes.is_none() {
+        composer.slash.fetch_roots(client.clone());
     }
     // Reply alone fits its pane to what it shows, by moving the split above it.
     let mut fit = (role == Role::Reply).then(crate::reply::Fit::new).flatten();
@@ -1662,14 +1799,34 @@ async fn event_loop(
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(120));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Every eighth tick, about a second: a model the picker held for the next message.
-    let mut ticks = 0u32;
+    // The spinner's frames, and a clock for what reads differently as time passes: each runs
+    // only while it can be seen, or for the clock, while sync isn't there to say what changed.
+    let mut frames = tokio::time::interval(Duration::from_millis(120));
+    frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut clock = tokio::time::interval(Duration::from_secs(1));
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut seconds = 0u32;
+    // Whether the window is the one its session shows, as sync says, and since when it isn't.
+    // A pane hidden for `DOZE_AFTER` dozes: it lets go of T3 until it's shown again, or until
+    // its thread needs you.
+    let mut visible = true;
+    let mut hidden_at: Option<tokio::time::Instant> = None;
+    let mut dozing = starts_dozing;
+    let mut deciding = dozing.then(|| {
+        let wait = if sync_notes.is_some() {
+            Duration::from_secs(10)
+        } else {
+            SYNC_GONE
+        };
+        tokio::time::Instant::now() + wait
+    });
+    // The thread waits on an approval or an answer, as sync's shell last said.
+    let mut waits_on_you = false;
     let mut visited_for = String::new();
     let mut dirty = false;
     // Reply draws again only when something it shows may have changed.
-    let mut reply = true;
+    // A pane that started again to doze draws nothing until it wakes.
+    let mut reply = !crate::icons::resumed();
     let mut focused = true;
     // The binary was replaced by an update: start again on it once nothing is typed.
     let mut stale = false;
@@ -1687,7 +1844,12 @@ async fn event_loop(
     loop {
         let mut content_event = false;
         tokio::select! {
-            event = thread_events.recv() => match event {
+            event = async {
+                match thread_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match event {
                 Some(WatchEvent::Item(item)) => {
                     let changed = if item["kind"] == "snapshot" {
                         composer.state = ThreadState::from_snapshot(&item);
@@ -1733,9 +1895,10 @@ async fn event_loop(
                 }
             } => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
+                composer.slash.set_projects(&shell.projects);
                 if role != Role::Reply {
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
-                    pane.set_status(&shell, thread, composer.state.as_ref(), app_of(&composer));
+                    pane.set_status(&shell, thread, composer.state.as_ref(), app_now(&composer, &mut app));
                 }
             },
             Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
@@ -1763,6 +1926,23 @@ async fn event_loop(
                 // A content event may have left the composer waiting for the next frame.
                 let pending = reply;
                 reply = true;
+                // Typed into or focused, the pane is on screen whatever sync last said: a
+                // visibility sync missed mustn't leave a frozen tab under the user's hands. It
+                // stays awake until sync next says it's hidden.
+                if matches!(event, Some(Ok(Event::FocusGained | Event::Key(_) | Event::Mouse(_) | Event::Paste(_))))
+                    && (dozing || !visible)
+                {
+                    visible = true;
+                    hidden_at = None;
+                    deciding = None;
+                    if dozing {
+                        wake(&mut dozing, &mut thread_events, &mut composer, client, thread_id);
+                        if sync_notes.is_none() && role != Role::Reply {
+                            shell_events = Some(client.watch_shell(None));
+                        }
+                    }
+                    dirty = true;
+                }
                 match event {
                     Some(Ok(Event::Resize(cols, rows))) => {
                         resize = Some((cols as usize, rows as usize));
@@ -1843,7 +2023,146 @@ async fn event_loop(
                 }
             }
             _ = tokio::time::sleep_until(next_frame), if dirty && composer.state.is_some() || reply && role != Role::Conversation => {},
-            _ = tick.tick() => {
+            note = async {
+                match sync_notes.as_mut() {
+                    Some(notes) => notes.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match note {
+                Some(Note::Shell(slice)) => {
+                    composer.slash.set_projects(&slice.projects);
+                    waits_on_you = needs_you(t3client::inbox::find_thread(&slice, thread_id));
+                    if dozing && waits_on_you {
+                        wake(&mut dozing, &mut thread_events, &mut composer, client, thread_id);
+                    }
+                    // Reply alone reports no status: the conversation's pane does.
+                    if role != Role::Reply {
+                        shell = slice;
+                        let thread = t3client::inbox::find_thread(&shell, thread_id);
+                        let state = (!dozing).then_some(composer.state.as_ref()).flatten();
+                        pane.set_status(&shell, thread, state, app_now(&composer, &mut app));
+                        if dozing {
+                            pane.set_title(
+                                thread.and_then(|t| t["title"].as_str()),
+                                thread.and_then(|t| project_name(&shell, t)),
+                            );
+                        }
+                    }
+                }
+                Some(Note::Visible(on)) => {
+                    // A thread sync knows no window for is taken to be on screen.
+                    let on = on.unwrap_or(true);
+                    // Started out of sight and stays so: what starting up freed goes back now.
+                    if deciding.take().is_some() && !on && dozing {
+                        give_back_memory();
+                    }
+                    visible = on;
+                    if on {
+                        hidden_at = None;
+                        if dozing {
+                            wake(&mut dozing, &mut thread_events, &mut composer, client, thread_id);
+                        }
+                        dirty = true;
+                    } else {
+                        hidden_at.get_or_insert_with(tokio::time::Instant::now);
+                    }
+                }
+                Some(Note::Settings) => {
+                    if pane.chat_width.look() {
+                        pane.reflow = true;
+                        dirty = true;
+                    }
+                    // `/status` in another pane, or `tr3x status`.
+                    if role != Role::Conversation && composer.status_changed() {
+                        reply = true;
+                    }
+                }
+                Some(Note::Draft) => if composer.reload_draft() {
+                    reply = true;
+                    dirty = true;
+                },
+                Some(Note::Check) => stale |= crate::icons::replaced(),
+                Some(Note::Lost) | None => {
+                    // Sync went, as when tr3x updates. An awake pane follows the shell itself
+                    // until it can join again. A dozing one stays dozing, since sync is most
+                    // likely back in a moment, unless it stays away.
+                    sync_notes = None;
+                    rejoining = Some(crate::panes::rejoin(key.clone()));
+                    if dozing {
+                        deciding = Some(tokio::time::Instant::now() + SYNC_GONE);
+                    } else {
+                        if role != Role::Reply {
+                            shell_events = Some(client.watch_shell(None));
+                        }
+                        visible = true;
+                        hidden_at = None;
+                    }
+                    stale |= crate::icons::replaced();
+                }
+            },
+            joined = async {
+                match rejoining.as_mut() {
+                    Some(rejoined) => rejoined.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                rejoining = None;
+                if let Ok(notes) = joined {
+                    sync_notes = Some(notes);
+                    shell_events = None;
+                    stale |= crate::icons::replaced();
+                }
+            }
+            _ = frames.tick(), if pane.animating && focused && visible && !dozing => {
+                pane.frame += 1;
+                dirty = true;
+            }
+            // What reads differently as the clock moves on: a usage limit's times, the usage
+            // beside Reply's chip or its status line. Without sync, also what sync would have
+            // said: a model the picker held, the width and status settings, and a new binary.
+            _ = clock.tick(), if (visible && !dozing) || sync_notes.is_none() || !pane.limit.is_empty() => {
+                seconds = seconds.wrapping_add(1);
+                if role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    if pane.limit_now(thread) != pane.limit {
+                        dirty = true;
+                    }
+                    let state = (!dozing).then_some(composer.state.as_ref()).flatten();
+                    pane.set_status(&shell, thread, state, app_now(&composer, &mut app));
+                }
+                if role != Role::Conversation && composer.usage_moved() {
+                    reply = true;
+                }
+                if sync_notes.is_none() {
+                    if composer.reload_draft() {
+                        reply = true;
+                        dirty = true;
+                    }
+                    if pane.chat_width.changed() {
+                        pane.reflow = true;
+                        dirty = true;
+                    }
+                    if role != Role::Conversation && composer.status_changed() {
+                        reply = true;
+                    }
+                    if seconds.is_multiple_of(5) && !stale && crate::icons::replaced() {
+                        stale = true;
+                    }
+                }
+            }
+            // A status Rex got too recently goes once it may.
+            _ = tokio::time::sleep_until(pane.status_due().unwrap_or_else(tokio::time::Instant::now)), if pane.status_due().is_some() => {
+                if role != Role::Reply {
+                    let thread = t3client::inbox::find_thread(&shell, thread_id);
+                    let state = (!dozing).then_some(composer.state.as_ref()).flatten();
+                    pane.set_status(&shell, thread, state, app_now(&composer, &mut app));
+                }
+            }
+            // Clicks come back once the wheel has rested, for the buttons.
+            _ = tokio::time::sleep_until(wheeled.map_or_else(tokio::time::Instant::now, |at| at + WHEEL_REST)), if wheeled.is_some() => {
+                wheeled = None;
+            }
+            _ = tokio::time::sleep_until(fit.as_ref().and_then(|f| f.at()).unwrap_or_else(tokio::time::Instant::now)), if fit.as_ref().is_some_and(|f| f.at().is_some()) => {
                 if let Some(fit) = fit.as_mut()
                     && let Some(job) = fit.due()
                 {
@@ -1852,40 +2171,38 @@ async fn event_loop(
                         let _ = tx.send(job.await);
                     });
                 }
-                if pane.animating && focused {
-                    pane.frame += 1;
-                    dirty = true;
-                }
-                if pane.chat_width.changed() {
-                    pane.reflow = true;
-                    dirty = true;
-                }
-                // Clicks come back once the wheel has rested, for the buttons.
-                if wheeled.is_some_and(|at| at.elapsed() >= WHEEL_REST) {
-                    wheeled = None;
-                }
-                ticks = ticks.wrapping_add(1);
-                if ticks.is_multiple_of(8) && composer.reload_draft() {
-                    reply = true;
-                    dirty = true;
-                }
-                // A usage limit's times read differently as the clock moves on. And a working
-                // line held back while the agent streamed goes to Rex once it may.
-                if ticks.is_multiple_of(8) && role != Role::Reply {
-                    let thread = t3client::inbox::find_thread(&shell, thread_id);
-                    if pane.limit_now(thread) != pane.limit {
-                        dirty = true;
+            }
+            // Hidden long enough with nothing waiting on you: let go of T3 until shown again.
+            _ = tokio::time::sleep_until(hidden_at.map_or_else(tokio::time::Instant::now, |at| at + DOZE_AFTER)),
+                if !dozing && hidden_at.is_some() && sync_notes.is_some() && !waits_on_you => {
+                // Starting again gives back every page this process dirtied, which freeing
+                // can't: the allocator keeps them. Only when nothing would be lost: nothing
+                // typed or on its way, and no port forwarded, which the restart would stop.
+                if !stale && composer.idle() && forwards.as_ref().is_none_or(|f| !f.holding()) {
+                    out(&format!("{}{}\x1b[r", paste::OFF, clicks(false)));
+                    if role == Role::Reply {
+                        out("\x1b[?1049l");
                     }
-                    pane.set_status(&shell, thread, composer.state.as_ref(), app_of(&composer));
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    crate::icons::start_again(true);
+                    // Still here: it couldn't start again, so it dozes as it is.
+                    let _ = crossterm::terminal::enable_raw_mode();
+                    clicking = false;
                 }
-                if ticks.is_multiple_of(8)
-                    && role != Role::Conversation
-                    && (composer.status_changed() || composer.usage_moved())
-                {
-                    reply = true;
-                }
-                if ticks.is_multiple_of(40) && !stale && crate::icons::replaced() {
-                    stale = true;
+                doze(&mut dozing, &mut thread_events, &mut composer, &mut pane, client);
+                continue;
+            }
+            // Dozing, and sync never said where its window is, or went and didn't come back:
+            // follow T3 after all.
+            _ = tokio::time::sleep_until(deciding.unwrap_or_else(tokio::time::Instant::now)), if deciding.is_some() => {
+                deciding = None;
+                if dozing {
+                    wake(&mut dozing, &mut thread_events, &mut composer, client, thread_id);
+                    if sync_notes.is_none() && role != Role::Reply {
+                        shell_events = Some(client.watch_shell(None));
+                    }
+                    visible = true;
+                    hidden_at = None;
                 }
             }
         }
@@ -1910,7 +2227,8 @@ async fn event_loop(
                 out("\x1b[?1049l");
             }
             let _ = crossterm::terminal::disable_raw_mode();
-            crate::icons::start_again();
+            // A dozing pane starts again dozing, on the screen as it is.
+            crate::icons::start_again(dozing);
             // Still here: it couldn't start again, so it carries on as it was.
             let _ = crossterm::terminal::enable_raw_mode();
             pane.reflow = true;
@@ -1956,8 +2274,11 @@ async fn event_loop(
                 pane.reflow |= pane.header;
                 pane.parent = parent;
             }
-            pane.set_title(s, thread.and_then(|t| project_name(&shell, t)));
-            pane.set_status(&shell, thread, Some(s), app_of(&composer));
+            pane.set_title(
+                s.thread()["title"].as_str(),
+                thread.and_then(|t| project_name(&shell, t)),
+            );
+            pane.set_status(&shell, thread, Some(s), app_now(&composer, &mut app));
             text.push_str(&pane.draw(s, thread));
             dirty = false;
         }
@@ -1975,7 +2296,7 @@ async fn event_loop(
                 .unwrap_or_default();
             for request in pane.files.requests(
                 display.blocks.iter().map(|b| b.body.as_str()),
-                composer.config.as_ref(),
+                composer.config.as_deref(),
                 thread_id,
                 root,
                 t3::now_ms(),
@@ -2038,6 +2359,8 @@ async fn event_loop(
         }
         // Looking at a finished thread is what clears Done in T3, as opening it in the app does.
         if focused
+            && visible
+            && !dozing
             && !passive
             && let Some(thread) = t3client::inbox::find_thread(&shell, thread_id)
         {

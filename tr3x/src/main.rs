@@ -17,6 +17,7 @@ mod link;
 mod machines;
 mod media;
 mod new;
+mod panes;
 mod paste;
 mod perf;
 mod pick;
@@ -473,6 +474,7 @@ fn main() {
     let cli = Cli::parse();
     // A pane starts again once the binary it runs is replaced; this is the one it started on.
     icons::note_binary();
+    icons::note_resumed();
     for pair in &cli.set_env {
         if let Some((key, value)) = pair.split_once('=')
             && rex::PANE_ENV.contains(&key)
@@ -483,7 +485,12 @@ fn main() {
     }
     // Pairing through a Rex host uses the same `rex` as everything else.
     t3client::auth::use_rex(crate::rex::Rex::find().bin);
+    // Two workers whatever the core count: a pane serves one terminal, and sync and the
+    // commands wait on T3 and Rex. Work that takes a core goes to the blocking pool, which starts
+    // threads only as it needs them. A worker for every core would give each of the dozens of
+    // panes as many threads, and the allocator memory for each.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .expect("tokio runtime");

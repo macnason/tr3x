@@ -378,16 +378,22 @@ pub struct Slash {
     hint: Option<(String, String)>,
     /// A provider command picked that shares a tr3x command's name: it goes to the agent.
     theirs: Option<String>,
-    /// Project roots by id, for threads without a worktree. Filled in the background.
+    /// Project roots by id, for threads without a worktree, from the shell the pane reads.
     roots: Arc<Mutex<HashMap<String, String>>>,
     /// Whether tr3x's own commands are listed: not before there's a thread to run them on.
     no_rex: bool,
 }
 
 impl Slash {
-    pub fn new(client: Arc<Env>) -> Slash {
-        let slash = Slash::default();
-        let roots = slash.roots.clone();
+    pub fn new() -> Slash {
+        Slash::default()
+    }
+
+    /// Fills the project roots from a snapshot of the machine's whole shell, for a pane with no
+    /// shell of its own to read them from. The snapshot holds every thread, so it's large, and
+    /// it's only asked for here.
+    pub fn fetch_roots(&self, client: Arc<Env>) {
+        let roots = self.roots.clone();
         tokio::spawn(async move {
             if let Ok(shell) = client.shell().await
                 && let Ok(mut roots) = roots.lock()
@@ -400,7 +406,6 @@ impl Slash {
                 }));
             }
         });
-        slash
     }
 
     /// The menu for a new thread's first message: the provider's commands and skills only.
@@ -413,7 +418,7 @@ impl Slash {
         slash
     }
 
-    /// The project roots, from another machine's projects.
+    /// The project roots, from the projects a shell lists.
     pub fn set_projects(&mut self, projects: &[Value]) {
         if let Ok(mut roots) = self.roots.lock() {
             *roots = projects

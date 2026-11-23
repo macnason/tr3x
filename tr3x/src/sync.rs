@@ -22,6 +22,7 @@ use t3client::inbox::{Capabilities, Inbox, Place};
 use t3client::projection::{ShellState, compact_row};
 
 use crate::machines::Sessions;
+use crate::panes::{Heard, Note, Panes};
 use crate::rex::{Rex, lua_str};
 use crate::state::{Disk, Group, Next, State, Window};
 use crate::t3;
@@ -112,6 +113,33 @@ const WATCHER_RETRY: Duration = Duration::from_secs(5);
 
 /// However quiet the shells and Rex are, sync looks at Rex this often, for anything it missed.
 const REX_BACKSTOP: Duration = Duration::from_secs(60);
+
+/// Sends each joined pane its thread's slice of its machine's shell, once that has caught up,
+/// and whether its window is the one its session shows, once it has one.
+fn publish(panes: &Panes, tracks: &BTreeMap<String, Track>, syncer: &Syncer) {
+    for key in panes.keys() {
+        let Some((env, thread)) = key.split_once('/') else {
+            continue;
+        };
+        let shell = tracks
+            .get(env)
+            .map(|t| &t.shell)
+            .filter(|s| s.synchronized)
+            .map(|s| crate::panes::slice(s, thread));
+        // Nothing is said until sync knows what the session shows: before its first look at Rex,
+        // every pane would read as hidden. A thread with no window, such as one `tr3x new` just
+        // launched, hears so.
+        let window = syncer.state.groups.values().find_map(|g| {
+            let window = g.windows.get(&key)?;
+            Some((g.session_id.as_ref()?, &window.window_id))
+        });
+        let visible = match window {
+            Some((session, window)) => syncer.active.get(session).map(|a| Some(a == window)),
+            None => Some(None),
+        };
+        panes.publish(&key, shell.as_ref(), visible);
+    }
+}
 
 /// One machine's shell, as sync last saw it.
 pub struct MachineShell<'a> {
@@ -873,6 +901,10 @@ rex.on("window_closed", function(ctx, ev)
   print("closed")
   io.stdout:flush()
 end)
+rex.on("active_window_changed", function(ctx, ev)
+  print("active " .. tostring(ev.window_id))
+  io.stdout:flush()
+end)
 rex.on("window_created", function(ctx, ev)
   local view = rex.session.view{{}}
   for _, w in ipairs((view and view.windows) or {{}}) do
@@ -914,6 +946,9 @@ return {{}}
 
 /// A window closed in a session sync watches: reconcile now, so its thread settles at once.
 static CLOSED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// Each session's window on screen, as the watchers hear Rex change it, for `follow` to take.
+static ACTIVATED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+static ACTIVE_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 pub struct Syncer {
     pub rex: Rex,
@@ -930,6 +965,8 @@ pub struct Syncer {
     pub closed: Vec<ThreadRef>,
     /// Conversation panes seen running tr3x, by session, so each is asked only once.
     pub verified: HashMap<String, HashSet<String>>,
+    /// The window each session shows, by session, from Rex's view and its events.
+    pub active: HashMap<String, String>,
 }
 
 /// A session tr3x keeps: the merged one, or one machine's.
@@ -1055,12 +1092,20 @@ impl Syncer {
                     });
                 }
                 if let Some(stdout) = child.stdout.take() {
+                    let session = session.to_string();
                     tokio::spawn(async move {
                         use tokio::io::AsyncBufReadExt;
                         let mut lines = tokio::io::BufReader::new(stdout).lines();
                         while let Ok(Some(line)) = lines.next_line().await {
-                            if line.trim() == "closed" {
+                            let line = line.trim();
+                            if line == "closed" {
                                 CLOSED.notify_one();
+                            } else if let Some(window) = line.strip_prefix("active ") {
+                                ACTIVATED
+                                    .lock()
+                                    .unwrap()
+                                    .push((session.clone(), window.to_string()));
+                                ACTIVE_CHANGED.notify_one();
                             }
                         }
                         // The watcher ended: Rex quit or restarted, or the session went. The
@@ -1146,6 +1191,9 @@ impl Syncer {
         let session = self.session(spec).await?;
         self.watch(&session, spec.env.as_deref());
         let view = self.rex.inspect(&session).await?;
+        if let Some(active) = view["active_window_id"].as_str() {
+            self.active.insert(session.clone(), active.to_string());
+        }
         // Rex leaves `windows` out of an empty session. An answer that isn't this session at all
         // is not "every window was closed".
         if view["session_id"].as_str() != Some(session.as_str()) {
@@ -1379,10 +1427,21 @@ pub async fn run(first: bool, log: bool) -> Result<()> {
     }
     // Once a day: tr3x's and each machine's T3's updates. On `auto`, tr3x installs its own.
     tokio::spawn(crate::update::follow());
+    // The panes join here rather than each following the shell from T3. Served once, for as
+    // long as sync runs: following T3 again after an error keeps the panes that joined.
+    let (panes, mut heard) = match Panes::serve() {
+        Ok(served) => served,
+        Err(e) => {
+            eprintln!("tr3x: panes can't join sync, so each follows T3 itself: {e}");
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            std::mem::forget(tx);
+            (Panes::default(), rx)
+        }
+    };
     let mut pause = 2;
     loop {
         let started = Instant::now();
-        let Err(error) = follow(first, &mut wake).await;
+        let Err(error) = follow(first, &mut wake, &panes, &mut heard).await;
         if started.elapsed() > Duration::from_secs(120) {
             pause = 2;
         }
@@ -1447,6 +1506,8 @@ fn follow_machines(
 async fn follow(
     first: bool,
     wake: &mut tokio::signal::unix::Signal,
+    panes: &Panes,
+    heard: &mut tokio::sync::mpsc::UnboundedReceiver<Heard>,
 ) -> Result<std::convert::Infallible> {
     let mut hub = t3::hub();
     // A Mac without T3 of its own can still follow the machines it's paired with.
@@ -1470,9 +1531,25 @@ async fn follow(
         watchers: HashMap::new(),
         closed: Vec::new(),
         verified: HashMap::new(),
+        active: HashMap::new(),
     };
     if !home.is_empty() {
         syncer.persist()?;
+    }
+    // What each session shows, before any machine has caught up: the panes that join wait to
+    // hear whether they're on screen, and load nothing until they do.
+    for session in syncer
+        .state
+        .groups
+        .values()
+        .filter_map(|g| g.session_id.clone())
+        .collect::<Vec<_>>()
+    {
+        if let Ok(view) = syncer.rex.inspect(&session).await
+            && let Some(active) = view["active_window_id"].as_str()
+        {
+            syncer.active.insert(session, active.to_string());
+        }
     }
     let (tx, mut events) = tokio::sync::mpsc::channel(32);
     let mut tracks: BTreeMap<String, Track> = BTreeMap::new();
@@ -1485,11 +1562,14 @@ async fn follow(
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut next_reconcile = tokio::time::Instant::now();
+    // An update replaced the binary, which the panes on sync hear rather than look for.
+    let mut binary = crate::icons::binary();
     // Whether the next pass has to look at Rex whatever the shells say, what the last pass that
     // did saw, and when.
     let mut rex_due = true;
     let mut last_print: Option<Print> = None;
     let mut last_rex = Instant::now();
+    let mut settings_stamps = crate::width::stamps();
     loop {
         let take = |env: String, event: WatchEvent, tracks: &mut BTreeMap<String, Track>| {
             let Some(track) = tracks.get_mut(&env) else {
@@ -1554,7 +1634,20 @@ async fn follow(
                 take(env, event, &mut tracks);
                 dirty = true;
             }
-            _ = tick.tick() => dirty = true,
+            _ = tick.tick() => {
+                dirty = true;
+                // T3 Code's Chat width, which `width t3` follows, changes in T3's own settings.
+                let stamps = crate::width::stamps();
+                if stamps != settings_stamps {
+                    settings_stamps = stamps;
+                    panes.tell(None, &Note::Settings);
+                }
+                let now = crate::icons::binary();
+                if now != binary {
+                    binary = now;
+                    panes.tell(None, &Note::Check);
+                }
+            }
             _ = wake.recv() => {
                 dirty = true;
                 rex_due = true;
@@ -1563,6 +1656,23 @@ async fn follow(
                 dirty = true;
                 rex_due = true;
             }
+            _ = ACTIVE_CHANGED.notified() => {
+                for (session, window) in ACTIVATED.lock().unwrap().drain(..) {
+                    syncer.active.insert(session, window);
+                }
+                dirty = true;
+            }
+            Some(heard) = heard.recv() => match heard {
+                Heard::Joined => dirty = true,
+                Heard::Settings => {
+                    settings_stamps = crate::width::stamps();
+                    panes.tell(None, &Note::Settings);
+                    rex_due = true;
+                    dirty = true;
+                }
+                Heard::Check => panes.tell(None, &Note::Check),
+                Heard::Draft(key) => panes.tell(Some(&key), &Note::Draft),
+            },
             _ = tokio::time::sleep_until(next_reconcile), if dirty => {},
         }
         // Drain a burst before acting, so a snapshot's items reconcile once.
@@ -1607,7 +1717,9 @@ async fn follow(
                 track.forwarder = Some(Hub::forward(env.clone(), tx.clone()));
             }
         }
-        // Nothing to say until some machine has caught up once.
+        // Whether each pane is on screen, and its slice once its machine has caught up.
+        publish(panes, &tracks, &syncer);
+        // Nothing more to say until some machine has caught up once.
         if !tracks.values().any(|t| t.synced.is_some()) {
             continue;
         }
@@ -2812,6 +2924,7 @@ mod tests {
             watchers: HashMap::new(),
             closed: Vec::new(),
             verified: HashMap::new(),
+            active: HashMap::new(),
         };
         let process = rex.dir.path().join("process.json");
         let calls = || std::fs::read_to_string(rex.dir.path().join("calls")).unwrap_or_default();
@@ -2870,6 +2983,7 @@ mod tests {
             watchers: HashMap::new(),
             closed: Vec::new(),
             verified: HashMap::new(),
+            active: HashMap::new(),
         };
         syncer.persist().unwrap();
         assert!(saved_windows(&file).is_empty());

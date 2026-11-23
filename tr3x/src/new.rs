@@ -1708,7 +1708,7 @@ pub async fn run(welcome: bool, env: Option<String>, start: Start) -> Result<()>
                     {
                         out(&format!("{}\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l", paste::OFF));
                         let _ = crossterm::terminal::disable_raw_mode();
-                        crate::icons::start_again();
+                        crate::icons::start_again(false);
                         // Still here: carry on as it was.
                         let _ = crossterm::terminal::enable_raw_mode();
                         out("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");

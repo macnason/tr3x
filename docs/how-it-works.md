@@ -24,7 +24,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
   in `t3client`, over every machine's threads at once. A pinned thread stays put while it
   works, as in T3.
 - A window the user closes is noticed at once: each session's watcher (`rex do`) prints on Rex's
-  `window_closed` event, and sync's backstop pass catches anything it missed. Sync settles the
+  `window_closed` event, and sync's backstop pass catches anything it missed. The watcher also
+  prints on `active_window_changed`, which is how sync knows which window is on screen. Sync settles the
   thread with a plain `thread.settle`, never stopping a run. A thread that's running or waiting
   on you is only hidden until it changes. Every window going at once is the session closing,
   so nothing is settled then.
@@ -93,7 +94,20 @@ machine it's paired with, and draws what T3 says into one Rex session.
   output, as in Codex and Claude Code. A turn of the wheel turns it off for a moment and a
   half, or until the next key or request. Tab and `/model` open the model picker, and
   Backspace takes a picture off.
-- The pane subscribes to the thread once. It reports
+- The pane subscribes to the thread once, and joins sync on `panes.sock` in the state
+  directory (`panes.rs`) rather than following the shell itself. Sync sends it its thread's
+  slice of the shell (the thread, the threads above it and its project) only when that slice
+  changes, and whether its window is the one on screen. It also passes on what panes used to
+  poll for: a settings change (`set_setting` tells it), a model the picker held (`draft::save`
+  tells it), a new install. A pane that can't join follows the shell from T3 as before, and
+  joins once sync is back.
+- A pane whose window has been out of sight for 20 seconds dozes, unless its thread waits on an
+  approval or an answer: it drops its thread and config subscriptions and its connection to T3,
+  and draws nothing. Rex's marker still follows the thread, from the slice sync sends. Shown
+  again, or once its thread needs you, it resumes the thread after the last event it had, so
+  only what it missed comes. A pane wakes only for what it shows: the spinner while on screen,
+  a clock while on screen for times that move, and deadlines for the rest.
+- It reports
   the thread's status to Rex with OSC 7501, from the same status word T3's sidebar shows, so
   Rex's markers are T3's. `title` is the thread's title, as is the terminal's own title (OSC 2),
   which Go to Anything's Activity list names the pane by. While it waits on you, `msg` is what
@@ -248,8 +262,9 @@ for its notice.
   `~/.local/bin/tr3x` beside-and-rename, rewrites `tr3x.lua`, stops the old sync and reloads
   Rex's config, which starts sync on the new one, without selecting the session or asking about
   machines. A tr3x that runs from anywhere else, such as a build, is never replaced.
-- **Panes** note the binary they started from (device and inode). Every few seconds each one
-  looks again; once the file at that path is a different one and nothing is typed, the pane
+- **Panes** note the binary they started from (device and inode). Each looks again when sync
+  says tr3x was installed, and when sync goes and comes back, as it does on an update (without
+  sync, every few seconds); once the file at that path is a different one and nothing is typed, the pane
   `exec`s itself with its own arguments, in place, so Rex keeps the block and the tab. Reply's
   draft, pictures and answers hold it back until they're empty; New Thread waits while its
   folder picker is open.

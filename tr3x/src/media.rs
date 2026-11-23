@@ -184,6 +184,17 @@ impl Media {
         self.done = Some(done);
     }
 
+    /// Lets go of every snapshot and picture, for a pane that dozes. The terminal keeps what it
+    /// shows; printing the thread again on waking frees its pictures and sends them anew.
+    pub fn forget(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.snapshots = HashMap::new();
+        self.cancel_captures();
+        self.asked = HashMap::new();
+        *self.pending_pictures.borrow_mut() = HashMap::new();
+        let _ = self.free_all();
+    }
+
     fn cancel_captures(&mut self) {
         for capture in self.asked.values_mut() {
             if let Some(job) = capture.take() {
@@ -710,10 +721,17 @@ mod tests {
             .write(true)
             .open(cache.join("capture.lock"))
             .unwrap();
-        assert_eq!(
-            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        // Released promptly, not necessarily at once: while other tests start processes, one
+        // can hold a copy of the descriptor for a moment.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let taken = loop {
+            let got = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if got == 0 || std::time::Instant::now() >= deadline {
+                break got;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(taken, 0);
     }
 
     #[tokio::test]

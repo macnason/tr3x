@@ -19,6 +19,8 @@ pub(crate) fn direct_client() -> reqwest::Client {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
+            // A pane that dozes lets go of T3 within seconds, not a minute and a half later.
+            .pool_idle_timeout(std::time::Duration::from_secs(10))
             .build()
             // `reqwest::Client::new` panics on the same failure: a TLS backend or the system's
             // resolver configuration that can't load.

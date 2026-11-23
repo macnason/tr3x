@@ -62,25 +62,51 @@ pub fn background() -> Option<[u8; 3]> {
         return Some(rgb);
     }
     static THEMES: std::sync::OnceLock<[Option<[u8; 3]>; 2]> = std::sync::OnceLock::new();
-    let [light, dark_bg] = *THEMES.get_or_init(|| [false, true].map(rex_theme));
+    let [light, dark_bg] = *THEMES.get_or_init(rex_themes);
     if dark() { dark_bg } else { light }
 }
 
-/// The background of the Rex theme the app uses for a light or a dark screen, from the
-/// themes Rex ships. None for a theme of your own.
-fn rex_theme(dark: bool) -> Option<[u8; 3]> {
-    let key = if dark {
-        "Workspace.darkThemeID"
-    } else {
-        "Workspace.lightThemeID"
+/// The backgrounds of the Rex themes the app uses for a light and a dark screen, from the
+/// themes Rex ships. None for a theme of your own. Rex's themes file is a couple of megabytes,
+/// so it's read once, for both, and only each theme's id and background are kept from it.
+fn rex_themes() -> [Option<[u8; 3]>; 2] {
+    let ids = ["Workspace.lightThemeID", "Workspace.darkThemeID"].map(|key| {
+        std::process::Command::new("/usr/bin/defaults")
+            .args(["read", crate::fade::DOMAIN, key])
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    });
+    let Some(themes) = shipped_themes() else {
+        return [None, None];
     };
-    let out = std::process::Command::new("/usr/bin/defaults")
-        .args(["read", crate::fade::DOMAIN, key])
-        .output()
-        .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // The app the Rex CLI comes in, through the link Rex puts on a terminal's PATH, else the
-    // app in /Applications: a running server is a copy of its own, without the themes.
+    ids.map(|id| {
+        let id = id?;
+        let hex = themes
+            .iter()
+            .find(|t| t.id == id)?
+            .source
+            .background
+            .as_deref()?;
+        hex_rgb(hex)
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct Theme {
+    id: String,
+    source: ThemeSource,
+}
+
+#[derive(serde::Deserialize)]
+struct ThemeSource {
+    background: Option<String>,
+}
+
+/// Rex's own themes, from the app the Rex CLI comes in, through the link Rex puts on a
+/// terminal's PATH, else the app in /Applications: a running server is a copy of its own,
+/// without the themes.
+fn shipped_themes() -> Option<Vec<Theme>> {
     let bin = crate::rex::Rex::find().bin;
     let bin = std::fs::canonicalize(&bin).unwrap_or(bin);
     let apps = bin
@@ -88,22 +114,23 @@ fn rex_theme(dark: bool) -> Option<[u8; 3]> {
         .filter(|p| p.extension().is_some_and(|e| e == "app"))
         .map(std::path::Path::to_path_buf)
         .chain(["Rex Beta.app", "Rex.app"].map(|a| std::path::Path::new("/Applications").join(a)));
-    let themes = apps
+    let file = apps
         .map(|app| {
             app.join(
                 "Contents/Resources/SuperUI_SuperDesignTokens.bundle/Contents/Resources/themes.json",
             )
         })
-        .find_map(|path| std::fs::read(path).ok())?;
-    let themes: serde_json::Value = serde_json::from_slice(&themes).ok()?;
-    let hex = themes.as_array()?.iter().find(|t| t["id"] == id.as_str())?["source"]["background"]
-        .as_str()?
-        .strip_prefix('#')?
-        .to_string();
+        .find_map(|path| std::fs::File::open(path).ok())?;
+    serde_json::from_reader(std::io::BufReader::new(file)).ok()
+}
+
+/// `#rrggbb` as its channels.
+fn hex_rgb(hex: &str) -> Option<[u8; 3]> {
+    let hex = hex.strip_prefix('#')?;
     if hex.len() != 6 {
         return None;
     }
-    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
     Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
@@ -392,6 +419,23 @@ impl Strip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rex's themes file is read for each theme's id and background, and nothing else.
+    #[test]
+    fn a_theme_background_reads_from_rexs_themes() {
+        let themes: Vec<Theme> = serde_json::from_str(
+            r##"[{"id": "a", "name": "A", "source": {"background": "#0d0d0f", "palette": [1, 2]}},
+                 {"id": "b", "source": {}, "extra": {"deep": [{}]}}]"##,
+        )
+        .unwrap();
+        assert_eq!(
+            themes[0].source.background.as_deref().and_then(hex_rgb),
+            Some([13, 13, 15])
+        );
+        assert!(themes[1].source.background.is_none());
+        assert_eq!(hex_rgb("#fff"), None);
+        assert_eq!(hex_rgb("0d0d0f"), None);
+    }
 
     #[test]
     fn reports_come_out_and_keys_stay() {
