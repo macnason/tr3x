@@ -332,7 +332,7 @@ enum Command {
     /// Show each finished turn's work (on), or fold it to `Worked for …` (off, the default).
     /// Alone, switches it.
     Details { on: Option<String> },
-    /// Show or set the status line under Reply: auto (the default), full, compact, or chip for
+    /// Show or set the status line under Reply: compact (the default), full, auto, or chip for
     /// the model alone.
     Status { layout: Option<String> },
     /// Pair with T3 on another machine: over SSH, or with a pairing link from T3 there. Alone,

@@ -237,7 +237,7 @@ pub const ALL: &[Action] = &[
         slash: slash(
             "status",
             "How the status line under Reply reads",
-            Some("auto, full, compact, chip"),
+            Some("compact, full, auto, chip"),
         ),
         ..NONE
     },

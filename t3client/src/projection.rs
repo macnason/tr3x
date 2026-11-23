@@ -167,7 +167,9 @@ impl ThreadState {
     }
 
     /// A provider thread of this thread that's more than a queued placeholder becomes the
-    /// active one, as the nightly's reducer has it (`provider-thread.updated`).
+    /// active one while there's none. Once there is, the server's thread updates say which:
+    /// T3's own reducer only upserts the provider thread, so a late update to the one a
+    /// provider switch left behind mustn't take it back.
     fn follow_provider_thread(&mut self, payload: &Value) {
         let placeholder = payload["status"] == "not_loaded"
             && payload["firstRunOrdinal"].is_null()
@@ -181,6 +183,9 @@ impl ThreadState {
             .projection
             .get_mut("thread")
             .and_then(Value::as_object_mut)
+            && thread
+                .get("activeProviderThreadId")
+                .is_none_or(Value::is_null)
         {
             thread.insert("activeProviderThreadId".into(), id);
         }
@@ -742,6 +747,11 @@ mod tests {
         state.apply(&event(13, "provider-thread.updated", real));
         assert_eq!(state.thread()["activeProviderThreadId"], "p2");
         assert_eq!(state.list("providerThreads").len(), 3);
+        // A late update to another provider thread doesn't take it from the active one.
+        let old =
+            json!({"id": "p1", "appThreadId": "t1", "status": "active", "firstRunOrdinal": 1});
+        state.apply(&event(14, "provider-thread.updated", old));
+        assert_eq!(state.thread()["activeProviderThreadId"], "p2");
     }
 
     #[test]
