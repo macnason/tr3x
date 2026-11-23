@@ -1,9 +1,10 @@
 //! The status line under Reply: what T3 Code's thread details panel shows, in the terminal.
 //!
-//! `chip` is the one model chip Reply has always had. `full` adds the context window and the
-//! prompt cache beside it, and a second line with the machine, branch, pull request and usage
-//! limits. `compact` puts the most of that on one line. `auto`, the default, is `full` when
-//! the column is wide enough and `compact` when it isn't, as on a phone.
+//! `chip`, the default, is the one model chip Reply has always had. The rest are opt-in, with
+//! `/status`: `full` adds the context window and the prompt cache beside it, and a second line
+//! with the machine, branch, pull request and usage limits. `compact` puts the most of that on
+//! one line. `auto` is `full` when the column is wide enough and `compact` when it isn't, as
+//! on a phone.
 //!
 //! What's left reads as T3's panel reads it: the share left, green, yellow at 20% or less and
 //! red at 10% or less. Colours are the terminal's own, so they follow the Rex theme.
@@ -29,20 +30,20 @@ const CACHE_WARN_MS: i64 = 10 * 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Layout {
-    #[default]
     Auto,
     Full,
     Compact,
+    #[default]
     Chip,
 }
 
 impl Layout {
     pub fn parse(text: &str) -> Option<Layout> {
         match text.trim().to_lowercase().as_str() {
-            "auto" | "default" => Some(Layout::Auto),
+            "auto" => Some(Layout::Auto),
             "full" => Some(Layout::Full),
             "compact" => Some(Layout::Compact),
-            "chip" | "off" => Some(Layout::Chip),
+            "chip" | "off" | "default" => Some(Layout::Chip),
             _ => None,
         }
     }
@@ -66,7 +67,7 @@ impl Layout {
     }
 }
 
-/// The setting, `auto` unless set.
+/// The setting, `chip` unless set.
 pub fn current() -> Layout {
     crate::width::settings()
         .and_then(|s| s.get("statusLine")?.as_str().and_then(Layout::parse))
@@ -81,7 +82,7 @@ pub fn apply(arg: &str) -> Result<String> {
     }
     let layout = Layout::parse(arg)
         .with_context(|| format!("Can't read {arg:?}: auto, full, compact or chip"))?;
-    let value = (layout != Layout::Auto).then(|| Value::from(layout.name()));
+    let value = (layout != Layout::default()).then(|| Value::from(layout.name()));
     crate::width::set_setting("statusLine", value)?;
     Ok(format!("Status line: {}", layout.name()))
 }
@@ -221,6 +222,8 @@ pub struct Facts {
 #[derive(Clone, Debug)]
 struct Part {
     text: String,
+    /// The text without its colours, to cut it by.
+    plain: String,
     width: usize,
     keep: u8,
 }
@@ -228,6 +231,7 @@ struct Part {
 fn part(text: String, plain: &str, keep: u8) -> Part {
     Part {
         text,
+        plain: plain.to_string(),
         width: plain.width(),
         keep,
     }
@@ -447,7 +451,14 @@ fn line(mut left: Vec<Part>, mut right: Vec<Part>, room: usize) -> (String, usiz
             (Some(l), Some(r)) if l < r => drop_least(&mut left),
             (_, Some(_)) => drop_least(&mut right),
             (Some(_), None) => drop_least(&mut left),
-            (None, None) => break,
+            (None, None) => {
+                // The one part left is still too long: it's cut to fit, without its colours.
+                if let Some(p) = left.iter_mut().find(|p| p.keep != u8::MAX) {
+                    p.text = crate::chat::fit(&p.plain, room);
+                    p.width = p.text.width();
+                }
+                break;
+            }
         }
     }
     let used = width(&left);
@@ -505,7 +516,8 @@ fn full(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<Strin
             right.push(c);
         }
     }
-    let (first, _) = line(vec![chip], right, room);
+    let (first, used) = line(vec![chip], right, room);
+    let chip_width = chip_width.min(used);
 
     let mut left = Vec::new();
     if !facts.machine.is_empty() {
@@ -581,8 +593,8 @@ fn compact(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<St
         let m = &facts.machine;
         parts.push(part(format!("{DIM}{m}{RESET}"), m, 2));
     }
-    let (row, _) = line(joined(parts), Vec::new(), room);
-    (vec![row], chip_width)
+    let (row, used) = line(joined(parts), Vec::new(), room);
+    (vec![row], chip_width.min(used))
 }
 
 /// Text without its escapes: SGR colours and OSC 8 links.
@@ -839,10 +851,31 @@ mod tests {
     }
 
     #[test]
+    fn narrow_columns_cut_the_last_part_to_fit() {
+        for layout in [Layout::Auto, Layout::Full, Layout::Compact] {
+            for room in [4, 10, 16, 21, 24, 27, 30, 40] {
+                let (rows, chip_width) = rows(&facts(), layout, room, 3, now(), 0);
+                for row in &rows {
+                    let row = plain(row);
+                    assert!(row.width() <= room - 3, "{layout:?} at {room}: {row}");
+                }
+                assert!(chip_width <= room - 3, "{layout:?} at {room}");
+            }
+        }
+        assert_eq!(
+            shown(&facts(), Layout::Full, 30),
+            ["Opus 5.5 · Medium · Full a…", "PR #31 +154 −8 ◷ checks"]
+        );
+    }
+
+    #[test]
     fn the_setting_parses() {
         assert_eq!(Layout::parse("Full"), Some(Layout::Full));
         assert_eq!(Layout::parse("off"), Some(Layout::Chip));
         assert_eq!(Layout::parse("big"), None);
+        // Opt-in: nothing changes until someone asks for more.
+        assert_eq!(Layout::default(), Layout::Chip);
+        assert_eq!(Layout::parse("default"), Some(Layout::Chip));
         assert_eq!(Layout::Chip.at(200), Layout::Chip);
     }
 }
