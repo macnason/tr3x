@@ -784,6 +784,24 @@ impl Env {
         )
     }
 
+    /// Streams the thread's predicted next prompt, `{runId, text}` or null, each item the whole
+    /// value. T3 before 0.1.12 refuses it, which stops the watch.
+    pub fn watch_prompt_suggestion(
+        self: &Arc<Self>,
+        thread_id: &str,
+    ) -> mpsc::Receiver<WatchEvent> {
+        let client = self.clone();
+        watch(
+            Box::new(move || {
+                let client = client.clone();
+                Box::pin(async move { client.rpc().await })
+            }),
+            "orchestration.subscribePromptSuggestion",
+            json!({"threadId": thread_id}),
+            Resume::Latest,
+        )
+    }
+
     /// Streams the server's configuration, as `spawn_config_watch` describes.
     pub fn watch_config(self: &Arc<Self>) -> mpsc::Receiver<WatchEvent> {
         let client = self.clone();
@@ -834,6 +852,8 @@ enum Resume {
     /// From a new snapshot. A stream with no cursor, such as the server config, sends the whole
     /// state first, as `{"type": "snapshot"}`.
     Snapshot,
+    /// From the current value. Each item is the whole state, such as a prompt suggestion.
+    Latest,
 }
 
 impl Resume {
@@ -844,6 +864,7 @@ impl Resume {
                 item.get("kind").and_then(Value::as_str) == Some("synchronized")
             }
             Resume::Snapshot => item.get("type").and_then(Value::as_str) == Some("snapshot"),
+            Resume::Latest => true,
         }
     }
 }
@@ -897,7 +918,7 @@ fn watch(
     tokio::spawn(async move {
         let mut last_sequence = match resume {
             Resume::AfterSequence(sequence) => sequence,
-            Resume::Snapshot => None,
+            Resume::Snapshot | Resume::Latest => None,
         };
         let mut backoff = Duration::from_millis(250);
         loop {

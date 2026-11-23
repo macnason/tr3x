@@ -363,6 +363,8 @@ pub(crate) enum Done {
     Fresh,
     /// What a ⌘V that arrived as a key came to, read by hand.
     Pasted(Got),
+    /// The provider's predicted next prompt, `{runId, text}`, or null.
+    Suggestion(Value),
 }
 
 /// Reply's rows at most, as a share of a pane it shares with the conversation, and the
@@ -453,6 +455,10 @@ pub(crate) struct Composer {
     pub(crate) status: crate::status::Layout,
     /// The local time zone's offset, for when a used-up limit resets.
     offset_minutes: i64,
+    /// The provider's predicted next prompt, by the run that made it.
+    suggestion: Option<(String, String)>,
+    /// Runs whose suggestion Esc dismissed.
+    dismissed: std::collections::HashSet<String>,
 }
 
 /// Reply's rows before they're placed: each row, the clickable spans on each by row index,
@@ -1048,6 +1054,17 @@ impl Composer {
         if let Some(hint) = self.slash.hint().filter(|_| hint_room >= 4) {
             let hint = fit(hint, hint_room);
             text.push_str(&format!("\x1b[{r};{c}H{}{DIM}{hint}{RESET}", self.fill));
+        } else if let Some(offer) = self.offered().filter(|_| hint_room >= 4) {
+            let first = offer
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or_default();
+            let more = offer.trim().contains('\n');
+            let shown = fit(
+                &format!("{}{}", first.trim(), if more { "…" } else { "" }),
+                hint_room,
+            );
+            text.push_str(&format!("\x1b[{r};{c}H{}{DIM}{shown}{RESET}", self.fill));
         }
         // The cursor hides while a button has focus, as it does on a chip in a new thread.
         let cursor = if self.focus.is_some() { "?25l" } else { "?25h" };
@@ -1558,6 +1575,33 @@ impl Composer {
         }
     }
 
+    /// The suggestion to show in the empty input: while the run that made it is the thread's
+    /// latest that ran and it completed, as in T3, and Esc hasn't dismissed it. A queued
+    /// message promoted to Steer leaves a run cancelled before it started, which it skips.
+    fn offered(&self) -> Option<&str> {
+        let (run_id, text) = self.suggestion.as_ref()?;
+        if !self.editor.text.is_empty()
+            || !self.images.is_empty()
+            || !self.unsent.is_empty()
+            || self.slash.is_open()
+            || self.dismissed.contains(run_id)
+            || self.pending().is_some()
+            || self.secret().is_some()
+        {
+            return None;
+        }
+        let ran = |r: &&Value| !(r["status"] == "cancelled" && r["startedAt"].is_null());
+        let latest = self
+            .state
+            .as_ref()?
+            .list("runs")
+            .iter()
+            .filter(ran)
+            .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0))?;
+        (latest["id"].as_str() == Some(run_id) && latest["status"] == "completed")
+            .then_some(text.as_str())
+    }
+
     /// The messages sent on the thread, oldest first, for Up to bring back.
     fn sent(&self) -> Vec<String> {
         let mut sent: Vec<String> = self
@@ -1589,6 +1633,24 @@ impl Composer {
             return;
         }
         let again = self.escape.again(&key);
+        // Tab takes the suggestion into the input, Esc puts it away.
+        if self.focus.is_none() && key.modifiers.is_empty() {
+            match key.code {
+                KeyCode::Tab if let Some(text) = self.offered() => {
+                    let text = text.to_string();
+                    self.editor.paste(&text);
+                    return;
+                }
+                KeyCode::Esc
+                    if let Some((run, _)) = self.offered().and(self.suggestion.as_ref()) =>
+                {
+                    self.dismissed.insert(run.clone());
+                    self.escape = Escape::default();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.focus.is_none() {
             match self.slash.key(&mut self.editor, key) {
                 slash::Key::Pass => {}
@@ -1897,6 +1959,28 @@ async fn follow_config(client: Arc<Env>, tx: mpsc::UnboundedSender<Done>) {
     follow(client.watch_config(), Some(config), &tx).await;
 }
 
+/// Follows the thread's prompt suggestion until the subscription stops or Reply goes.
+async fn follow_suggestion(
+    mut events: mpsc::Receiver<WatchEvent>,
+    tx: mpsc::UnboundedSender<Done>,
+) {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => match event { Some(event) => event, None => return },
+            _ = tx.closed() => return,
+        };
+        match event {
+            WatchEvent::Item(item) => {
+                if tx.send(Done::Suggestion(item)).is_err() {
+                    return;
+                }
+            }
+            WatchEvent::Reconnecting { .. } => {}
+            WatchEvent::Failed(_) => return,
+        }
+    }
+}
+
 /// Follows T3's config subscription, `events`, from `config`: the whole config to Reply after
 /// each item that changes it, until the subscription stops or Reply goes.
 async fn follow(
@@ -1934,6 +2018,10 @@ impl Composer {
     ) -> (Composer, mpsc::UnboundedReceiver<Done>) {
         let (tx, done) = mpsc::unbounded_channel();
         tokio::spawn(follow_config(client.clone(), tx.clone()));
+        tokio::spawn(follow_suggestion(
+            client.watch_prompt_suggestion(&thread_id),
+            tx.clone(),
+        ));
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let slash = Slash::new(client.clone());
         let mut composer = Composer {
@@ -1974,6 +2062,8 @@ impl Composer {
             usage_drawn: None,
             status: crate::status::current(),
             offset_minutes: crate::chat::local_offset_minutes(),
+            suggestion: None,
+            dismissed: Default::default(),
         };
         composer.reload_draft();
         (composer, done)
@@ -2059,6 +2149,14 @@ impl Composer {
             Done::Link(url) => self.link = Some(url),
             Done::Logos(logos) => self.logos = logos,
             Done::Pasted(got) => self.pasted(got),
+            Done::Suggestion(item) => {
+                self.suggestion = match (item["runId"].as_str(), item["text"].as_str()) {
+                    (Some(run), Some(text)) if !text.trim().is_empty() => {
+                        Some((run.to_string(), text.to_string()))
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -2731,5 +2829,57 @@ mod tests {
             rows.contains("hello") && !rows.contains("GitHub token"),
             "{rows}"
         );
+    }
+
+    fn suggested(runs: Value) -> super::Composer {
+        let mut reply = reply_on_codex();
+        reply.state = t3client::projection::ThreadState::from_snapshot(&json!({
+            "kind": "snapshot", "snapshotSequence": 2,
+            "projection": {
+                "thread": {"id": "t1", "title": "T", "modelSelection": {"instanceId": "codex", "model": "gpt"}},
+                "runs": runs, "runtimeRequests": [], "turnItems": [], "visibleTurnItems": []
+            }
+        }));
+        reply.done(Done::Suggestion(
+            json!({"runId": "r1", "text": "Run the tests"}),
+        ));
+        reply
+    }
+
+    /// The suggestion shows in the empty input after the run that made it, and Tab takes it.
+    #[tokio::test]
+    async fn tab_takes_the_suggestion_after_its_run() {
+        let mut reply = suggested(json!([{"id": "r1", "status": "completed", "ordinal": 1}]));
+        assert!(reply.draw(1, true).contains("Run the tests"));
+        reply.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(reply.editor.string(), "Run the tests");
+    }
+
+    /// A newer run, or one still going, hides it; a run cancelled before it started doesn't.
+    #[tokio::test]
+    async fn the_suggestion_is_only_for_the_latest_run_that_ran() {
+        let newer = suggested(json!([
+            {"id": "r1", "status": "completed", "ordinal": 1},
+            {"id": "r2", "status": "running", "ordinal": 2}
+        ]));
+        assert_eq!(newer.offered(), None);
+        let steered = suggested(json!([
+            {"id": "r1", "status": "completed", "ordinal": 1},
+            {"id": "r2", "status": "cancelled", "ordinal": 2, "startedAt": null}
+        ]));
+        assert_eq!(steered.offered(), Some("Run the tests"));
+    }
+
+    /// Esc puts it away for that run, without arming a clear; typing hides it.
+    #[tokio::test]
+    async fn esc_dismisses_the_suggestion() {
+        let mut reply = suggested(json!([{"id": "r1", "status": "completed", "ordinal": 1}]));
+        reply.editor.insert("x");
+        assert_eq!(reply.offered(), None);
+        reply.editor.clear();
+        reply.key(esc());
+        assert_eq!(reply.offered(), None);
+        assert!(!reply.escape.armed());
+        assert!(!reply.draw(1, true).contains("Run the tests"));
     }
 }
