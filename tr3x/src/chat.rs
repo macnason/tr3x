@@ -1789,7 +1789,10 @@ async fn event_loop(
         composer.slash.fetch_roots(client.clone());
     }
     // Reply alone fits its pane to what it shows, by moving the split above it.
-    let mut fit = (role == Role::Reply).then(crate::reply::Fit::new).flatten();
+    let mut fit = match role {
+        Role::Reply => crate::reply::Fit::new().await,
+        _ => None,
+    };
     let (fitted_tx, mut fitted) = mpsc::unbounded_channel();
     // Where Reply alone starts in its pane, to clear above it when that moves.
     let mut reply_top = 0;

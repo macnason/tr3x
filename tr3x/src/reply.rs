@@ -70,10 +70,11 @@ pub struct Fit {
 
 impl Fit {
     /// For the pane this runs in, inside Rex.
-    pub fn new() -> Option<Fit> {
+    pub async fn new() -> Option<Fit> {
+        let (session, block) = crate::rex::here().await?;
         Some(Fit {
-            session: std::env::var("REX_SESSION").ok()?,
-            block: std::env::var("REX_BLOCK").ok()?,
+            session,
+            block,
             asked: 0,
             wants: 0,
             at: None,

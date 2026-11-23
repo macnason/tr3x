@@ -21,6 +21,24 @@ const BUNDLED: [&str; 2] = [
 #[cfg(not(target_os = "macos"))]
 const BUNDLED: [&str; 1] = ["/usr/bin/rex"];
 
+/// The Rex session and block this pane runs in, or `None` outside Rex. Newer Rex sets only
+/// `REX_BLOCK` in a pane, since a tab can move between sessions, so the session comes from
+/// `REX_SESSION` where Rex still sets it, else from Rex, asked which session holds the block.
+pub async fn here() -> Option<(String, String)> {
+    let block = std::env::var("REX_BLOCK").ok().filter(|b| !b.is_empty())?;
+    if let Some(session) = std::env::var("REX_SESSION").ok().filter(|s| !s.is_empty()) {
+        return Some((session, block));
+    }
+    // Quietly: the panes that ask draw over the whole screen.
+    let session = Rex::find().session_of(&block).await.ok()?;
+    Some((session, block))
+}
+
+/// The session this pane runs in, as [`here`] finds it.
+pub async fn session_here() -> Option<String> {
+    here().await.map(|(session, _)| session)
+}
+
 /// Never start a Rex server of our own: one that has stopped is Rex quitting, and sync waits
 /// for the app's to come back.
 pub const NO_AUTOSTART: [&str; 1] = ["--autostart=false"];
@@ -161,6 +179,17 @@ impl Rex {
     pub async fn block_method(&self, session: &str, block: &str, method: &str) -> Result<Value> {
         self.json(&["block", "call", "-s", session, "-b", block, method], None)
             .await
+    }
+
+    /// The session holding `block`, as Rex says.
+    pub async fn session_of(&self, block: &str) -> Result<String> {
+        let view = self
+            .json(&["block", "inspect", block, "--json"], None)
+            .await?;
+        view["session_id"]
+            .as_str()
+            .map(str::to_string)
+            .context("rex didn't say which session holds the block")
     }
 
     /// Runs a Lua script against `session` and returns what it returned.

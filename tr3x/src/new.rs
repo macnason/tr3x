@@ -658,10 +658,10 @@ impl NewThread {
     /// Pairs a machine found on the tailnet, in a floating window: over SSH, or with a pasted
     /// link. The machine joins the list once it's paired.
     fn pair(&mut self, candidate: String) {
-        let Ok(session) = std::env::var("REX_SESSION") else {
+        if std::env::var_os("REX_BLOCK").is_none() {
             self.note = Some(("Run `tr3x pair` to pair it".into(), true));
             return;
-        };
+        }
         let exe = icons::real_exe().to_string_lossy().into_owned();
         let data = json!({"argv": crate::rex::pane_argv(&exe, &["pair", &candidate, "--wait"])});
         let script = format!(
@@ -675,6 +675,9 @@ return {{}}"#,
             lua_str(&data.to_string())
         );
         tokio::spawn(async move {
+            let Some(session) = crate::rex::session_here().await else {
+                return;
+            };
             let rex = Rex::find();
             if rex.lua(&session, &script).await.is_ok() {
                 let _ = rex.show_on_phones(&session).await;
@@ -1339,8 +1342,7 @@ return {{}}"#,
 
 /// Labels this pane's block.
 async fn set_label(label: &str) -> Result<()> {
-    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
-    else {
+    let Some((session, block)) = crate::rex::here().await else {
         return Ok(());
     };
     let script = format!(
@@ -1354,8 +1356,7 @@ async fn set_label(label: &str) -> Result<()> {
 /// The Reply pane under this one, for `thread`, run as `program`, when Reply has a pane of
 /// its own.
 async fn open_reply(thread: &str, cwd: Option<&str>, program: &std::path::Path) -> Result<()> {
-    let (Ok(session), Ok(block)) = (std::env::var("REX_SESSION"), std::env::var("REX_BLOCK"))
-    else {
+    let Some((session, block)) = crate::rex::here().await else {
         return Ok(());
     };
     let exe = program.to_string_lossy().into_owned();
