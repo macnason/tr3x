@@ -453,8 +453,11 @@ pub(crate) struct Composer {
     fill: String,
     /// The last frame drawn, less the cursor.
     drawn: String,
-    /// The usage beside the chip in the last frame drawn, which time moves on.
+    /// The usage beside the chip, or the status line, in the last frame drawn, which time
+    /// moves on.
     usage_drawn: Option<String>,
+    /// Whether the status line under the input is on: `/status`.
+    pub(crate) status: bool,
     /// The local time zone's offset, for when a used-up limit resets.
     offset_minutes: i64,
     /// The provider's predicted next prompt, by the run that made it.
@@ -550,6 +553,78 @@ impl Composer {
         })
     }
 
+    /// The thread's model, effort and access, with a model picked for the next message over it.
+    fn settings(&self) -> Option<Settings> {
+        let (state, config) = (self.state.as_ref()?, self.config.as_ref()?);
+        let mut settings = Settings::of_thread(config, state.thread());
+        if let Some(draft) = &self.draft {
+            draft.over(config, &mut settings);
+        }
+        Some(settings)
+    }
+
+    /// What the status line says, when it's on.
+    fn facts(&self) -> Option<crate::status::Facts> {
+        let (state, config) = (self.state.as_ref()?, self.config.as_ref()?);
+        let settings = self.settings()?;
+        let thread = state.thread();
+        let windows = crate::usage::windows(config, &settings.instance);
+        let notice = crate::usage::problem(config, &settings.instance).or_else(|| {
+            if !windows.is_empty() {
+                return None;
+            }
+            let running = self.client.descriptor().map(|d| d.server_version);
+            crate::update::notice(self.client.id(), running.as_deref())
+                .map(|note| (note, crate::chat::DIM))
+        });
+        Some(crate::status::Facts {
+            model: settings.model_label(config),
+            effort: settings.effort_label(config),
+            mode: (settings.mode.clone(), settings.mode_label()),
+            context: crate::status::context(&state.projection),
+            machine: self.client.name().to_string(),
+            branch: thread["branch"].as_str().map(crate::chat::one_line),
+            pr: crate::status::pull_request(thread),
+            windows,
+            notice,
+        })
+    }
+
+    /// The status line's rows and the chip's width, without the logo, in a column `width`
+    /// wide. None for the one chip.
+    fn status_rows(&self, width: usize) -> Option<(Vec<String>, usize)> {
+        if !self.status {
+            return None;
+        }
+        let facts = self.facts()?;
+        let logo = self
+            .settings()
+            .filter(|s| self.logos.contains_key(&s.instance))
+            .map_or(0, |_| 3);
+        Some(crate::status::rows(
+            &facts,
+            width,
+            logo,
+            t3::now_ms(),
+            self.offset_minutes,
+        ))
+    }
+
+    /// What's beside or under the chip as drawn, which time moves on: the usage, or the
+    /// status line.
+    fn shown(&self, width: usize) -> Option<String> {
+        match self.status_rows(width) {
+            Some((rows, _)) => Some(rows.join("\n")),
+            None => self.usage(width),
+        }
+    }
+
+    /// Reads the status line's setting again, saying whether it changed.
+    pub(crate) fn status_changed(&mut self) -> bool {
+        let now = crate::status::current();
+        std::mem::replace(&mut self.status, now) != now
+    }
+
     /// The one chip under the input, as T3's composer shows the model: the provider's logo,
     /// then model, effort and access. It opens the picker.
     fn chips(&self, width: usize) -> Vec<(Chip, Field)> {
@@ -572,8 +647,8 @@ impl Composer {
         )]
     }
 
-    /// What the chip's provider has left of its usage limits, beside the chip, when it fits in
-    /// `width` columns with the chip whole.
+    /// What's beside the chip, when it fits in `width` columns with the chip whole: the context
+    /// window when it runs low, then what the chip's provider has left of its usage limits.
     fn usage(&self, width: usize) -> Option<String> {
         let (Some(state), Some(config)) = (self.state.as_ref(), self.config.as_ref()) else {
             return None;
@@ -582,18 +657,41 @@ impl Composer {
         if let Some(draft) = &self.draft {
             draft.over(config, &mut settings);
         }
+        // The chip as Reply draws it, with its logo.
+        let mut chip =
+            unicode_width::UnicodeWidthStr::width(settings.summary(config, 1000).as_str())
+                + if self.logos.contains_key(&settings.instance) {
+                    3
+                } else {
+                    0
+                };
+        // The status line, when it's on, shows the context window anyway. Off, the chip warns
+        // only when it's low enough to act on, and gives it up first in a narrow column.
+        let mut low = String::new();
+        let ink = crate::status::Ink::current();
+        if let Some((text, cols)) =
+            crate::status::low_context(crate::status::context(&state.projection).as_ref(), &ink)
+            && chip + 3 + cols <= width
+        {
+            low = format!(" {}·{RESET} {text}", ink.tertiary);
+            chip += 3 + cols;
+        }
+        // The limits sit two columns apart.
+        let limits = self.limits(config, &settings, width.checked_sub(chip + 2));
+        match (low.is_empty(), limits) {
+            (true, None) => None,
+            (_, None) => Some(low),
+            (_, Some(limits)) => Some(format!("{low}  {limits}")),
+        }
+    }
+
+    /// The usage limits, or what stands in for them, in `room` columns if there are any.
+    fn limits(&self, config: &Value, settings: &Settings, room: Option<usize>) -> Option<String> {
+        let room = room?;
         let windows: Vec<_> = crate::usage::windows(config, &settings.instance)
             .into_iter()
             .filter(|window| window.left <= 20)
             .collect();
-        // The chip as Reply draws it, with its logo, and two columns apart.
-        let chip = unicode_width::UnicodeWidthStr::width(settings.summary(config, 1000).as_str())
-            + if self.logos.contains_key(&settings.instance) {
-                3
-            } else {
-                0
-            };
-        let room = width.checked_sub(chip + 2)?;
         // A provider that isn't ready says so in place of its limits, wherever it runs.
         if let Some((text, tone)) = crate::usage::problem(config, &settings.instance) {
             return Some(format!("{tone}{}{RESET}", fit(&text, room)));
@@ -611,7 +709,7 @@ impl Composer {
     /// The usage beside the chip reads differently now than when Reply last drew, as a reset
     /// comes and goes.
     pub(crate) fn usage_moved(&self) -> bool {
-        self.usage(self.column.1) != self.usage_drawn
+        self.shown(self.column.1) != self.usage_drawn
     }
 
     /// What Reply shows from the machine's config: the chip and the usage beside it, and the
@@ -621,7 +719,7 @@ impl Composer {
             return None;
         }
         let chips = self.chips(self.column.1).into_iter().map(|(c, _)| c.label);
-        Some((chips.collect(), self.usage(self.column.1)))
+        Some((chips.collect(), self.shown(self.column.1)))
     }
 
     /// Stops following the machine's config and the prompt suggestion, for a pane that dozes.
@@ -836,7 +934,32 @@ impl Composer {
         }
         let chips = self.chips(column);
         let mut usage = None;
-        let chip_row = if chips.is_empty() {
+        let status = self.status_rows(column);
+        let chip_row = if let (Some((lines, chip_width)), Some(settings)) =
+            (status, self.settings().filter(|_| !chips.is_empty()))
+        {
+            usage = Some(lines.join("\n"));
+            let icon = self.logos.get(&settings.instance).cloned();
+            let logo = icon
+                .as_ref()
+                .map(|icon| self.painter.draw(icon) + " ")
+                .unwrap_or_default();
+            let logo_cols = if icon.is_some() { 3 } else { 0 };
+            if below.is_empty() {
+                below.push(String::new());
+            }
+            let at = below.len();
+            for (i, line) in lines.into_iter().enumerate() {
+                let lead = if i == 0 {
+                    logo.clone()
+                } else {
+                    " ".repeat(logo_cols)
+                };
+                below.push(format!("{lead}{line}"));
+            }
+            let span = (left + 1, left + logo_cols + chip_width);
+            Some((vec![span], chips, at))
+        } else if chips.is_empty() {
             None
         } else {
             let only: Vec<Chip> = chips
@@ -849,7 +972,6 @@ impl Composer {
             let (mut line, spans) = picker::labels(&mut self.painter, &only, left);
             usage = self.usage(column);
             if let Some(usage) = &usage {
-                line.push_str("  ");
                 line.push_str(usage);
             }
             if below.is_empty() {
@@ -1386,6 +1508,13 @@ impl Composer {
             "details" => match crate::width::apply_details(arg) {
                 Ok(note) => {
                     self.details_set = Some(crate::width::details());
+                    self.note(note, false);
+                }
+                Err(e) => self.note(format!("{e:#}"), true),
+            },
+            "status" => match crate::status::apply(arg) {
+                Ok(note) => {
+                    self.status = crate::status::current();
                     self.note(note, false);
                 }
                 Err(e) => self.note(format!("{e:#}"), true),
@@ -1998,6 +2127,7 @@ impl Composer {
             wanted: 0,
             fill: String::new(),
             usage_drawn: None,
+            status: crate::status::current(),
             offset_minutes: crate::chat::local_offset_minutes(),
             suggestion: None,
             dismissed: Default::default(),
@@ -2217,6 +2347,8 @@ mod tests {
             }
         }));
         (reply.cols, reply.rows, reply.column) = (120, 30, (0, 120));
+        // The one chip, whatever this machine's settings say; status line tests set their own.
+        reply.status = false;
         (reply, done)
     }
 
@@ -2384,6 +2516,83 @@ mod tests {
         assert!(reply.usage_moved());
         assert!(reply.draw(28, false).contains("Session 5% left"));
         assert!(!reply.usage_moved());
+    }
+
+    #[tokio::test]
+    async fn the_chip_warns_of_a_low_context_window_while_the_status_line_is_off() {
+        // The Rex theme's colours where there is one, as on a Mac with Rex; ANSI elsewhere.
+        let ink = crate::status::Ink::current();
+        let mut reply = reply_on_codex();
+        reply.config = Some(codex(13).into());
+        let left = |reply: &mut super::Composer, used: u64| {
+            let state = reply.state.as_mut().unwrap();
+            state.projection["thread"]["activeProviderThreadId"] = json!("pt");
+            state.projection.insert(
+                "providerThreads".into(),
+                json!([{"id": "pt", "contextUsage": {"usedTokens": used, "maxTokens": 1_000_000}}]),
+            );
+        };
+        // Plenty left: the chip as it always was.
+        left(&mut reply, 100_000);
+        let drawn = reply.draw(28, true);
+        assert!(!drawn.contains("ctx"), "{drawn:?}");
+        left(&mut reply, 850_000);
+        assert!(reply.usage_moved());
+        let drawn = reply.draw(28, true);
+        assert!(drawn.contains(&format!("{}15%", ink.warning)), "{drawn:?}");
+        assert!(
+            crate::status::plain(&drawn).contains("GPT · Full access · ctx 15%"),
+            "{drawn:?}"
+        );
+        left(&mut reply, 920_000);
+        assert!(reply.draw(28, true).contains(&format!("{}8%", ink.danger)));
+        // A column with no room for it beside the chip goes without.
+        reply.column = (0, 12);
+        let drawn = reply.draw(28, true);
+        assert!(!drawn.contains("ctx"), "{drawn:?}");
+    }
+
+    #[tokio::test]
+    async fn the_full_status_line_shows_context_pull_request_and_usage() {
+        let mut reply = reply_on_codex();
+        reply.status = true;
+        reply.config = Some(codex(13).into());
+        let state = reply.state.as_mut().unwrap();
+        state.projection["thread"]["activeProviderThreadId"] = json!("pt");
+        state.projection["thread"]["branch"] = json!("feat/status-line");
+        state.projection["thread"]["pullRequests"] = json!([{"number": 7, "url": "https://example.com/7",
+            "linkedAt": "2026-11-22T00:00:00.000Z",
+            "snapshot": {"state": "open", "additions": 3, "deletions": 1, "checksState": "passing"}}]);
+        state.projection.insert(
+            "providerThreads".into(),
+            json!([{"id": "pt", "contextUsage": {"usedTokens": 250_000, "maxTokens": 1_000_000}}]),
+        );
+        let drawn = reply.draw(28, true);
+        for want in [
+            "GPT",
+            "ctx",
+            "75%",
+            "250k/1M",
+            "Test",
+            "feat/status-line",
+            "PR #7",
+            "+3",
+            "✓ checks",
+            "Session",
+            "87%",
+        ] {
+            assert!(drawn.contains(want), "{want} in {drawn:?}");
+        }
+        assert!(!reply.usage_moved());
+        reply.config = Some(codex(40).into());
+        assert!(reply.usage_moved());
+        // A narrow pane reads compact: one line, the machine gone first.
+        reply.column = (0, 40);
+        let drawn = reply.draw(28, true);
+        assert!(
+            drawn.contains("ctx") && !drawn.contains("feat/status-line"),
+            "{drawn:?}"
+        );
     }
 
     #[tokio::test]

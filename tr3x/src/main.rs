@@ -33,6 +33,7 @@ mod rex;
 mod scheme;
 mod slash;
 mod state;
+mod status;
 mod sup;
 mod surface;
 mod sync;
@@ -63,7 +64,7 @@ struct Cli {
     command: Command,
 }
 
-// What a user runs is install, uninstall, doctor, update, updates, width, details, pair,
+// What a user runs is install, uninstall, doctor, update, updates, width, details, status, pair,
 // envs, env, sessions and reply.
 // The rest is what Rex's actions, panes and config run, so `--help` leaves it out.
 #[derive(Subcommand)]
@@ -333,6 +334,9 @@ enum Command {
     /// Show each finished turn's work (on), or fold it to `Worked for …` (off, the default).
     /// Alone, switches it.
     Details { on: Option<String> },
+    /// Show or set the status line under Reply: on to add context, cache, pull request and
+    /// usage, or off for the model alone (the default).
+    Status { on: Option<String> },
     /// Pair with T3 on another machine: over SSH, or with a pairing link from T3 there. Alone,
     /// finds the machines on your tailnet that run T3.
     Pair {
@@ -927,6 +931,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Details { on } => {
             println!("{}", width::apply_details(on.as_deref().unwrap_or(""))?);
+            Ok(())
+        }
+        Command::Status { on } => {
+            println!("{}", status::apply(on.as_deref().unwrap_or(""))?);
             Ok(())
         }
         Command::Width { width } => {

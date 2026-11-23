@@ -4,6 +4,7 @@
 
 - Reply shows T3's prompt suggestion: after a turn finishes, the empty input shows a dimmed guess at your next message, as in T3. Tab takes it into the input, Esc puts it away. It needs T3 0.1.12 or later with prompt suggestions on in T3's settings.
 - Rex restarting no longer leaves two **T3 Code** sessions when a session-restore tool such as rexurrect runs. rexurrect replaces the sessions Rex carries over with copies that have new ids, and closes the originals; sync took its session for gone and opened another beside the copy, whose tabs were bare shells. Sync now takes over a session with its label that holds its tabs, and starts their conversations again in place.
+- An opt-in status line under Reply shows what T3 Code's thread details do. Beside the model: how much of the context window is left, as a bar, its tokens (`100k/1M`), and how long the prompt cache lasts. Under it: the machine, branch, pull request with what it changes and its checks, and what's left of each usage limit. Shares left turn yellow at 20% and red at 10%, and the cache in its last 10 minutes. Its colours are the Rex theme's, light or dark as the screen is. `/status on` turns it on: two lines where they fit, and the most of it on one in a narrow pane, as on a phone. Off, the default, Reply keeps the model alone and warns beside it when 20% or less of the context is left (`ctx 14%`). `tr3x status` sets it from a terminal.
 
 ## 0.1.6
 

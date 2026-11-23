@@ -61,15 +61,43 @@ pub fn background() -> Option<[u8; 3]> {
     if let Some(rgb) = *BACKGROUND.lock().unwrap() {
         return Some(rgb);
     }
-    static THEMES: std::sync::OnceLock<[Option<[u8; 3]>; 2]> = std::sync::OnceLock::new();
-    let [light, dark_bg] = *THEMES.get_or_init(rex_themes);
-    if dark() { dark_bg } else { light }
+    rex_theme()?.background
 }
 
-/// The backgrounds of the Rex themes the app uses for a light and a dark screen, from the
-/// themes Rex ships. None for a theme of your own. Rex's themes file is a couple of megabytes,
-/// so it's read once, for both, and only each theme's id and background are kept from it.
-fn rex_themes() -> [Option<[u8; 3]>; 2] {
+/// The design tokens of the Rex theme for the screen, light or dark, as Reply's fill takes its
+/// background. None without Rex or for a theme of your own.
+pub fn tokens() -> Option<Tokens> {
+    Some(rex_theme()?.tokens)
+}
+
+fn rex_theme() -> Option<Look> {
+    static THEMES: std::sync::OnceLock<[Option<Look>; 2]> = std::sync::OnceLock::new();
+    let [light, dark_theme] = *THEMES.get_or_init(rex_themes);
+    if dark() { dark_theme } else { light }
+}
+
+/// What's kept of a Rex theme: its background and the tokens the status line draws in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Look {
+    background: Option<[u8; 3]>,
+    tokens: Tokens,
+}
+
+/// A Rex theme's colours for text of less weight and for states, as sRGB.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tokens {
+    pub secondary: Option<[u8; 3]>,
+    pub tertiary: Option<[u8; 3]>,
+    pub success: Option<[u8; 3]>,
+    pub warning: Option<[u8; 3]>,
+    pub danger: Option<[u8; 3]>,
+    pub accent: Option<[u8; 3]>,
+}
+
+/// The Rex themes the app uses for a light and a dark screen, from the themes Rex ships. None
+/// for a theme of your own. Rex's themes file is a couple of megabytes, so it's read once, for
+/// both, and only each theme's id, background and the six tokens are kept from it.
+fn rex_themes() -> [Option<Look>; 2] {
     let ids = ["Workspace.lightThemeID", "Workspace.darkThemeID"].map(|key| {
         std::process::Command::new("/usr/bin/defaults")
             .args(["read", crate::fade::DOMAIN, key])
@@ -82,13 +110,7 @@ fn rex_themes() -> [Option<[u8; 3]>; 2] {
     };
     ids.map(|id| {
         let id = id?;
-        let hex = themes
-            .iter()
-            .find(|t| t.id == id)?
-            .source
-            .background
-            .as_deref()?;
-        hex_rgb(hex)
+        themes.iter().find(|t| t.id == id).map(Theme::look)
     })
 }
 
@@ -96,6 +118,43 @@ fn rex_themes() -> [Option<[u8; 3]>; 2] {
 struct Theme {
     id: String,
     source: ThemeSource,
+    #[serde(default, rename = "cssVariables")]
+    css: Css,
+}
+
+impl Theme {
+    fn look(&self) -> Look {
+        let c = &self.css;
+        let rgb = |v: &Option<String>| v.as_deref().and_then(triple);
+        Look {
+            background: self.source.background.as_deref().and_then(hex_rgb),
+            tokens: Tokens {
+                secondary: rgb(&c.secondary),
+                tertiary: rgb(&c.tertiary),
+                success: rgb(&c.success),
+                warning: rgb(&c.warning),
+                danger: rgb(&c.danger),
+                accent: rgb(&c.accent),
+            },
+        }
+    }
+}
+
+/// The few of a theme's CSS variables the status line uses.
+#[derive(serde::Deserialize, Default)]
+struct Css {
+    #[serde(rename = "--super-text-secondary")]
+    secondary: Option<String>,
+    #[serde(rename = "--super-text-tertiary")]
+    tertiary: Option<String>,
+    #[serde(rename = "--super-success")]
+    success: Option<String>,
+    #[serde(rename = "--super-warning")]
+    warning: Option<String>,
+    #[serde(rename = "--super-danger")]
+    danger: Option<String>,
+    #[serde(rename = "--super-accent")]
+    accent: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -122,6 +181,22 @@ fn shipped_themes() -> Option<Vec<Theme>> {
         })
         .find_map(|path| std::fs::File::open(path).ok())?;
     serde_json::from_reader(std::io::BufReader::new(file)).ok()
+}
+
+/// A CSS variable's colour as its channels: `118 136 148`, as most are written, or
+/// `rgb(79 227 193)`, as the accent is.
+fn triple(text: &str) -> Option<[u8; 3]> {
+    let text = text.trim();
+    let inner = text
+        .strip_prefix("rgb(")
+        .and_then(|t| t.strip_suffix(')'))
+        .unwrap_or(text);
+    let mut channels = inner
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|c| !c.is_empty())
+        .map(|c| c.parse::<u8>().ok());
+    let rgb = [channels.next()??, channels.next()??, channels.next()??];
+    channels.next().is_none().then_some(rgb)
 }
 
 /// `#rrggbb` as its channels.
@@ -435,6 +510,39 @@ mod tests {
         assert!(themes[1].source.background.is_none());
         assert_eq!(hex_rgb("#fff"), None);
         assert_eq!(hex_rgb("0d0d0f"), None);
+    }
+
+    /// The six tokens come from the theme's CSS variables, in either way they're written.
+    #[test]
+    fn a_themes_tokens_read_from_its_css_variables() {
+        let themes: Vec<Theme> = serde_json::from_str(
+            r##"[{"id": "a", "source": {"background": "#06101a"}, "cssVariables": {
+                    "--super-text-secondary": "118 136 148", "--super-text-tertiary": "91 107 119",
+                    "--super-success": "82 199 154", "--super-warning": "212 178 94",
+                    "--super-danger": "226 106 106", "--super-accent": "rgb(79 227 193)",
+                    "--super-radius": "6px"}},
+                 {"id": "b", "source": {}, "cssVariables": {"--super-success": "oops"}}]"##,
+        )
+        .unwrap();
+        let look = themes[0].look();
+        assert_eq!(look.background, Some([6, 16, 26]));
+        assert_eq!(
+            look.tokens,
+            Tokens {
+                secondary: Some([118, 136, 148]),
+                tertiary: Some([91, 107, 119]),
+                success: Some([82, 199, 154]),
+                warning: Some([212, 178, 94]),
+                danger: Some([226, 106, 106]),
+                accent: Some([79, 227, 193]),
+            }
+        );
+        // A theme without them, or with one unreadable, has none of those.
+        assert_eq!(themes[1].look().tokens, Tokens::default());
+        assert_eq!(triple("rgb(1, 2, 3)"), Some([1, 2, 3]));
+        assert_eq!(triple("1 2"), None);
+        assert_eq!(triple("1 2 3 4"), None);
+        assert_eq!(triple("256 0 0"), None);
     }
 
     #[test]

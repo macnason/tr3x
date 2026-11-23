@@ -2070,10 +2070,16 @@ async fn event_loop(
                         hidden_at.get_or_insert_with(tokio::time::Instant::now);
                     }
                 }
-                Some(Note::Settings) => if pane.chat_width.look() {
-                    pane.reflow = true;
-                    dirty = true;
-                },
+                Some(Note::Settings) => {
+                    if pane.chat_width.look() {
+                        pane.reflow = true;
+                        dirty = true;
+                    }
+                    // `/status` in another pane, or `tr3x status`.
+                    if role != Role::Conversation && composer.status_changed() {
+                        reply = true;
+                    }
+                }
                 Some(Note::Draft) => if composer.reload_draft() {
                     reply = true;
                     dirty = true;
@@ -2115,8 +2121,8 @@ async fn event_loop(
                 dirty = true;
             }
             // What reads differently as the clock moves on: a usage limit's times, the usage
-            // beside Reply's chip. Without sync, also what sync would have said: a model the
-            // picker held, the width setting, and a new binary.
+            // beside Reply's chip or its status line. Without sync, also what sync would have
+            // said: a model the picker held, the width and status settings, and a new binary.
             _ = clock.tick(), if (visible && !dozing) || sync_notes.is_none() || !pane.limit.is_empty() => {
                 seconds = seconds.wrapping_add(1);
                 if role != Role::Reply {
@@ -2138,6 +2144,9 @@ async fn event_loop(
                     if pane.chat_width.changed() {
                         pane.reflow = true;
                         dirty = true;
+                    }
+                    if role != Role::Conversation && composer.status_changed() {
+                        reply = true;
                     }
                     if seconds.is_multiple_of(5) && !stale && crate::icons::replaced() {
                         stale = true;

@@ -24,6 +24,9 @@ its own: every message, approval and setting goes to T3.
 - **Any screen.** Rex's Mac and iPhone apps watch the same session. **Fit to This Device** sizes
   it to the one you're on.
 - **Usage limits.** A thread stopped on its limit says when it resets. Reply shows what's left.
+- **Status line.** `/status on` adds what's left of the context window, the prompt cache, the
+  pull request and its checks, and your usage limits under Reply. Off, Reply warns when the
+  context runs low.
 - **Pull requests.** `/pr create` commits, pushes and opens one; `/pr` shows it in a drawer.
 - **Updates itself.** tr3x updates in the background, and `/update` updates T3 on any machine
   and the Rex app on each Mac attached to it.
