@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `/` mid-message opens the skills menu, as at the start of the input. It lists only skills, since T3 takes a skill's `$name` anywhere in a message, and only those whose name the word starts or begins a part of, so a path like `/etc/hosts` doesn't open it. The pick goes in as `$name`. Before, the menu only opened on a `/` that started the message.
 - ⌃⌘T fits the session's panes to the device you're on (**Fit to This Device**). Rex hands a pane over only when you switch to its tab, so back on a device that still showed a thread, it stayed at the other device's size, cut off ("Sized by another client").
 - Sync and the panes use far less. Sync looks at Rex only when what a tab shows changes, not after every update from T3, and keeps a trimmed copy of each thread. Panes get their thread from sync instead of each following T3 themselves, and a tab you haven't looked at for 20 seconds lets go of its thread and its connection: a hidden pane takes a few MB rather than tens, and T3 serves one connection rather than one per tab.
 - An opt-in tab budget for threads left open. `tr3x tabs 15` keeps tabs for the 15 most recently active threads, `tr3x tabs idle 2d` only for those active in the last two days, and `tr3x tabs default` turns it off. The rest stay open in T3 with no tab until they need you, start working, or Find Thread brings one back. A thread you're reading, one that works or waits on you, a pin, and a tab holding a draft always keep theirs.
