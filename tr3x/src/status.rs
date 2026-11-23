@@ -1,10 +1,9 @@
 //! The status line under Reply: what T3 Code's thread details panel shows, in the terminal.
 //!
-//! `chip`, the default, is the one model chip Reply has always had. The rest are opt-in, with
-//! `/status`: `full` adds the context window and the prompt cache beside it, and a second line
-//! with the machine, branch, pull request and usage limits. `compact` puts the most of that on
-//! one line. `auto` is `full` when the column is wide enough and `compact` when it isn't, as
-//! on a phone.
+//! Off, the default, is the one model chip Reply has always had, which warns when the context
+//! window runs low. `/status on` adds the context window and the prompt cache beside it, and a
+//! second line with the machine, branch, pull request and usage limits. A column too narrow
+//! for two lines, as on a phone, gets the most of that on one.
 //!
 //! What's left reads as T3's panel reads it: the share left, green, yellow at 20% or less and
 //! red at 10% or less. Colours are the terminal's own, so they follow the Rex theme.
@@ -21,70 +20,57 @@ use crate::usage::Window;
 
 pub const CYAN: &str = "\x1b[36m";
 
-/// The narrowest column `auto` draws `full` in. Below it, `compact`.
+/// The narrowest column the status line takes two lines in. Below it, one.
 const FULL_MIN: usize = 72;
 /// Cells in the context bar.
 const BAR: usize = 10;
 /// The prompt cache turns yellow in its last minutes.
 const CACHE_WARN_MS: i64 = 10 * 60_000;
+/// The share left at which the chip starts warning, while the status line is off.
+const LOW: u8 = 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Layout {
-    Auto,
+/// How the status line lays out in a column: two lines, or one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
     Full,
     Compact,
-    #[default]
-    Chip,
 }
 
-impl Layout {
-    pub fn parse(text: &str) -> Option<Layout> {
-        match text.trim().to_lowercase().as_str() {
-            "auto" => Some(Layout::Auto),
-            "full" => Some(Layout::Full),
-            "compact" => Some(Layout::Compact),
-            "chip" | "off" | "default" => Some(Layout::Chip),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Layout::Auto => "auto",
-            Layout::Full => "full",
-            Layout::Compact => "compact",
-            Layout::Chip => "chip",
-        }
-    }
-
-    /// What draws in a column `width` wide: `auto` settles on `full` or `compact`.
-    pub fn at(self, width: usize) -> Layout {
-        match self {
-            Layout::Auto if width >= FULL_MIN => Layout::Full,
-            Layout::Auto => Layout::Compact,
-            other => other,
-        }
+/// On or off. Earlier builds wrote a layout's name, so those still read: any of them as on,
+/// the chip as off.
+pub fn parse(text: &str) -> Option<bool> {
+    match text.trim().to_lowercase().as_str() {
+        "on" | "auto" | "full" | "compact" => Some(true),
+        "off" | "chip" | "default" => Some(false),
+        _ => None,
     }
 }
 
-/// The setting, `chip` unless set.
-pub fn current() -> Layout {
-    crate::width::settings()
-        .and_then(|s| s.get("statusLine")?.as_str().and_then(Layout::parse))
+fn name(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// The setting, off unless set.
+pub fn current() -> bool {
+    set_in(crate::width::settings().as_ref())
+}
+
+fn set_in(settings: Option<&serde_json::Map<String, Value>>) -> bool {
+    settings
+        .and_then(|s| s.get("statusLine")?.as_str().and_then(parse))
         .unwrap_or_default()
 }
 
-/// What `/status` and `tr3x status` take: a layout, or nothing to say which is set.
+/// What `/status` and `tr3x status` take: on or off, or nothing to say which is set.
 pub fn apply(arg: &str) -> Result<String> {
     let arg = arg.trim();
     if arg.is_empty() {
-        return Ok(format!("Status line: {}", current().name()));
+        return Ok(format!("Status line: {}", name(current())));
     }
-    let layout = Layout::parse(arg)
-        .with_context(|| format!("Can't read {arg:?}: auto, full, compact or chip"))?;
-    let value = (layout != Layout::default()).then(|| Value::from(layout.name()));
-    crate::width::set_setting("statusLine", value)?;
-    Ok(format!("Status line: {}", layout.name()))
+    let on = parse(arg).with_context(|| format!("Can't read {arg:?}: on or off"))?;
+    // Off is the default, so it leaves nothing behind.
+    crate::width::set_setting("statusLine", on.then(|| Value::from("on")))?;
+    Ok(format!("Status line: {}", name(on)))
 }
 
 /// The context window of the thread's provider session, as its latest turn reported it.
@@ -244,6 +230,15 @@ fn tone(left: u8) -> &'static str {
         11..=20 => YELLOW,
         _ => GREEN,
     }
+}
+
+/// `ctx 14%`, for the chip to show while the status line is off, when what's left is low
+/// enough to act on. Above that the chip stays as it was. With its width.
+pub fn low_context(context: Option<&ContextWindow>) -> Option<(String, usize)> {
+    let left = context?.left().filter(|l| *l <= LOW)?;
+    let plain = format!("ctx {left}%");
+    let text = format!("{DIM}ctx{RESET} {}{left}%{RESET}", tone(left));
+    Some((text, plain.width()))
 }
 
 /// `100k`, `1M`, `1.5M`, `950`.
@@ -472,9 +467,24 @@ fn line(mut left: Vec<Part>, mut right: Vec<Part>, room: usize) -> (String, usiz
 }
 
 /// The status line's rows in a column `room` wide, after the provider's logo, which takes
-/// `logo` columns. The first part of the first row is the chip, which opens the picker: its
-/// width comes back with the rows.
+/// `logo` columns: two lines when there's room for them, else one. The first part of the
+/// first row is the chip, which opens the picker: its width comes back with the rows.
 pub fn rows(
+    facts: &Facts,
+    room: usize,
+    logo: usize,
+    now: i64,
+    offset_minutes: i64,
+) -> (Vec<String>, usize) {
+    let layout = if room >= FULL_MIN {
+        Layout::Full
+    } else {
+        Layout::Compact
+    };
+    laid_out(facts, layout, room, logo, now, offset_minutes)
+}
+
+fn laid_out(
     facts: &Facts,
     layout: Layout,
     room: usize,
@@ -483,9 +493,9 @@ pub fn rows(
     offset_minutes: i64,
 ) -> (Vec<String>, usize) {
     let room = room.saturating_sub(logo);
-    match layout.at(room + logo) {
+    match layout {
         Layout::Full => full(facts, room, now, offset_minutes),
-        _ => compact(facts, room, now, offset_minutes),
+        Layout::Compact => compact(facts, room, now, offset_minutes),
     }
 }
 
@@ -599,7 +609,7 @@ fn compact(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<St
 
 /// Text without its escapes: SGR colours and OSC 8 links.
 #[cfg(test)]
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -676,7 +686,7 @@ mod tests {
     }
 
     fn shown(facts: &Facts, layout: Layout, room: usize) -> Vec<String> {
-        rows(facts, layout, room, 3, now(), 0)
+        laid_out(facts, layout, room, 3, now(), 0)
             .0
             .iter()
             .map(|r| plain(r))
@@ -724,9 +734,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_is_full_when_it_fits_and_compact_when_it_doesnt() {
-        assert_eq!(shown(&facts(), Layout::Auto, 100).len(), 2);
-        assert_eq!(shown(&facts(), Layout::Auto, 50).len(), 1);
+    fn on_is_two_lines_when_they_fit_and_one_when_they_dont() {
+        assert_eq!(rows(&facts(), 100, 3, now(), 0).0.len(), 2);
+        assert_eq!(rows(&facts(), 50, 3, now(), 0).0.len(), 1);
     }
 
     #[test]
@@ -740,7 +750,7 @@ mod tests {
             max: Some(1_000_000),
             cache_until: Some(now() + 6 * 60_000),
         });
-        let (rows, _) = rows(&f, Layout::Full, 100, 0, now(), 0);
+        let (rows, _) = laid_out(&f, Layout::Full, 100, 0, now(), 0);
         assert!(rows[0].contains(&format!("{YELLOW}18%")), "{:?}", rows[0]);
         assert!(
             rows[0].contains(&format!("{YELLOW}cache 6m")),
@@ -772,9 +782,9 @@ mod tests {
 
     #[test]
     fn the_chip_width_covers_the_chip() {
-        let (_, w) = rows(&facts(), Layout::Full, 100, 3, now(), 0);
+        let (_, w) = laid_out(&facts(), Layout::Full, 100, 3, now(), 0);
         assert_eq!(w, "Opus 5.5 · Medium · Full access".width());
-        let (_, w) = rows(&facts(), Layout::Compact, 100, 3, now(), 0);
+        let (_, w) = laid_out(&facts(), Layout::Compact, 100, 3, now(), 0);
         assert_eq!(w, "Opus 5.5 · Medium".width());
     }
 
@@ -852,9 +862,12 @@ mod tests {
 
     #[test]
     fn narrow_columns_cut_the_last_part_to_fit() {
-        for layout in [Layout::Auto, Layout::Full, Layout::Compact] {
+        for layout in [None, Some(Layout::Full), Some(Layout::Compact)] {
             for room in [4, 10, 16, 21, 24, 27, 30, 40] {
-                let (rows, chip_width) = rows(&facts(), layout, room, 3, now(), 0);
+                let (rows, chip_width) = match layout {
+                    Some(layout) => laid_out(&facts(), layout, room, 3, now(), 0),
+                    None => rows(&facts(), room, 3, now(), 0),
+                };
                 for row in &rows {
                     let row = plain(row);
                     assert!(row.width() <= room - 3, "{layout:?} at {room}: {row}");
@@ -870,12 +883,45 @@ mod tests {
 
     #[test]
     fn the_setting_parses() {
-        assert_eq!(Layout::parse("Full"), Some(Layout::Full));
-        assert_eq!(Layout::parse("off"), Some(Layout::Chip));
-        assert_eq!(Layout::parse("big"), None);
+        assert_eq!(parse("On"), Some(true));
+        assert_eq!(parse("off"), Some(false));
+        assert_eq!(parse("big"), None);
+        // What earlier builds wrote, or a habit typed: a layout is on, the chip is off.
+        for on in ["auto", "full", "compact"] {
+            assert_eq!(parse(on), Some(true), "{on}");
+        }
+        for off in ["chip", "default"] {
+            assert_eq!(parse(off), Some(false), "{off}");
+        }
         // Opt-in: nothing changes until someone asks for more.
-        assert_eq!(Layout::default(), Layout::Chip);
-        assert_eq!(Layout::parse("default"), Some(Layout::Chip));
-        assert_eq!(Layout::Chip.at(200), Layout::Chip);
+        assert!(!set_in(None));
+        assert!(!set_in(json!({}).as_object()));
+        assert!(!set_in(json!({"statusLine": "big"}).as_object()));
+        assert!(set_in(json!({"statusLine": "auto"}).as_object()));
+    }
+
+    #[test]
+    fn the_chip_warns_only_when_the_context_runs_low() {
+        let at = |left: u64| ContextWindow {
+            used: 1_000_000 - left * 10_000,
+            max: Some(1_000_000),
+            cache_until: None,
+        };
+        assert_eq!(low_context(Some(&at(90))), None);
+        assert_eq!(low_context(Some(&at(21))), None);
+        assert_eq!(low_context(None), None);
+        let unknown = ContextWindow {
+            used: 5,
+            max: None,
+            cache_until: None,
+        };
+        assert_eq!(low_context(Some(&unknown)), None);
+        let (text, width) = low_context(Some(&at(15))).unwrap();
+        assert_eq!((plain(&text).as_str(), width), ("ctx 15%", 7));
+        assert!(text.contains(&format!("{YELLOW}15%")), "{text:?}");
+        let (text, _) = low_context(Some(&at(20))).unwrap();
+        assert!(text.contains(&format!("{YELLOW}20%")), "{text:?}");
+        let (text, _) = low_context(Some(&at(8))).unwrap();
+        assert!(text.contains(&format!("{RED}8%")), "{text:?}");
     }
 }

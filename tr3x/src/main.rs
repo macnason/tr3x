@@ -333,9 +333,9 @@ enum Command {
     /// Show each finished turn's work (on), or fold it to `Worked for …` (off, the default).
     /// Alone, switches it.
     Details { on: Option<String> },
-    /// Show or set the status line under Reply: chip for the model alone (the default), or full,
-    /// compact or auto to add context, cache, pull request and usage.
-    Status { layout: Option<String> },
+    /// Show or set the status line under Reply: on to add context, cache, pull request and
+    /// usage, or off for the model alone (the default).
+    Status { on: Option<String> },
     /// Pair with T3 on another machine: over SSH, or with a pairing link from T3 there. Alone,
     /// finds the machines on your tailnet that run T3.
     Pair {
@@ -928,8 +928,8 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", width::apply_details(on.as_deref().unwrap_or(""))?);
             Ok(())
         }
-        Command::Status { layout } => {
-            println!("{}", status::apply(layout.as_deref().unwrap_or(""))?);
+        Command::Status { on } => {
+            println!("{}", status::apply(on.as_deref().unwrap_or(""))?);
             Ok(())
         }
         Command::Width { width } => {

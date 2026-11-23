@@ -236,8 +236,8 @@ pub const ALL: &[Action] = &[
     Action {
         slash: slash(
             "status",
-            "How the status line under Reply reads",
-            Some("full, compact, auto, chip"),
+            "Show or hide the status line under Reply",
+            Some("on, off"),
         ),
         ..NONE
     },
