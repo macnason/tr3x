@@ -18,8 +18,10 @@ pub const RUNTIME_MODES: &[(&str, &str)] = &[
     ("full-access", "Full access"),
 ];
 
-/// Option ids that mean reasoning effort, checked in this order. Claude uses `effort`, Codex and
-/// Grok use `reasoningEffort`, Cursor uses `reasoning`, and Pi uses a `thinking` select.
+/// Option ids that mean reasoning effort, checked in this order after a select T3 marks with
+/// `role: "reasoning"`. Claude uses `effort`, Codex and Grok use `reasoningEffort`, Cursor uses
+/// `reasoning`, and Pi uses a `thinking` select. ACP agents such as Antigravity name their own
+/// thinking-level option, so only the role finds it.
 const EFFORT_IDS: &[&str] = &["effort", "reasoningEffort", "reasoning", "thinking"];
 
 /// The desktop app sends this effort as a prefix on the message instead of as an option.
@@ -194,10 +196,11 @@ pub fn qualified(provider: &Value, model: &Value) -> String {
 
 /// The select descriptor that holds reasoning effort, if the model has one.
 pub fn effort_descriptor(model: &Value) -> Option<&Value> {
-    EFFORT_IDS.iter().find_map(|id| {
-        descriptors(model)
+    let selects = || descriptors(model).iter().filter(|d| d["type"] == "select");
+    selects().find(|d| d["role"] == "reasoning").or_else(|| {
+        EFFORT_IDS
             .iter()
-            .find(|d| d["id"].as_str() == Some(id) && d["type"] == "select")
+            .find_map(|id| selects().find(|d| d["id"].as_str() == Some(id)))
     })
 }
 
@@ -750,6 +753,16 @@ mod tests {
             switched.model_selection.unwrap(),
             json!({"instanceId": "codex", "model": "gpt-6", "options": [{"id": "reasoningEffort", "value": "high"}]})
         );
+    }
+
+    #[test]
+    fn effort_finds_an_acp_thinking_level_by_its_role() {
+        let model = json!({"slug": "gemini-4-argon", "capabilities": {"optionDescriptors": [
+            {"id": "mode", "type": "select", "options": [{"id": "plan"}]},
+            {"id": "thought_level", "type": "select", "role": "reasoning",
+             "options": [{"id": "low"}, {"id": "high"}]}
+        ]}});
+        assert_eq!(effort_descriptor(&model).unwrap()["id"], "thought_level");
     }
 
     #[test]
