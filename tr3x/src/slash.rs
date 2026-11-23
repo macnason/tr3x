@@ -1,6 +1,8 @@
 //! The menu `/` opens in Reply: tr3x's commands, then the thread's provider commands and its
 //! skills, as T3's composer lists them. Typing after the `/` filters, ranked the way T3 ranks
 //! (exact, then prefix, word boundary, substring, fuzzy). Tab or Enter completes, Esc closes.
+//! A `/word` later in the message lists only skills, whose `$name` T3 takes anywhere, and only
+//! those the word starts or begins a part of, so a path like `/etc` rarely opens it.
 //!
 //! What a pick puts in the input is what T3 puts there, and the message goes out as plain text
 //! the same way: a provider command as `/name `, a skill as `$name `, which T3's server turns
@@ -344,17 +346,50 @@ pub fn rank(entries: &[Entry], query: &str) -> Vec<usize> {
     hits.into_iter().map(|(.., i)| i).collect()
 }
 
-/// The `/word` being typed, while the input starts with it and the cursor is in it.
-fn query(editor: &Editor) -> Option<String> {
-    if editor.text.first() != Some(&'/') {
+/// The skills whose name `query` starts, or starts a part of, for a `/word` mid-message.
+pub fn rank_inline(entries: &[Entry], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    let b = Bases {
+        exact: 0,
+        prefix: Some(2),
+        boundary: Some(4),
+        ..Bases::default()
+    };
+    let mut hits: Vec<(usize, String, usize)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == Kind::Skill)
+        .filter_map(|(i, e)| {
+            let name = e.name.to_lowercase();
+            Some((score(&name, &query, b, &NAME)?, name, i))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().map(|(.., i)| i).collect()
+}
+
+/// The `/word` the cursor is in: where its `/` is and the word after it. At the start of the
+/// input or after a space; a word with another `/` in it is a path.
+fn query(editor: &Editor) -> Option<(usize, String)> {
+    let text = &editor.text;
+    let cursor = editor.cursor.min(text.len());
+    let start = text[..cursor]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |i| i + 1);
+    if text.get(start) != Some(&'/') || cursor == start {
         return None;
     }
-    let end = editor
-        .text
-        .iter()
+    let end = start + word_end(&text[start..]);
+    let word: String = text[start + 1..end].iter().collect();
+    // Mid-message, a lone `/` is just a slash.
+    (!word.contains('/') && (start == 0 || !word.is_empty())).then_some((start, word))
+}
+
+fn word_end(text: &[char]) -> usize {
+    text.iter()
         .position(|c| c.is_whitespace())
-        .unwrap_or(editor.text.len());
-    (editor.cursor >= 1 && editor.cursor <= end).then(|| editor.text[1..end].iter().collect())
+        .unwrap_or(text.len())
 }
 
 /// What a key did with the menu open.
@@ -370,8 +405,8 @@ pub enum Key {
 pub struct Slash {
     entries: Vec<Entry>,
     menu: Menu,
-    /// The query the menu was ranked for; `None` while closed.
-    open: Option<String>,
+    /// Where the `/word` starts and the word the menu was ranked for; `None` while closed.
+    open: Option<(usize, String)>,
     /// The input Esc closed the menu on. It stays closed until the input changes.
     closed_on: Option<String>,
     /// The input right after a completion, and the hint shown while it's unchanged.
@@ -433,8 +468,11 @@ impl Slash {
         }
     }
 
+    /// Mid-message, a word no skill matches isn't a menu: it's likely a path.
     pub fn is_open(&self) -> bool {
-        self.open.is_some()
+        self.open
+            .as_ref()
+            .is_some_and(|(at, _)| *at == 0 || !self.menu.items.is_empty())
     }
 
     /// The rows the menu draws in while it's open.
@@ -474,7 +512,7 @@ impl Slash {
         if self.open.as_ref() == Some(&q) {
             return;
         }
-        if self.open.is_none() {
+        if self.open.as_ref().is_none_or(|(at, _)| *at != q.0) {
             let roots = self.roots.lock().map(|r| r.clone()).unwrap_or_default();
             self.entries = match (config, thread) {
                 (Some(c), Some(t)) => entries(c, t, &roots, caps),
@@ -484,7 +522,12 @@ impl Slash {
                 self.entries.retain(|e| e.kind != Kind::Rex);
             }
         }
-        let items = rank(&self.entries, &q)
+        let ranked = if q.0 == 0 {
+            rank(&self.entries, &q.1)
+        } else {
+            rank_inline(&self.entries, &q.1)
+        };
+        let items = ranked
             .into_iter()
             .map(|i| {
                 let e = &self.entries[i];
@@ -493,7 +536,7 @@ impl Slash {
                 item.icon = Some(e.mark());
                 item
             })
-            .collect();
+            .collect::<Vec<_>>();
         self.menu = Menu::new(items, None);
         self.open = Some(q);
     }
@@ -508,21 +551,19 @@ impl Slash {
         let Some(entry) = self.entries.get(index).cloned() else {
             return;
         };
-        let end = editor
-            .text
-            .iter()
-            .position(|c| c.is_whitespace())
-            .unwrap_or(editor.text.len());
+        let start = self.open.as_ref().map_or(0, |(at, _)| *at);
+        let end = start + word_end(&editor.text[start..]);
         let mut insert: Vec<char> = entry.insert().chars().collect();
         // Don't double the space that's already there.
         if editor.text.get(end) == Some(&' ') {
             insert.pop();
         }
-        let at = insert.len() + usize::from(editor.text.get(end) == Some(&' '));
-        editor.text.splice(0..end, insert);
+        let at = start + insert.len() + usize::from(editor.text.get(end) == Some(&' '));
+        editor.text.splice(start..end, insert);
         editor.cursor = at;
-        self.theirs = (entry.kind == Kind::Command && crate::actions::is_slash(&entry.name))
-            .then(|| entry.name.clone());
+        self.theirs =
+            (start == 0 && entry.kind == Kind::Command && crate::actions::is_slash(&entry.name))
+                .then(|| entry.name.clone());
         self.hint = entry.hint.map(|h| (editor.string(), h));
         self.open = None;
     }
@@ -840,10 +881,45 @@ mod tests {
         ed.cursor = 0;
         s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
         assert!(!s.is_open());
-        // Not at the start, or a path with a space after it: no menu.
-        let ed = typed("see /settle");
+        // Mid-message, a word no skill's name starts isn't a menu, nor is a path.
+        for text in ["see /settle", "see /pdf/x", "see /", "see /pdf now"] {
+            let mut ed = typed(text);
+            if text.ends_with("now") {
+                ed.cursor = text.len() - 4;
+                s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
+                assert!(s.is_open(), "{text}");
+                continue;
+            }
+            s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
+            assert!(!s.is_open(), "{text}");
+        }
+    }
+
+    #[test]
+    fn mid_message_lists_skills_and_puts_in_a_mention() {
+        let (config, thread) = (config(), thread(None));
+        let mut s = Slash::default();
+        let mut ed = typed("read it with /pd");
         s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
-        assert!(!s.is_open());
+        assert!(s.is_open());
+        let listed: Vec<Kind> = s
+            .menu
+            .items
+            .iter()
+            .map(|i| s.entries[i.id.parse::<usize>().unwrap()].kind)
+            .collect();
+        assert!(!listed.is_empty() && listed.iter().all(|k| *k == Kind::Skill));
+        s.key(&mut ed, press(KeyCode::Enter));
+        assert_eq!(ed.string(), "read it with $pdf ");
+        assert_eq!(ed.cursor, ed.text.len());
+        assert!(!s.is_theirs(&ed.string()));
+        // In the middle, the rest stays.
+        let mut ed = typed("use /pd then reply");
+        ed.cursor = 7;
+        s.sync(&ed, Some(&config), Some(&thread), &Value::Null);
+        s.key(&mut ed, press(KeyCode::Tab));
+        assert_eq!(ed.string(), "use $pdf then reply");
+        assert_eq!(ed.cursor, 9);
     }
 
     #[test]

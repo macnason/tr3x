@@ -4,8 +4,9 @@ name: cut-release
 # tr3x's version, move those notes under the new version, tag it and start release.yml.
 # Run by hand to cut one now, or to pick a minor bump.
 #
-# A tag pushed with GITHUB_TOKEN doesn't trigger other workflows, so release.yml is started
-# on the tag directly.
+# master and v* tags are protected by rulesets; the cut-release deploy key (secret
+# RELEASE_DEPLOY_KEY) is their bypass actor, since GITHUB_TOKEN can't be one on a personal repo.
+# A tag pushed with a deploy key triggers release.yml on its own.
 on:
   schedule:
     - cron: "0 22 * * 0" # Monday 09:00 in Melbourne (AEDT)
@@ -17,8 +18,8 @@ on:
         default: patch
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
+  actions: read
 
 concurrency:
   group: cut-release
@@ -36,6 +37,7 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
       - name: Anything to release
         id: gate
@@ -53,7 +55,6 @@ jobs:
 
       - name: Bump, tag and push
         if: steps.gate.outputs.go == 'yes'
-        id: cut
         run: |
           cur=$(sed -n 's/^version = "\(.*\)"/\1/p' tr3x/Cargo.toml | head -1)
           IFS=. read -r major minor patch <<< "$cur"
@@ -77,8 +78,3 @@ jobs:
           git commit -am "chore: release $next"
           git tag "v$next"
           git push --atomic origin HEAD:master "v$next"
-          echo "tag=v$next" >> "$GITHUB_OUTPUT"
-
-      - name: Start the release
-        if: steps.gate.outputs.go == 'yes'
-        run: gh workflow run release.yml --ref "${{ steps.cut.outputs.tag }}"
