@@ -6,7 +6,8 @@
 //! for two lines, as on a phone, gets the most of that on one.
 //!
 //! What's left reads as T3's panel reads it: the share left, green, yellow at 20% or less and
-//! red at 10% or less. Colours are the terminal's own, so they follow the Rex theme.
+//! red at 10% or less. Colours are the Rex theme's own design tokens, from the theme for the
+//! screen it's seen on, so they match Rex's chrome; without one, the terminal's ANSI colours.
 //!
 //! The setting is `"statusLine"` in `~/.config/tr3x/settings.json`, which `/status` and
 //! `tr3x status` write.
@@ -16,6 +17,7 @@ use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
 use crate::chat::{BLUE, BOLD, DIM, GREEN, MAGENTA, RED, RESET, YELLOW};
+use crate::scheme::Tokens;
 use crate::usage::Window;
 
 pub const CYAN: &str = "\x1b[36m";
@@ -223,21 +225,63 @@ fn part(text: String, plain: &str, keep: u8) -> Part {
     }
 }
 
-/// The colour of a share left, as Reply warns of usage limits.
-fn tone(left: u8) -> &'static str {
-    match left {
-        0..=10 => RED,
-        11..=20 => YELLOW,
-        _ => GREEN,
+/// What the status line draws in, as escapes: the Rex theme's tokens where it has them, the
+/// terminal's ANSI colours where it doesn't.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ink {
+    /// Labels.
+    pub secondary: String,
+    /// What matters least: separators, the token count.
+    pub tertiary: String,
+    pub success: String,
+    pub warning: String,
+    pub danger: String,
+    /// The effort and the prompt cache, which the terminal draws cyan.
+    pub accent: String,
+}
+
+impl Ink {
+    pub fn from(tokens: Option<Tokens>) -> Ink {
+        let t = tokens.unwrap_or_default();
+        let pick = |rgb: Option<[u8; 3]>, ansi: &str| match rgb {
+            Some([r, g, b]) => format!("\x1b[38;2;{r};{g};{b}m"),
+            None => ansi.to_string(),
+        };
+        Ink {
+            secondary: pick(t.secondary, DIM),
+            tertiary: pick(t.tertiary, DIM),
+            success: pick(t.success, GREEN),
+            warning: pick(t.warning, YELLOW),
+            danger: pick(t.danger, RED),
+            accent: pick(t.accent, CYAN),
+        }
+    }
+
+    /// The theme on the screen now.
+    pub fn current() -> Ink {
+        Ink::from(crate::scheme::tokens())
+    }
+
+    /// The colour of a share left, as Reply warns of usage limits.
+    fn tone(&self, left: u8) -> &str {
+        match left {
+            0..=10 => &self.danger,
+            11..=20 => &self.warning,
+            _ => &self.success,
+        }
     }
 }
 
 /// `ctx 14%`, for the chip to show while the status line is off, when what's left is low
 /// enough to act on. Above that the chip stays as it was. With its width.
-pub fn low_context(context: Option<&ContextWindow>) -> Option<(String, usize)> {
+pub fn low_context(context: Option<&ContextWindow>, ink: &Ink) -> Option<(String, usize)> {
     let left = context?.left().filter(|l| *l <= LOW)?;
     let plain = format!("ctx {left}%");
-    let text = format!("{DIM}ctx{RESET} {}{left}%{RESET}", tone(left));
+    let text = format!(
+        "{}ctx{RESET} {}{left}%{RESET}",
+        ink.secondary,
+        ink.tone(left)
+    );
     Some((text, plain.width()))
 }
 
@@ -267,32 +311,42 @@ fn minutes(ms: i64) -> String {
     }
 }
 
-/// The chip's text: `Opus 5.5 · Medium · Full access`, model bold, effort cyan, and full
-/// access yellow as T3 marks it.
-fn chip(facts: &Facts, with_mode: bool) -> Part {
+/// The chip's text: `Opus 5.5 · Medium · Full access`, model bold, effort in the accent, and
+/// full access in the warning colour as T3 marks it.
+fn chip(facts: &Facts, with_mode: bool, ink: &Ink) -> Part {
+    let Ink {
+        secondary,
+        tertiary,
+        accent,
+        ..
+    } = ink;
     let mut text = format!("{BOLD}{}{RESET}", facts.model);
     let mut plain = facts.model.clone();
     if let Some(effort) = &facts.effort {
-        text.push_str(&format!(" {DIM}·{RESET} {CYAN}{effort}{RESET}"));
+        text.push_str(&format!(" {tertiary}·{RESET} {accent}{effort}{RESET}"));
         plain.push_str(&format!(" · {effort}"));
     }
     if with_mode {
         let color = if facts.mode.0 == "full-access" {
-            YELLOW
+            &ink.warning
         } else {
-            DIM
+            secondary
         };
-        text.push_str(&format!(" {DIM}·{RESET} {color}{}{RESET}", facts.mode.1));
+        text.push_str(&format!(
+            " {tertiary}·{RESET} {color}{}{RESET}",
+            facts.mode.1
+        ));
         plain.push_str(&format!(" · {}", facts.mode.1));
     }
     part(text, &plain, 9)
 }
 
-fn bar(left: u8) -> (String, String) {
+fn bar(left: u8, ink: &Ink) -> (String, String) {
     let filled = ((left as usize * BAR) + 50) / 100;
+    let tertiary = &ink.tertiary;
     let text = format!(
-        "{DIM}▕{RESET}{}{}{RESET}{DIM}{}▏{RESET}",
-        tone(left),
+        "{tertiary}▕{RESET}{}{}{RESET}{tertiary}{}▏{RESET}",
+        ink.tone(left),
         "█".repeat(filled),
         "░".repeat(BAR - filled)
     );
@@ -300,21 +354,25 @@ fn bar(left: u8) -> (String, String) {
     (text, plain)
 }
 
-fn cache(context: &ContextWindow, now: i64) -> Option<Part> {
+fn cache(context: &ContextWindow, now: i64, ink: &Ink) -> Option<Part> {
     let rest = context.cache_until? - now;
     if rest <= 0 {
         return None;
     }
-    let color = if rest <= CACHE_WARN_MS { YELLOW } else { CYAN };
+    let color = if rest <= CACHE_WARN_MS {
+        &ink.warning
+    } else {
+        &ink.accent
+    };
     let plain = format!("cache {}", minutes(rest));
     Some(part(format!("{color}{plain}{RESET}"), &plain, 3))
 }
 
-fn checks(checks: Checks, word: bool) -> (String, String) {
+fn checks(checks: Checks, word: bool, ink: &Ink) -> (String, String) {
     let (mark, color) = match checks {
-        Checks::Passing => ("✓", GREEN),
-        Checks::Failing => ("✗", RED),
-        Checks::Pending => ("◷", YELLOW),
+        Checks::Passing => ("✓", &ink.success),
+        Checks::Failing => ("✗", &ink.danger),
+        Checks::Pending => ("◷", &ink.warning),
     };
     let plain = if word {
         format!("{mark} checks")
@@ -325,14 +383,14 @@ fn checks(checks: Checks, word: bool) -> (String, String) {
 }
 
 /// `PR #31`, a link, with its state when it isn't open, and what it changes when `stats`.
-fn pr_part(pr: &PullRequest, stats: bool, keep: u8) -> Part {
+fn pr_part(pr: &PullRequest, stats: bool, keep: u8, ink: &Ink) -> Part {
     let label = format!("PR #{}", pr.number);
     let mut text = format!("{BLUE}{}{RESET}", crate::link::osc8(&pr.url, &label));
     let mut plain = label;
     let state = match pr.state.as_str() {
         "merged" => Some(("merged", MAGENTA)),
-        "closed" => Some(("closed", DIM)),
-        _ if pr.draft => Some(("draft", DIM)),
+        "closed" => Some(("closed", ink.secondary.as_str())),
+        _ if pr.draft => Some(("draft", ink.secondary.as_str())),
         _ => None,
     };
     if let Some((word, color)) = state {
@@ -340,13 +398,14 @@ fn pr_part(pr: &PullRequest, stats: bool, keep: u8) -> Part {
         plain.push_str(&format!(" {word}"));
     }
     if stats && let (Some(a), Some(d)) = (pr.additions, pr.deletions) {
-        text.push_str(&format!(" {GREEN}+{a}{RESET} {RED}−{d}{RESET}"));
+        let (success, danger) = (&ink.success, &ink.danger);
+        text.push_str(&format!(" {success}+{a}{RESET} {danger}−{d}{RESET}"));
         plain.push_str(&format!(" +{a} −{d}"));
     }
     if pr.state == "open"
         && let Some(c) = pr.checks
     {
-        let (t, p) = checks(c, stats);
+        let (t, p) = checks(c, stats, ink);
         text.push_str(&format!(" {t}"));
         plain.push_str(&format!(" {p}"));
     }
@@ -354,7 +413,7 @@ fn pr_part(pr: &PullRequest, stats: bool, keep: u8) -> Part {
 }
 
 /// `Session 87% · Weekly 68%`, or `Session resets 3pm` for a window that's used up.
-fn windows_part(windows: &[Window], now: i64, offset_minutes: i64) -> Option<Part> {
+fn windows_part(windows: &[Window], now: i64, offset_minutes: i64, ink: &Ink) -> Option<Part> {
     if windows.is_empty() {
         return None;
     }
@@ -368,34 +427,35 @@ fn windows_part(windows: &[Window], now: i64, offset_minutes: i64) -> Option<Par
                     w.label,
                     crate::chat::when(at, now, offset_minutes)
                 );
-                text.push(format!("{RED}{p}{RESET}"));
+                text.push(format!("{}{p}{RESET}", ink.danger));
                 plain.push(p);
             }
             _ => {
                 text.push(format!(
-                    "{DIM}{}{RESET} {}{}%{RESET}",
+                    "{}{}{RESET} {}{}%{RESET}",
+                    ink.secondary,
                     w.label,
-                    tone(w.left),
+                    ink.tone(w.left),
                     w.left
                 ));
                 plain.push(format!("{} {}%", w.label, w.left));
             }
         }
     }
-    let sep = format!(" {DIM}·{RESET} ");
+    let sep = format!(" {}·{RESET} ", ink.tertiary);
     Some(part(text.join(&sep), &plain.join(" · "), 6))
 }
 
-fn sep() -> Part {
-    part(format!(" {DIM}·{RESET} "), " · ", u8::MAX)
+fn sep(ink: &Ink) -> Part {
+    part(format!(" {}·{RESET} ", ink.tertiary), " · ", u8::MAX)
 }
 
 /// Parts joined by ` · `.
-fn joined(parts: Vec<Part>) -> Vec<Part> {
+fn joined(parts: Vec<Part>, ink: &Ink) -> Vec<Part> {
     let mut out = Vec::new();
     for (i, p) in parts.into_iter().enumerate() {
         if i > 0 {
-            out.push(sep());
+            out.push(sep(ink));
         }
         out.push(p);
     }
@@ -481,7 +541,15 @@ pub fn rows(
     } else {
         Layout::Compact
     };
-    laid_out(facts, layout, room, logo, now, offset_minutes)
+    laid_out(
+        facts,
+        layout,
+        room,
+        logo,
+        now,
+        offset_minutes,
+        &Ink::current(),
+    )
 }
 
 fn laid_out(
@@ -491,24 +559,36 @@ fn laid_out(
     logo: usize,
     now: i64,
     offset_minutes: i64,
+    ink: &Ink,
 ) -> (Vec<String>, usize) {
     let room = room.saturating_sub(logo);
     match layout {
-        Layout::Full => full(facts, room, now, offset_minutes),
-        Layout::Compact => compact(facts, room, now, offset_minutes),
+        Layout::Full => full(facts, room, now, offset_minutes, ink),
+        Layout::Compact => compact(facts, room, now, offset_minutes, ink),
     }
 }
 
-fn full(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<String>, usize) {
-    let chip = chip(facts, true);
+fn full(
+    facts: &Facts,
+    room: usize,
+    now: i64,
+    offset_minutes: i64,
+    ink: &Ink,
+) -> (Vec<String>, usize) {
+    let Ink {
+        secondary,
+        tertiary,
+        ..
+    } = ink;
+    let chip = chip(facts, true, ink);
     let chip_width = chip.width;
     let mut right = Vec::new();
     if let Some(ctx) = &facts.context {
-        let mut text = format!("{DIM}ctx{RESET}");
+        let mut text = format!("{secondary}ctx{RESET}");
         let mut plain = "ctx".to_string();
         if let Some(left) = ctx.left() {
-            let (b, bp) = bar(left);
-            text.push_str(&format!(" {b} {}{left}%{RESET}", tone(left)));
+            let (b, bp) = bar(left, ink);
+            text.push_str(&format!(" {b} {}{left}%{RESET}", ink.tone(left)));
             plain.push_str(&format!(" {bp} {left}%"));
         }
         right.push(part(text, &plain, 8));
@@ -517,12 +597,12 @@ fn full(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<Strin
             None => tokens(ctx.used),
         };
         right.push(part(
-            format!(" {DIM}{count}{RESET}"),
+            format!(" {tertiary}{count}{RESET}"),
             &format!(" {count}"),
             4,
         ));
-        if let Some(c) = cache(ctx, now) {
-            right.push(sep());
+        if let Some(c) = cache(ctx, now, ink) {
+            right.push(sep(ink));
             right.push(c);
         }
     }
@@ -532,36 +612,46 @@ fn full(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<Strin
     let mut left = Vec::new();
     if !facts.machine.is_empty() {
         let m = &facts.machine;
-        left.push(part(format!("{DIM}{m}{RESET}"), m, 2));
+        left.push(part(format!("{secondary}{m}{RESET}"), m, 2));
     }
     if let Some(b) = &facts.branch {
         left.push(part(format!("{MAGENTA}{b}{RESET}"), b, 3));
     }
     if let Some(pr) = &facts.pr {
-        left.push(pr_part(pr, true, 5));
+        left.push(pr_part(pr, true, 5, ink));
     }
     let right = match &facts.notice {
         Some((text, color)) => vec![part(format!("{color}{text}{RESET}"), text, 6)],
-        None => windows_part(&facts.windows, now, offset_minutes)
+        None => windows_part(&facts.windows, now, offset_minutes, ink)
             .into_iter()
             .collect(),
     };
     let mut rows = vec![first];
     if !left.is_empty() || !right.is_empty() {
-        let (second, _) = line(joined(left), right, room);
+        let (second, _) = line(joined(left, ink), right, room);
         rows.push(second);
     }
     (rows, chip_width)
 }
 
-fn compact(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<String>, usize) {
-    let chip = chip(facts, false);
+fn compact(
+    facts: &Facts,
+    room: usize,
+    now: i64,
+    offset_minutes: i64,
+    ink: &Ink,
+) -> (Vec<String>, usize) {
+    let chip = chip(facts, false, ink);
     let chip_width = chip.width;
     let mut parts = vec![chip];
     if let Some(left) = facts.context.as_ref().and_then(ContextWindow::left) {
         let plain = format!("ctx {left}%");
         parts.push(part(
-            format!("{DIM}ctx{RESET} {}{left}%{RESET}", tone(left)),
+            format!(
+                "{}ctx{RESET} {}{left}%{RESET}",
+                ink.secondary,
+                ink.tone(left)
+            ),
             &plain,
             8,
         ));
@@ -580,30 +670,33 @@ fn compact(facts: &Facts, room: usize, now: i64, offset_minutes: i64) -> (Vec<St
                 w.label,
                 crate::chat::when(w.resets_at.unwrap_or_default(), now, offset_minutes)
             );
-            (format!("{RED}{p}{RESET}"), p)
+            (format!("{}{p}{RESET}", ink.danger), p)
         } else {
             let text: Vec<String> = facts
                 .windows
                 .iter()
-                .map(|w| format!("{}{}%{RESET}", tone(w.left), w.left))
+                .map(|w| format!("{}{}%{RESET}", ink.tone(w.left), w.left))
                 .collect();
             let plain: Vec<String> = facts
                 .windows
                 .iter()
                 .map(|w| format!("{}%", w.left))
                 .collect();
-            (text.join(&format!("{DIM}/{RESET}")), plain.join("/"))
+            (
+                text.join(&format!("{}/{RESET}", ink.tertiary)),
+                plain.join("/"),
+            )
         };
         parts.push(part(text, &plain, 7));
     }
     if let Some(pr) = &facts.pr {
-        parts.push(pr_part(pr, false, 4));
+        parts.push(pr_part(pr, false, 4, ink));
     }
     if !facts.machine.is_empty() {
         let m = &facts.machine;
-        parts.push(part(format!("{DIM}{m}{RESET}"), m, 2));
+        parts.push(part(format!("{}{m}{RESET}", ink.secondary), m, 2));
     }
-    let (row, used) = line(joined(parts), Vec::new(), room);
+    let (row, used) = line(joined(parts, ink), Vec::new(), room);
     (vec![row], chip_width.min(used))
 }
 
@@ -643,6 +736,10 @@ pub(crate) fn plain(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn ansi() -> Ink {
+        Ink::from(None)
+    }
 
     fn now() -> i64 {
         t3client::inbox::parse_iso("2026-11-22T12:00:00.000Z").unwrap()
@@ -686,7 +783,7 @@ mod tests {
     }
 
     fn shown(facts: &Facts, layout: Layout, room: usize) -> Vec<String> {
-        laid_out(facts, layout, room, 3, now(), 0)
+        laid_out(facts, layout, room, 3, now(), 0, &ansi())
             .0
             .iter()
             .map(|r| plain(r))
@@ -741,16 +838,16 @@ mod tests {
 
     #[test]
     fn running_low_turns_yellow_then_red() {
-        assert_eq!(tone(21), GREEN);
-        assert_eq!(tone(20), YELLOW);
-        assert_eq!(tone(10), RED);
+        assert_eq!(ansi().tone(21), GREEN);
+        assert_eq!(ansi().tone(20), YELLOW);
+        assert_eq!(ansi().tone(10), RED);
         let mut f = facts();
         f.context = Some(ContextWindow {
             used: 820_000,
             max: Some(1_000_000),
             cache_until: Some(now() + 6 * 60_000),
         });
-        let (rows, _) = laid_out(&f, Layout::Full, 100, 0, now(), 0);
+        let (rows, _) = laid_out(&f, Layout::Full, 100, 0, now(), 0, &ansi());
         assert!(rows[0].contains(&format!("{YELLOW}18%")), "{:?}", rows[0]);
         assert!(
             rows[0].contains(&format!("{YELLOW}cache 6m")),
@@ -782,9 +879,9 @@ mod tests {
 
     #[test]
     fn the_chip_width_covers_the_chip() {
-        let (_, w) = laid_out(&facts(), Layout::Full, 100, 3, now(), 0);
+        let (_, w) = laid_out(&facts(), Layout::Full, 100, 3, now(), 0, &ansi());
         assert_eq!(w, "Opus 5.5 · Medium · Full access".width());
-        let (_, w) = laid_out(&facts(), Layout::Compact, 100, 3, now(), 0);
+        let (_, w) = laid_out(&facts(), Layout::Compact, 100, 3, now(), 0, &ansi());
         assert_eq!(w, "Opus 5.5 · Medium".width());
     }
 
@@ -865,7 +962,7 @@ mod tests {
         for layout in [None, Some(Layout::Full), Some(Layout::Compact)] {
             for room in [4, 10, 16, 21, 24, 27, 30, 40] {
                 let (rows, chip_width) = match layout {
-                    Some(layout) => laid_out(&facts(), layout, room, 3, now(), 0),
+                    Some(layout) => laid_out(&facts(), layout, room, 3, now(), 0, &ansi()),
                     None => rows(&facts(), room, 3, now(), 0),
                 };
                 for row in &rows {
@@ -901,27 +998,71 @@ mod tests {
     }
 
     #[test]
+    fn a_themes_tokens_colour_it_and_ansi_stands_in_for_the_rest() {
+        let theme = Ink::from(Some(Tokens {
+            secondary: Some([118, 136, 148]),
+            tertiary: Some([91, 107, 119]),
+            success: Some([82, 199, 154]),
+            warning: Some([212, 178, 94]),
+            danger: Some([226, 106, 106]),
+            accent: None,
+        }));
+        assert_eq!(theme.tone(21), "\x1b[38;2;82;199;154m");
+        assert_eq!(theme.tone(20), "\x1b[38;2;212;178;94m");
+        assert_eq!(theme.tone(10), "\x1b[38;2;226;106;106m");
+        // A token the theme doesn't have falls back alone.
+        assert_eq!(theme.accent, CYAN);
+        assert_eq!(ansi(), Ink::from(Some(Tokens::default())));
+        let (rows, _) = laid_out(&facts(), Layout::Full, 100, 0, now(), 0, &theme);
+        assert!(
+            rows[0].contains("\x1b[38;2;118;136;148mctx"),
+            "{:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("\x1b[38;2;82;199;154m90%"),
+            "{:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("\x1b[38;2;91;107;119m100k/1M"),
+            "{:?}",
+            rows[0]
+        );
+        let (text, _) = low_context(
+            Some(&ContextWindow {
+                used: 920_000,
+                max: Some(1_000_000),
+                cache_until: None,
+            }),
+            &theme,
+        )
+        .unwrap();
+        assert!(text.contains("\x1b[38;2;226;106;106m8%"), "{text:?}");
+    }
+
+    #[test]
     fn the_chip_warns_only_when_the_context_runs_low() {
         let at = |left: u64| ContextWindow {
             used: 1_000_000 - left * 10_000,
             max: Some(1_000_000),
             cache_until: None,
         };
-        assert_eq!(low_context(Some(&at(90))), None);
-        assert_eq!(low_context(Some(&at(21))), None);
-        assert_eq!(low_context(None), None);
+        assert_eq!(low_context(Some(&at(90)), &ansi()), None);
+        assert_eq!(low_context(Some(&at(21)), &ansi()), None);
+        assert_eq!(low_context(None, &ansi()), None);
         let unknown = ContextWindow {
             used: 5,
             max: None,
             cache_until: None,
         };
-        assert_eq!(low_context(Some(&unknown)), None);
-        let (text, width) = low_context(Some(&at(15))).unwrap();
+        assert_eq!(low_context(Some(&unknown), &ansi()), None);
+        let (text, width) = low_context(Some(&at(15)), &ansi()).unwrap();
         assert_eq!((plain(&text).as_str(), width), ("ctx 15%", 7));
         assert!(text.contains(&format!("{YELLOW}15%")), "{text:?}");
-        let (text, _) = low_context(Some(&at(20))).unwrap();
+        let (text, _) = low_context(Some(&at(20)), &ansi()).unwrap();
         assert!(text.contains(&format!("{YELLOW}20%")), "{text:?}");
-        let (text, _) = low_context(Some(&at(8))).unwrap();
+        let (text, _) = low_context(Some(&at(8)), &ansi()).unwrap();
         assert!(text.contains(&format!("{RED}8%")), "{text:?}");
     }
 }

@@ -668,11 +668,12 @@ impl Composer {
         // The status line, when it's on, shows the context window anyway. Off, the chip warns
         // only when it's low enough to act on, and gives it up first in a narrow column.
         let mut low = String::new();
+        let ink = crate::status::Ink::current();
         if let Some((text, cols)) =
-            crate::status::low_context(crate::status::context(&state.projection).as_ref())
+            crate::status::low_context(crate::status::context(&state.projection).as_ref(), &ink)
             && chip + 3 + cols <= width
         {
-            low = format!(" {DIM}·{RESET} {text}");
+            low = format!(" {}·{RESET} {text}", ink.tertiary);
             chip += 3 + cols;
         }
         // The limits sit two columns apart.
@@ -2519,6 +2520,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_chip_warns_of_a_low_context_window_while_the_status_line_is_off() {
+        // The Rex theme's colours where there is one, as on a Mac with Rex; ANSI elsewhere.
+        let ink = crate::status::Ink::current();
         let mut reply = reply_on_codex();
         reply.config = Some(codex(13).into());
         let left = |reply: &mut super::Composer, used: u64| {
@@ -2536,20 +2539,13 @@ mod tests {
         left(&mut reply, 850_000);
         assert!(reply.usage_moved());
         let drawn = reply.draw(28, true);
-        assert!(
-            drawn.contains(&format!("{}15%", crate::chat::YELLOW)),
-            "{drawn:?}"
-        );
+        assert!(drawn.contains(&format!("{}15%", ink.warning)), "{drawn:?}");
         assert!(
             crate::status::plain(&drawn).contains("GPT · Full access · ctx 15%"),
             "{drawn:?}"
         );
         left(&mut reply, 920_000);
-        assert!(
-            reply
-                .draw(28, true)
-                .contains(&format!("{}8%", crate::chat::RED))
-        );
+        assert!(reply.draw(28, true).contains(&format!("{}8%", ink.danger)));
         // A column with no room for it beside the chip goes without.
         reply.column = (0, 12);
         let drawn = reply.draw(28, true);
