@@ -90,6 +90,9 @@ struct NewThread {
     recent: HashMap<String, Value>,
     project: String,
     settings: Settings,
+    /// The model, effort and access picked here, which a change of project or machine keeps
+    /// over that project's defaults.
+    picked: Picked,
     mode: Mode,
     /// The project's branches, by project id, and whether its folder is a git repository.
     branches: HashMap<String, (Vec<Value>, bool)>,
@@ -277,6 +280,43 @@ pub(crate) fn defaults(config: &Value, project: &Value, recent: Option<&Value>) 
         }
     };
     Settings::of_thread(config, &thread)
+}
+
+/// The model (`instance/slug`), effort and access picked by hand on this screen.
+#[derive(Default)]
+struct Picked {
+    model: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+}
+
+impl Picked {
+    /// A project's or machine's `fresh` settings with the picks laid over them: the model when
+    /// this machine has it, the effort when the model offers it, the access when its provider
+    /// supports it.
+    fn over(&self, mut fresh: Settings, config: &Value) -> Settings {
+        if let Some((instance, slug)) = self.model.as_deref().and_then(|m| m.split_once('/')) {
+            let mut wanted = fresh.clone();
+            wanted.instance = instance.to_string();
+            wanted.model = slug.to_string();
+            if wanted.model_entry(config).is_some() {
+                fresh.set_model(config, &format!("{instance}/{slug}"));
+            }
+        }
+        if let Some(effort) = &self.effort
+            && picker::effort_items(config, &fresh)
+                .iter()
+                .any(|i| &i.id == effort)
+        {
+            fresh.effort = Some(effort.clone());
+        }
+        if let Some(mode) = &self.mode
+            && fresh.modes(config).iter().any(|(m, _)| m == mode)
+        {
+            fresh.mode = mode.clone();
+        }
+        fresh
+    }
 }
 
 /// Whether new threads in this project start in a worktree: the project's override, else the
@@ -488,7 +528,14 @@ impl NewThread {
             },
             Field::Project if id == ADD_FOLDER => self.folder = Some(Folder::new("~/")),
             Field::Project => self.set_project(id),
-            Field::Setting(f) => self.settings.choose(f, &self.config, id),
+            Field::Setting(f) => {
+                self.settings.choose(f, &self.config, id.clone());
+                match f {
+                    pick::Field::Model => self.picked.model = Some(id),
+                    pick::Field::Effort => self.picked.effort = Some(id),
+                    pick::Field::Access => self.picked.mode = Some(id),
+                }
+            }
             Field::Workspace => {
                 self.mode = match id.strip_prefix(EXISTING) {
                     Some(path) => Mode::Existing(path.to_string()),
@@ -519,6 +566,7 @@ impl NewThread {
             recent: HashMap::new(),
             project: String::new(),
             settings: Settings::default(),
+            picked: Picked::default(),
             mode: Mode::Local,
             branches: HashMap::new(),
             base: None,
@@ -669,7 +717,8 @@ return {{}}"#,
             // No projects yet: a folder first, on this Mac, and the model T3 would start any
             // thread with.
             None => {
-                self.settings = defaults(&self.config, &Value::Null, None);
+                let fresh = defaults(&self.config, &Value::Null, None);
+                self.settings = self.picked.over(fresh, &self.config);
                 if self.client.is_local() {
                     self.folder = Some(Folder::new("~/"));
                 } else {
@@ -690,7 +739,8 @@ return {{}}"#,
     fn set_project(&mut self, id: String) {
         self.project = id;
         if let Some(p) = self.project_value().cloned() {
-            self.settings = defaults(&self.config, &p, self.recent.get(&self.project));
+            let fresh = defaults(&self.config, &p, self.recent.get(&self.project));
+            self.settings = self.picked.over(fresh, &self.config);
             self.mode = if starts_in_worktree(&self.config, &p) {
                 Mode::New
             } else {
@@ -1939,6 +1989,60 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let ui = NewThread::new(machines[0].clone(), machines.clone(), false, tx, (100, 30));
         (ui, machines)
+    }
+
+    /// Two providers, and two projects that each start on a different one.
+    fn two_projects() -> NewThread {
+        let effort = |options: Value| json!({"optionDescriptors": [{"id": "effort", "type": "select", "options": options}]});
+        let (mut ui, _) = screen();
+        ui.config = json!({"providers": [
+            {"instanceId": "claude", "models": [
+                {"slug": "opus", "name": "Opus", "capabilities": effort(json!([{"id": "medium", "isDefault": true}, {"id": "max"}]))},
+                {"slug": "sonnet", "name": "Sonnet", "capabilities": effort(json!([{"id": "medium", "isDefault": true}, {"id": "low"}]))}]},
+            {"instanceId": "codex", "models": [
+                {"slug": "gpt", "name": "GPT", "capabilities": effort(json!([{"id": "medium", "isDefault": true}, {"id": "xhigh"}]))}]}]});
+        ui.projects = vec![
+            json!({"id": "p1", "defaultModelSelection": {"instanceId": "codex", "model": "gpt"}}),
+            json!({"id": "p2", "defaultModelSelection": {"instanceId": "claude", "model": "sonnet"}}),
+        ];
+        ui.set_project("p1".into());
+        ui
+    }
+
+    #[test]
+    fn a_model_and_effort_picked_by_hand_survive_a_change_of_project() {
+        let mut ui = two_projects();
+        assert_eq!(ui.settings.model, "gpt");
+        ui.choose(Field::Setting(pick::Field::Model), "claude/opus".into());
+        ui.choose(Field::Setting(pick::Field::Effort), "max".into());
+        ui.set_project("p2".into());
+        assert_eq!(
+            (ui.settings.instance.as_str(), ui.settings.model.as_str()),
+            ("claude", "opus")
+        );
+        assert_eq!(ui.settings.effort.as_deref(), Some("max"));
+        ui.set_project("p1".into());
+        assert_eq!(ui.settings.model, "opus");
+        assert_eq!(ui.settings.effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn an_effort_picked_alone_stays_when_the_next_model_offers_it() {
+        let mut ui = two_projects();
+        ui.choose(Field::Setting(pick::Field::Effort), "xhigh".into());
+        ui.set_project("p2".into());
+        // Sonnet has no xhigh: the project's model, at its own default.
+        assert_eq!(ui.settings.model, "sonnet");
+        assert_eq!(ui.settings.effort.as_deref(), Some("medium"));
+        ui.set_project("p1".into());
+        assert_eq!(ui.settings.effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn without_a_pick_each_project_starts_on_its_own_model() {
+        let mut ui = two_projects();
+        ui.set_project("p2".into());
+        assert_eq!(ui.settings.model, "sonnet");
     }
 
     fn loaded(env: &Arc<Env>) -> Result<(Arc<Env>, Value, ShellState), String> {

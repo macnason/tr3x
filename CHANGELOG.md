@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- New Thread keeps the model, effort and access you picked when you change project or machine. Each project reset them to its own defaults; now they carry over wherever that machine has the model and the model offers the effort.
+- Antigravity and Copilot models offer effort in the model picker and New Thread. tr3x looked for their thinking levels under the ids Claude and Codex use, and found none.
+
 ## 0.1.7
 
 - `/` mid-message opens the skills menu, as at the start of the input. It lists only skills, since T3 takes a skill's `$name` anywhere in a message, and only those whose name the word starts or begins a part of, so a path like `/etc/hosts` doesn't open it. The pick goes in as `$name`. Before, the menu only opened on a `/` that started the message.
