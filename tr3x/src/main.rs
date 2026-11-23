@@ -37,6 +37,7 @@ mod sup;
 mod surface;
 mod sync;
 mod t3;
+mod tabs;
 mod term;
 mod update;
 mod usage;
@@ -354,6 +355,10 @@ enum Command {
     Sessions { split: Option<String> },
     /// Show or set where Reply goes: inline, under the conversation, or a pane of its own.
     Reply { mode: Option<String> },
+    /// Show or set how many idle open threads keep a tab: a number, `all`, `default`, and
+    /// `idle 3d` (or `idle off`) for how recently they were active. The rest stay open in T3,
+    /// and Find Thread brings any of them back.
+    Tabs { args: Vec<String> },
     /// Set up tr3x: the Rex config that runs it, and a first sync.
     Install {
         /// As the updater runs it: over the installed tr3x, leaving the session as it is.
@@ -953,6 +958,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Reply { mode } => {
             println!("{}", reply::apply(mode.as_deref().unwrap_or_default())?);
+            Ok(())
+        }
+        Command::Tabs { args } => {
+            println!("{}", tabs::apply(&args)?);
             Ok(())
         }
         Command::Install { update } => install::install(update).await,

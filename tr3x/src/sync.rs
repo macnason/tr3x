@@ -64,6 +64,13 @@ pub struct Want {
     pub needs_you: bool,
     /// What the label says when the subagent stands alone: `↳ title · for Parent`.
     pub alone: Option<String>,
+    /// Pinned in T3: always has a tab, whatever the budget.
+    pub pinned: bool,
+    /// When anything last happened on the thread, in milliseconds, for the tab budget.
+    pub active_at: i64,
+    /// Over the tab budget: the thread stays open in T3 but has no tab. A parked thread's
+    /// window closes without settling it, and isn't made again until it's unparked.
+    pub parked: bool,
 }
 
 /// The thread a subagent works for, the one at the top of its chain.
@@ -79,7 +86,8 @@ impl Want {
     }
 
     /// What of the want a window shows or a plan reads. `updated_at` counts only for a thread
-    /// whose window the user closed, which comes back when it changes.
+    /// whose window the user closed, which comes back when it changes; `active_at` only through
+    /// `parked`.
     fn print(&self, state: &State) -> Want {
         let key = self.key();
         let dismissed = state
@@ -92,6 +100,7 @@ impl Want {
             } else {
                 String::new()
             },
+            active_at: 0,
             ..self.clone()
         }
     }
@@ -110,6 +119,10 @@ struct Print {
 
 /// How soon a New Tab watcher that ended is started again.
 const WATCHER_RETRY: Duration = Duration::from_secs(5);
+
+/// How long after sync starts its panes may take to join it again, past their longest wait
+/// between tries. Until then, sync can't know which of them hold something.
+const PANES_REJOIN: Duration = Duration::from_secs(35);
 
 /// However quiet the shells and Rex are, sync looks at Rex this often, for anything it missed.
 const REX_BACKSTOP: Duration = Duration::from_secs(60);
@@ -242,6 +255,9 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             parent: under,
             needs_you: child && needs_you,
             alone: alone_label.map(|l| decorate(&l, m.badge, m.offline)),
+            pinned: !thread["pinnedAt"].is_null(),
+            active_at: t3client::inbox::active_ms(thread),
+            parked: false,
         })
     };
     let by_id: HashMap<(String, &str), &Value> = threads
@@ -295,6 +311,57 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
     out.splice(after..after, alone);
     out
 }
+
+/// Parks the idle open threads over `budget`, and returns how many. Only a thread with nothing
+/// to say can be parked: one that needs you or works, a pin, a subagent, a thread with a
+/// subagent shown under it, one whose pane holds something closing it would lose (`holding`:
+/// text typed in Reply, a forwarded port) and one Find Thread brought back (`summoned`) always
+/// keep their tab. Of the rest, the most recently active keep theirs, up to the budget's count,
+/// and only while they were active within its idle window. A thread that needs you or works,
+/// has a subagent shown or holds something counts toward the count where its activity ranks
+/// it, so one starting a run doesn't hand its place to another, which would park again when
+/// the run ends.
+pub fn park(
+    wants: &mut [Want],
+    budget: crate::tabs::Budget,
+    summoned: &dyn Fn(&str) -> bool,
+    holding: &dyn Fn(&str) -> bool,
+    now: i64,
+) -> usize {
+    let parents: HashSet<String> = wants
+        .iter()
+        .filter_map(|w| Some(w.parent.as_ref()?.key.clone()))
+        .collect();
+    let mut ranked: Vec<usize> = (0..wants.len())
+        .filter(|&i| {
+            let w = &wants[i];
+            !w.child && !w.pinned && !summoned(&w.key())
+        })
+        .collect();
+    ranked.sort_by_key(|&i| std::cmp::Reverse(wants[i].active_at));
+    let mut parked = 0;
+    for (rank, i) in ranked.into_iter().enumerate() {
+        let w = &mut wants[i];
+        let key = w.key();
+        if w.place != Place::Open || parents.contains(&key) || holding(&key) {
+            continue;
+        }
+        let over = budget.open.is_some_and(|n| rank >= n);
+        // A thread whose times don't parse is never too old, as it never hides in T3.
+        let stale = budget
+            .idle
+            .is_some_and(|ms| w.active_at > 0 && now - w.active_at > ms);
+        if over || stale {
+            w.parked = true;
+            parked += 1;
+        }
+    }
+    parked
+}
+
+/// How long a thread Find Thread brought back keeps its claim on a tab before T3 lists it:
+/// the finder unsettles or unarchives it first, and the shell says so a moment later.
+const SUMMON_GRACE_MS: i64 = 60_000;
 
 /// A subagent gets a window only while it works or needs you. Once it finishes, its result
 /// belongs to the parent thread, which is where T3 shows it.
@@ -465,6 +532,8 @@ pub fn plan(
     let mut settle = Vec::new();
     for key in gone {
         group.windows.remove(&key);
+        // A tab Find Thread brought back holds its claim until the user closes it.
+        group.summoned.remove(&key);
         if let Some(want) = wanted.get(&key) {
             if want.settles && !teardown && health(env_of(&key)).ready {
                 settle.push(want.thread.clone());
@@ -504,7 +573,12 @@ pub fn plan(
     // Windows of machines that haven't caught up, with nothing to say about them.
     let mut held: Vec<String> = Vec::new();
     for (key, window) in std::mem::take(&mut group.windows) {
-        if wanted.contains_key(&key) {
+        let looking = active == Some(window.window_id.as_str());
+        if wanted.get(&key).is_some_and(|w| w.parked && !looking) {
+            // Over the tab budget: the window goes, and the thread stays open in T3. One the
+            // user is reading stays until they leave it.
+            plan.close.push(window.window_id);
+        } else if wanted.contains_key(&key) {
             kept.insert(key, window);
         } else if !health(env_of(&key)).ready {
             held.push(key.clone());
@@ -538,6 +612,7 @@ pub fn plan(
                 }
                 order.push(Slot::Window(window.window_id.clone()));
             }
+            None if want.parked => {}
             None if health(&want.thread.env).ready => {
                 plan.create.push(want.clone());
                 order.push(Slot::New(key));
@@ -641,12 +716,14 @@ fn holds_tr3x(view: &Value) -> bool {
 
 /// Makes `session`, a copy of the group's session, the group's. The old windows went with the
 /// old session, so none of them was closed by you: the group starts from no windows, and the
-/// copy's are adopted by their tags. Threads you closed stay closed.
+/// copy's are adopted by their tags. Threads you closed stay closed, and ones Find Thread
+/// brought back keep their tab.
 fn take_over(group: &mut Group, session: &str) {
     *group = Group {
         session_id: Some(session.to_string()),
         windows: Default::default(),
         dismissed: std::mem::take(&mut group.dismissed),
+        summoned: std::mem::take(&mut group.summoned),
     };
 }
 
@@ -1250,6 +1327,12 @@ impl Syncer {
             self.persist()?;
             return Ok(false);
         }
+        // A parked window leaves the group before it's closed, and the group is saved first: a
+        // sync stopped in between would otherwise find it gone, take that for the user closing
+        // it and settle the thread. One the script never closed is adopted again next time.
+        if !plan.close.is_empty() {
+            self.persist()?;
+        }
         let result = self
             .rex
             .lua(&session, &script(&plan, &self.exe, own_pane))
@@ -1567,6 +1650,7 @@ async fn follow(
     // Whether the next pass has to look at Rex whatever the shells say, what the last pass that
     // did saw, and when.
     let mut rex_due = true;
+    let rejoining_until = Instant::now() + PANES_REJOIN;
     let mut last_print: Option<Print> = None;
     let mut last_rex = Instant::now();
     let mut settings_stamps = crate::width::stamps();
@@ -1660,10 +1744,14 @@ async fn follow(
                 for (session, window) in ACTIVATED.lock().unwrap().drain(..) {
                     syncer.active.insert(session, window);
                 }
+                // Leaving a parked thread's window is what closes it.
+                rex_due |= last.iter().any(|w| {
+                    w.parked && syncer.state.groups.values().any(|g| g.windows.contains_key(&w.key()))
+                });
                 dirty = true;
             }
             Some(heard) = heard.recv() => match heard {
-                Heard::Joined => dirty = true,
+                Heard::Joined | Heard::Holding => dirty = true,
                 Heard::Settings => {
                     settings_stamps = crate::width::stamps();
                     panes.tell(None, &Note::Settings);
@@ -1688,11 +1776,17 @@ async fn follow(
         dirty = false;
         next_reconcile = tokio::time::Instant::now() + Duration::from_millis(100);
         let now = Instant::now();
-        // Find Thread brought these back: a window closed while they worked no longer hides them.
+        // Find Thread brought these back: a window closed while they worked no longer hides them,
+        // and the tab budget doesn't park them.
         for key in take_restores() {
             rex_due = true;
-            for group in syncer.state.groups.values_mut() {
+            for (group_key, group) in syncer.state.groups.iter_mut() {
                 group.dismissed.remove(&key);
+                // Only the session that holds the thread, which is the one whose closing ends
+                // the claim.
+                if group_key.is_empty() || group_key == env_of(&key) {
+                    group.summoned.insert(key.clone(), t3::now_ms());
+                }
             }
         }
 
@@ -1754,7 +1848,34 @@ async fn follow(
                 })
             })
             .collect();
-        let wants = wanted(&shells, &mut inbox, t3::now_ms());
+        let now_ms = t3::now_ms();
+        let mut wants = wanted(&shells, &mut inbox, now_ms);
+        let listed: HashSet<String> = wants.iter().map(Want::key).collect();
+        let mut summoned = HashSet::new();
+        for group in syncer.state.groups.values_mut() {
+            group
+                .summoned
+                .retain(|key, at| listed.contains(key) || now_ms - *at < SUMMON_GRACE_MS);
+            summoned.extend(group.summoned.keys().cloned());
+        }
+        let holding = panes.holding();
+        // While panes are still joining, a tab that's there may hold a draft its pane hasn't
+        // said yet: it stays. Threads with no tab are parked as usual, so none is made.
+        let rejoining = Instant::now() < rejoining_until;
+        let has_tab = |key: &str| {
+            syncer
+                .state
+                .groups
+                .values()
+                .any(|g| g.windows.contains_key(key))
+        };
+        let parked = park(
+            &mut wants,
+            crate::tabs::budget(),
+            &|key| summoned.contains(key),
+            &|key| holding.contains(key) || (rejoining && has_tab(key)),
+            now_ms,
+        );
         let envs: Vec<String> = hub.envs().iter().map(|e| e.id().to_string()).collect();
         let health = |env: &str| match tracks.get(env) {
             Some(track) => {
@@ -1871,7 +1992,11 @@ async fn follow(
         // A count, not every title: the log is read for what went wrong, and a line naming each
         // thread on every change grew it by megabytes.
         if changed || wants.len() != last.len() {
-            eprintln!("tr3x: {} thread(s)", wants.len());
+            eprintln!(
+                "tr3x: {} thread(s), {} parked over the tab budget",
+                wants.len() - parked,
+                parked
+            );
         }
         // Where ⌃⌘I goes: the first window in T3's order, on any machine.
         let next = wants.iter().find_map(|w| {
@@ -2015,6 +2140,9 @@ mod tests {
             parent: None,
             needs_you: false,
             alone: None,
+            pinned: false,
+            active_at: 0,
+            parked: false,
         }
     }
 
@@ -2040,6 +2168,231 @@ mod tests {
         } else {
             Health::READY
         }
+    }
+
+    const H: i64 = 60 * 60 * 1000;
+
+    fn idle(key: &str, active_at: i64) -> Want {
+        Want {
+            active_at,
+            ..want(key, key)
+        }
+    }
+
+    fn parked(wants: &[Want]) -> Vec<String> {
+        wants
+            .iter()
+            .filter(|w| w.parked)
+            .map(|w| w.thread.thread.clone())
+            .collect()
+    }
+
+    /// Past the budget's count, the least recently active idle threads park, and a thread that
+    /// needs you, works or is pinned never does.
+    #[test]
+    fn the_budget_parks_the_oldest_idle_threads_and_only_those() {
+        let now = 100 * H;
+        let mut wants = vec![
+            Want {
+                place: Place::Attention,
+                ..idle("asks", 1)
+            },
+            idle("old", now - 5 * H),
+            idle("new", now - H),
+            idle("mid", now - 3 * H),
+            Want {
+                pinned: true,
+                ..idle("pin", 1)
+            },
+            Want {
+                place: Place::Working,
+                ..idle("busy", 1)
+            },
+        ];
+        let budget = crate::tabs::Budget {
+            open: Some(2),
+            idle: None,
+        };
+        assert_eq!(park(&mut wants, budget, &|_| false, &|_| false, now), 1);
+        assert_eq!(parked(&wants), vec!["old"]);
+    }
+
+    /// An idle thread not active within the idle window parks however few there are, and one
+    /// whose times don't parse never does.
+    #[test]
+    fn the_budget_parks_threads_idle_past_its_window() {
+        let now = 100 * H;
+        let two_days = crate::tabs::Budget {
+            open: None,
+            idle: Some(48 * H),
+        };
+        let mut wants = vec![
+            idle("fresh", now - H),
+            idle("stale", now - 49 * H),
+            idle("unknown", 0),
+        ];
+        assert_eq!(park(&mut wants, two_days, &|_| false, &|_| false, now), 1);
+        assert_eq!(parked(&wants), vec!["stale"]);
+        let none = crate::tabs::Budget {
+            open: None,
+            idle: None,
+        };
+        let mut wants = vec![idle("stale", now - 49 * H)];
+        assert_eq!(park(&mut wants, none, &|_| false, &|_| false, now), 0);
+    }
+
+    /// A kept thread that starts a run keeps its place in the count, so no parked thread takes
+    /// it, only to park again when the run ends.
+    #[test]
+    fn a_kept_thread_going_busy_unparks_nothing() {
+        let now = 100 * H;
+        let budget = crate::tabs::Budget {
+            open: Some(2),
+            idle: None,
+        };
+        let mut wants = vec![
+            idle("a", now - H),
+            idle("b", now - 2 * H),
+            idle("c", now - 3 * H),
+        ];
+        park(&mut wants, budget, &|_| false, &|_| false, now);
+        assert_eq!(parked(&wants), vec!["c"]);
+        let mut wants = vec![
+            Want {
+                place: Place::Working,
+                ..idle("a", now)
+            },
+            idle("b", now - 2 * H),
+            idle("c", now - 3 * H),
+        ];
+        park(&mut wants, budget, &|_| false, &|_| false, now);
+        assert_eq!(parked(&wants), vec!["c"]);
+    }
+
+    /// A thread Find Thread brought back, and one with a subagent working under it, keep their
+    /// tabs past the budget.
+    #[test]
+    fn summoned_threads_and_parents_of_shown_subagents_keep_their_tabs() {
+        let now = 100 * H;
+        let mut wants = vec![
+            idle("found", now - 90 * H),
+            idle("parent", now - 90 * H),
+            sub("h/kid", "kid", "h/parent", false),
+            idle("other", now - 90 * H),
+        ];
+        let budget = crate::tabs::Budget {
+            open: Some(0),
+            idle: Some(H),
+        };
+        park(&mut wants, budget, &|key| key == "h/found", &|_| false, now);
+        assert_eq!(parked(&wants), vec!["other"]);
+    }
+
+    /// A kept thread that gains a shown subagent keeps its place in the count, as one starting
+    /// a run does, so no parked thread takes it only to park again when the subagent ends.
+    #[test]
+    fn a_kept_thread_gaining_a_subagent_unparks_nothing() {
+        let now = 100 * H;
+        let budget = crate::tabs::Budget {
+            open: Some(2),
+            idle: None,
+        };
+        let mut wants = vec![
+            idle("a", now - H),
+            idle("b", now - 2 * H),
+            idle("c", now - 3 * H),
+            sub("h/kid", "kid", "h/a", false),
+        ];
+        park(&mut wants, budget, &|_| false, &|_| false, now);
+        assert_eq!(parked(&wants), vec!["c"]);
+    }
+
+    /// Closing a parked tab ends its pane, so one holding text typed in Reply, or a forwarded
+    /// port, keeps its tab past the budget, and keeps its place so no other thread unparks.
+    #[test]
+    fn a_thread_whose_pane_holds_something_keeps_its_tab() {
+        let now = 100 * H;
+        let budget = crate::tabs::Budget {
+            open: Some(1),
+            idle: Some(H),
+        };
+        let mut wants = vec![
+            idle("new", now),
+            idle("typed", now - 90 * H),
+            idle("other", now - 90 * H),
+        ];
+        park(&mut wants, budget, &|_| false, &|key| key == "h/typed", now);
+        assert_eq!(parked(&wants), vec!["other"]);
+        let mut wants = vec![idle("typed", now), idle("other", now - 1)];
+        park(&mut wants, budget, &|_| false, &|key| key == "h/typed", now);
+        assert_eq!(parked(&wants), vec!["other"]);
+    }
+
+    /// A parked thread's window closes without settling or hiding the thread, and no window is
+    /// made for it, except the one the user is reading, which stays until they leave.
+    #[test]
+    fn a_parked_window_closes_without_settling_unless_it_is_being_read() {
+        let mut group = Group::default();
+        group.windows.insert("h/a".into(), win("w-a", "a"));
+        group.windows.insert("h/b".into(), win("w-b", "b"));
+        let present = vec![("w-a".into(), "a".into()), ("w-b".into(), "b".into())];
+        let parked = |key: &str| Want {
+            parked: true,
+            ..want(key, key)
+        };
+        let wants = vec![parked("a"), parked("b"), parked("c")];
+        let plan1 = plan(&wants, &present, Some("w-b"), &mut group, &ready);
+        assert_eq!(plan1.close, vec!["w-a".to_string()]);
+        assert!(plan1.create.is_empty());
+        assert!(plan1.settle.is_empty());
+        assert!(group.dismissed.is_empty());
+        assert!(group.windows.contains_key("h/b"));
+        // Sync closed it, so its going isn't the user closing it.
+        let present = vec![("w-b".into(), "b".into())];
+        let plan2 = plan(&wants, &present, Some("w-b"), &mut group, &ready);
+        assert!(plan2.settle.is_empty() && plan2.close.is_empty());
+        // The user leaves it: now it goes too.
+        let plan3 = plan(&wants, &present, Some("w-other"), &mut group, &ready);
+        assert_eq!(plan3.close, vec!["w-b".to_string()]);
+        assert!(plan3.settle.is_empty());
+    }
+
+    /// The group the plan leaves, which is saved before Rex closes anything, no longer holds a
+    /// parked window: a sync stopped before saving again doesn't take its going for the user
+    /// closing it, even once the thread is back under the budget.
+    #[test]
+    fn a_parked_window_closed_before_a_restart_settles_nothing() {
+        let mut group = Group::default();
+        group.windows.insert("h/a".into(), win("w-a", "a"));
+        group.windows.insert("h/b".into(), win("w-b", "b"));
+        let present = vec![("w-a".into(), "a".into()), ("w-b".into(), "b".into())];
+        let wants = vec![
+            Want {
+                parked: true,
+                ..want("a", "a")
+            },
+            want("b", "b"),
+        ];
+        let first = plan(&wants, &present, None, &mut group, &ready);
+        assert_eq!(first.close, vec!["w-a".to_string()]);
+        let mut saved = group.clone();
+        let present = vec![("w-b".into(), "b".into())];
+        let unparked = vec![want("a", "a"), want("b", "b")];
+        let next = plan(&unparked, &present, None, &mut saved, &ready);
+        assert!(next.settle.is_empty());
+        assert!(saved.dismissed.is_empty());
+        assert_eq!(next.create.len(), 1);
+    }
+
+    /// Closing a summoned tab ends its claim, and settles it as closing any tab does.
+    #[test]
+    fn closing_a_summoned_tab_ends_its_claim() {
+        let mut group = Group::default();
+        group.windows.insert("h/a".into(), win("w-a", "a"));
+        group.summoned.insert("h/a".into(), 1);
+        let plan = plan(&[want("a", "a")], &[], None, &mut group, &ready);
+        assert!(group.summoned.is_empty());
+        assert_eq!(plan.settle.len(), 1);
     }
 
     /// A working thread's `updatedAt` moves with every event, which is no reason to look at
@@ -2295,6 +2648,9 @@ mod tests {
                 parent: None,
                 needs_you: false,
                 alone: None,
+                pinned: false,
+                active_at: 0,
+                parked: false,
             })
             .collect();
         let rebuild = reshape(&windows, &group, &wants, false, &HashSet::new());

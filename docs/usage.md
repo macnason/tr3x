@@ -45,6 +45,26 @@ finished subagent's result is in its parent thread.
   settled, snoozed or archived: its request would otherwise wait, unseen.
 - Closing a subagent that's only working hides it until it needs you or finishes.
 
+## Tabs
+
+Every tab is a process, a pseudo-terminal and a connection to T3, and by default every open
+thread has one. If you leave threads open, a tab budget keeps the session to what matters: a
+thread that needs you, works or is pinned always has its tab, and of the rest, the threads with
+nothing to say, only the most recently active keep theirs. The others are parked: still open in
+T3, untouched, with no tab. **Find Thread…** (⌘⇧P) lists them and brings any one back, and it
+keeps its tab until you close it. A parked thread gets its tab back on its own once it needs you
+or works.
+
+| To | Run |
+|---|---|
+| See the budget | `tr3x tabs` |
+| Tabs for the 15 most recently active threads (busy ones always keep theirs) | `tr3x tabs 15` |
+| Only those active in the last two days | `tr3x tabs idle 2d` (`m`, `h`, `d`, `w`), or `idle off` |
+| Both at once | `tr3x tabs 15 idle 2d` |
+| A tab for every open thread again | `tr3x tabs default` |
+
+The settings are `openTabs` and `openTabsIdle` in `~/.config/tr3x/settings.json`.
+
 ## Chat width
 
 The conversation, Reply and the new-thread composer share one centred column, like T3's chat

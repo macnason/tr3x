@@ -11,18 +11,19 @@
 //! joins once sync is back.
 //!
 //! Each line on the socket is one JSON object. A pane's first line is `{"watch": "env/thread"}`
-//! and it stays connected; any tr3x process can send `{"notify": ...}` alone and leave.
+//! and it stays connected; any tr3x process can send `{"notify": ...}` alone and leave. A pane
+//! sends `{"holding": true}` while closing it would lose something, and `false` once it wouldn't.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use t3client::projection::ShellState;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub fn socket_path() -> PathBuf {
     crate::state::dir().join("panes.sock")
@@ -117,27 +118,59 @@ pub fn slice(shell: &ShellState, thread_id: &str) -> ShellState {
 
 // ---- the pane's side ----
 
+/// Whether this pane holds something closing it would lose, as it last said.
+static HOLDING: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(false).0);
+
+/// Says whether closing the pane would lose something: text typed in Reply, or a forwarded
+/// port. Sync keeps the tab of a pane that does past the tab budget. Only a change goes to
+/// sync, so the pane can say it as often as it likes.
+pub fn hold(on: bool) {
+    HOLDING.send_if_modified(|held| std::mem::replace(held, on) != on);
+}
+
 /// Joins sync as a pane for `key`, `env/thread`. None when sync isn't there to join. The
 /// receiver ends with `Note::Lost` when sync goes.
 pub async fn join(key: &str) -> Option<mpsc::UnboundedReceiver<Note>> {
-    join_at(&socket_path(), key).await
+    join_at(&socket_path(), key, HOLDING.subscribe()).await
 }
 
-async fn join_at(path: &std::path::Path, key: &str) -> Option<mpsc::UnboundedReceiver<Note>> {
+async fn join_at(
+    path: &std::path::Path,
+    key: &str,
+    mut holding: watch::Receiver<bool>,
+) -> Option<mpsc::UnboundedReceiver<Note>> {
     let stream = UnixStream::connect(path).await.ok()?;
     let (read, mut write) = stream.into_split();
     let hello = json!({"watch": key}).to_string() + "\n";
     write.write_all(hello.as_bytes()).await.ok()?;
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        // Held open for as long as the pane listens: sync sees the pane go when it closes.
-        let _write = write;
+        // `write` is held open for as long as the pane listens: sync sees the pane go when it
+        // closes. Each sync joined starts out knowing nothing held, so it hears at once if
+        // something is.
         let mut lines = BufReader::new(read).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(note) = Note::read(&line)
-                && tx.send(note).is_err()
-            {
-                return;
+        let mut held = false;
+        loop {
+            let on = *holding.borrow_and_update();
+            if on != held {
+                held = on;
+                let line = json!({"holding": on}).to_string() + "\n";
+                if write.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            tokio::select! {
+                line = lines.next_line() => match line {
+                    Ok(Some(line)) => {
+                        if let Some(note) = Note::read(&line)
+                            && tx.send(note).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    _ => break,
+                },
+                Ok(()) = holding.changed() => {}
             }
         }
         let _ = tx.send(Note::Lost);
@@ -193,6 +226,8 @@ pub enum Heard {
     Settings,
     Check,
     Draft(String),
+    /// A pane began or stopped holding something closing it would lose, or left holding it.
+    Holding,
 }
 
 /// What's still to go to a pane. A pane that stops reading costs sync one slice, not every
@@ -239,6 +274,8 @@ struct Pane {
     /// The last slice and visibility sent, so each goes again only when it changes.
     shell: Option<String>,
     visible: Option<Option<bool>>,
+    /// Closing the pane would lose something, as it last said.
+    holding: bool,
 }
 
 #[derive(Default)]
@@ -318,6 +355,7 @@ impl Panes {
                     out: out.clone(),
                     shell: None,
                     visible: None,
+                    holding: false,
                 },
             );
             id
@@ -334,13 +372,44 @@ impl Panes {
                 }
             }
         };
-        // A pane says nothing after joining; its line closing is it leaving.
-        let reading = async { while let Ok(Some(_)) = lines.next_line().await {} };
+        // After joining, a pane only says whether it holds something; its line closing is it
+        // leaving.
+        let reading = async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Some(on) = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|v| v["holding"].as_bool())
+                else {
+                    continue;
+                };
+                let mut inner = self.inner.lock().unwrap();
+                if let Some(pane) = inner.panes.get_mut(&id)
+                    && pane.holding != on
+                {
+                    pane.holding = on;
+                    let _ = heard.send(Heard::Holding);
+                }
+            }
+        };
         tokio::select! {
             _ = writing => {},
             _ = reading => {},
         }
-        self.inner.lock().unwrap().panes.remove(&id);
+        let gone = self.inner.lock().unwrap().panes.remove(&id);
+        if gone.is_some_and(|p| p.holding) {
+            let _ = heard.send(Heard::Holding);
+        }
+    }
+
+    /// The threads whose pane holds something closing it would lose, `env/thread`.
+    pub fn holding(&self) -> HashSet<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .panes
+            .values()
+            .filter(|p| p.holding)
+            .map(|p| p.key.clone())
+            .collect()
     }
 
     /// The threads that have a pane joined, `env/thread`.
@@ -447,7 +516,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("panes.sock");
         let (panes, mut heard) = Panes::serve_at(&path).unwrap();
-        let mut a = join_at(&path, "e/a").await.unwrap();
+        let (hold, holding) = watch::channel(false);
+        let mut a = join_at(&path, "e/a", holding).await.unwrap();
         assert_eq!(heard.recv().await, Some(Heard::Joined));
         assert_eq!(panes.keys(), vec!["e/a".to_string()]);
         let shell = ShellState {
@@ -465,6 +535,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(heard.recv().await, Some(Heard::Draft("e/a".into())));
+        hold.send_replace(true);
+        assert_eq!(heard.recv().await, Some(Heard::Holding));
+        assert_eq!(panes.holding(), HashSet::from(["e/a".to_string()]));
+        hold.send_replace(false);
+        assert_eq!(heard.recv().await, Some(Heard::Holding));
+        assert!(panes.holding().is_empty());
         drop(panes);
     }
 

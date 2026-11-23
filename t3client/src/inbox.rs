@@ -522,6 +522,12 @@ fn sent_ms(thread: &Value) -> i64 {
         .max(sent.unwrap_or(0))
 }
 
+/// When anything last happened on the thread: created, reopened, its latest run asked for or
+/// finished, or the user's last message, whichever is latest. 0 when none of them parses.
+pub fn active_ms(thread: &Value) -> i64 {
+    returned_ms(thread, &Returns::default()).max(sent_ms(thread))
+}
+
 /// The visible threads on each shelf, in the order the GUI lists them.
 #[derive(Default)]
 struct Shelves<'a> {

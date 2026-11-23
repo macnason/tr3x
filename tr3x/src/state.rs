@@ -24,6 +24,10 @@ pub struct Group {
     /// window comes back once the thread changes.
     #[serde(default)]
     pub dismissed: BTreeMap<String, String>,
+    /// Threads Find Thread brought back, with when, in milliseconds. Each keeps a tab whatever
+    /// the tab budget says, until the user closes it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub summoned: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +151,7 @@ impl State {
                 session_id: v1.session_id,
                 windows: v1.windows,
                 dismissed: v1.dismissed,
+                summoned: BTreeMap::new(),
             },
         );
         state

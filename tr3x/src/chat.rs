@@ -1842,6 +1842,9 @@ async fn event_loop(
     let mut files_checked = tokio::time::Instant::now();
 
     loop {
+        // Sync keeps this thread's tab past the tab budget while closing it would lose
+        // something, as the doze below won't start again then either.
+        crate::panes::hold(!composer.idle() || forwards.as_ref().is_some_and(|f| f.holding()));
         let mut content_event = false;
         tokio::select! {
             event = async {
