@@ -20,6 +20,7 @@
 //! together: a thread's `tr3xEnv` field, when set, keeps the return stamps of two machines'
 //! threads apart.
 
+use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
@@ -452,10 +453,11 @@ struct Returns {
 impl Returns {
     /// Looks at every thread the shell has, listed or not, at `now`. The first look only notes
     /// which threads are working, so starting tr3x stamps nothing and moves no card.
-    fn observe(&mut self, threads: &[Value], now: i64) {
-        let present: HashSet<String> = threads.iter().map(key).collect();
+    fn observe<T: Borrow<Value>>(&mut self, threads: &[T], now: i64) {
+        let present: HashSet<String> = threads.iter().map(|t| key(t.borrow())).collect();
         let working: HashSet<String> = threads
             .iter()
+            .map(Borrow::borrow)
             .filter(|t| belongs_in_working(t))
             .map(key)
             .collect();
@@ -536,14 +538,14 @@ struct Shelves<'a> {
 /// away: a pinned, snoozed or settled thread keeps its shelf while it works. Then the inbox's
 /// threads that read Done move to their own shelf in the inbox's order. A thread that works
 /// never reads Done, so the two never compete.
-fn shelves<'a>(
-    threads: &'a [Value],
+fn shelves<'a, T: Borrow<Value>>(
+    threads: &'a [T],
     capabilities: Capabilities,
     now: i64,
     returns: Option<&Returns>,
 ) -> Shelves<'a> {
     let mut shelves = Shelves::default();
-    for thread in threads.iter().filter(|t| visible(t)) {
+    for thread in threads.iter().map(Borrow::borrow).filter(|t| visible(t)) {
         let list = match shelf(thread, capabilities, now) {
             Shelf::Pinned => &mut shelves.pinned,
             Shelf::Inbox if returns.is_some() && belongs_in_working(thread) => &mut shelves.working,
@@ -595,9 +597,11 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    pub fn order<'a>(
+    /// `threads` are the rows themselves or references to them, so a caller that gathers
+    /// several machines' shells needn't copy them.
+    pub fn order<'a, T: Borrow<Value>>(
         &mut self,
-        threads: &'a [Value],
+        threads: &'a [T],
         capabilities: Capabilities,
         now: i64,
     ) -> Vec<(&'a Value, Place)> {

@@ -506,6 +506,65 @@ pub fn is_terminal_status(status: &str) -> bool {
     )
 }
 
+/// The fields of a shell thread row that nothing here reads. A process that keeps a machine's
+/// whole shell, as sync does for every thread T3 lists, settled ones too, drops them.
+const UNREAD_THREAD_FIELDS: [&str; 17] = [
+    "autoSettleDisabledAt",
+    "blockedOnThreadWait",
+    "branchPullRequest",
+    "forkedFrom",
+    "historyOrigin",
+    "itemCount",
+    "lastErrorCode",
+    "lastTitleRegeneration",
+    "latestRunBackgroundWake",
+    "latestRunStopRequested",
+    "latestVisibleMessage",
+    "linkedPullRequest",
+    "opens",
+    "pendingGuestMessageCount",
+    "providerInstanceHistory",
+    "titleRegeneration",
+    "visibleItemCount",
+];
+
+/// The fields whose absence reads differently from null, so a null one stays: a server that
+/// leaves out `latestUserAuthoredMessageAt` is older, not silent.
+const PRESENCE_THREAD_FIELDS: [&str; 11] = [
+    "deletedAt",
+    "id",
+    "lastError",
+    "latestRunCompletedAt",
+    "latestUserAuthoredMessageAt",
+    "modelSelection",
+    "projectId",
+    "providerInstanceId",
+    "status",
+    "title",
+    "updatedAt",
+];
+
+/// A thread row as a long-lived copy of the shell keeps it: without the fields nothing reads,
+/// and without null fields, which read as null when missing. About half the fields of a row on
+/// T3 0.1.10, where every field is a map entry with a key of its own.
+pub fn compact_row(thread: &mut Value) {
+    let Some(map) = thread.as_object_mut() else {
+        return;
+    };
+    let keep = |key: &str, value: &Value| {
+        !UNREAD_THREAD_FIELDS.contains(&key)
+            && (!value.is_null() || PRESENCE_THREAD_FIELDS.contains(&key))
+    };
+    let kept = map.iter().filter(|(k, v)| keep(k, v)).count();
+    let mut compact = Map::with_capacity(kept);
+    for (key, value) in std::mem::take(map) {
+        if keep(&key, &value) {
+            compact.insert(key, value);
+        }
+    }
+    *map = compact;
+}
+
 /// Projects and threads, kept current from `orchestration.subscribeShell`.
 #[derive(Debug, Clone, Default)]
 pub struct ShellState {
@@ -680,6 +739,36 @@ pub fn apply_config(config: &mut Option<Value>, item: &Value) -> Applied {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A kept row loses what nothing reads and its nulls, but keeps a null whose absence would
+    /// read differently, and the order T3 sent.
+    #[test]
+    fn a_compact_row_keeps_what_is_read() {
+        let mut row = json!({
+            "id": "t", "opens": [1, 2, 3], "archivedAt": null, "title": "T",
+            "latestUserAuthoredMessageAt": null, "pinnedAt": "2026-10-02T00:00:00.000Z",
+            "latestVisibleMessage": {"text": "a long reply"}, "lineage": {"parentThreadId": null}
+        });
+        compact_row(&mut row);
+        assert_eq!(
+            row,
+            json!({"id": "t", "title": "T", "latestUserAuthoredMessageAt": null,
+                   "pinnedAt": "2026-10-02T00:00:00.000Z", "lineage": {"parentThreadId": null}})
+        );
+        let keys: Vec<&String> = row.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "title",
+                "latestUserAuthoredMessageAt",
+                "pinnedAt",
+                "lineage"
+            ]
+        );
+        assert!(row["archivedAt"].is_null());
+        assert!(row.get("latestUserAuthoredMessageAt").is_some());
+    }
 
     fn snapshot() -> Value {
         json!({

@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use t3client::env::{Env, WatchEvent};
 use t3client::hub::{Forwarder, Hub, ThreadRef};
 use t3client::inbox::{Capabilities, Inbox, Place};
-use t3client::projection::ShellState;
+use t3client::projection::{ShellState, compact_row};
 
 use crate::machines::Sessions;
 use crate::rex::{Rex, lua_str};
@@ -76,7 +76,42 @@ impl Want {
     pub fn key(&self) -> String {
         self.thread.to_string()
     }
+
+    /// What of the want a window shows or a plan reads. `updated_at` counts only for a thread
+    /// whose window the user closed, which comes back when it changes.
+    fn print(&self, state: &State) -> Want {
+        let key = self.key();
+        let dismissed = state
+            .groups
+            .values()
+            .any(|g| g.dismissed.contains_key(&key));
+        Want {
+            updated_at: if dismissed {
+                self.updated_at.clone()
+            } else {
+                String::new()
+            },
+            ..self.clone()
+        }
+    }
 }
+
+/// What the last pass that looked at Rex reconciled from. A pass that would reconcile the same
+/// leaves Rex alone.
+#[derive(Debug, PartialEq)]
+struct Print {
+    wants: Vec<Want>,
+    health: Vec<(String, Health)>,
+    mode: Sessions,
+    /// `/reply pane` reshapes every window.
+    own_pane: bool,
+}
+
+/// How soon a New Tab watcher that ended is started again.
+const WATCHER_RETRY: Duration = Duration::from_secs(5);
+
+/// However quiet the shells and Rex are, sync looks at Rex this often, for anything it missed.
+const REX_BACKSTOP: Duration = Duration::from_secs(60);
 
 /// One machine's shell, as sync last saw it.
 pub struct MachineShell<'a> {
@@ -91,11 +126,21 @@ pub struct MachineShell<'a> {
     pub offline: bool,
 }
 
+/// A thread row as sync keeps it: only what's read, tagged with its machine, which the inbox
+/// keys its return stamps by so the same id on two machines stays two threads.
+fn take_in(row: &mut Value, env: &str) {
+    compact_row(row);
+    row["tr3xEnv"] = json!(env);
+}
+
 /// The windows the machines' shells ask for at `now`: T3's sidebar order over every machine's
 /// threads, with each subagent thread worth showing right after the window of the thread it
 /// works for.
 pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want> {
-    let mut threads = Vec::new();
+    // Every machine's threads in one list, as references: the shells are large, and this runs
+    // after every change. Which machine each is on goes by where the row lives.
+    let mut threads: Vec<&Value> = Vec::new();
+    let mut machine_of: HashMap<*const Value, &str> = HashMap::new();
     let mut roots: HashMap<(&str, &str), &str> = HashMap::new();
     let mut caps = Capabilities::default();
     let mut by_env: HashMap<&str, &MachineShell> = HashMap::new();
@@ -109,12 +154,17 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
             }
         }
         for t in &m.shell.threads {
-            let mut t = t.clone();
-            t["tr3xEnv"] = json!(m.env);
+            machine_of.insert(t as *const Value, m.env);
             threads.push(t);
         }
     }
-    let env_of = |t: &Value| t["tr3xEnv"].as_str().unwrap_or_default().to_string();
+    let env_of = |t: &Value| {
+        machine_of
+            .get(&(t as *const Value))
+            .copied()
+            .unwrap_or_default()
+            .to_string()
+    };
     // `under`: the thread a subagent works for, when it shows beneath it. `alone`: the subagent
     // shows by itself, since that thread has no window.
     let want = |thread: &Value, place: Place, under: Option<Parent>, alone: Option<&str>| {
@@ -168,11 +218,11 @@ pub fn wanted(shells: &[MachineShell], inbox: &mut Inbox, now: i64) -> Vec<Want>
     };
     let by_id: HashMap<(String, &str), &Value> = threads
         .iter()
-        .filter_map(|t| Some(((env_of(t), t["id"].as_str()?), t)))
+        .filter_map(|&t| Some(((env_of(t), t["id"].as_str()?), t)))
         .collect();
     // Each shown subagent under the nearest ancestor that isn't one, on its own machine.
     let mut children: HashMap<(String, String), Vec<&Value>> = HashMap::new();
-    for thread in threads.iter().filter(|t| shown_subagent(t, now)) {
+    for &thread in threads.iter().filter(|t| shown_subagent(t, now)) {
         let env = env_of(thread);
         if let Some(root) = top_ancestor(thread, &env, &by_id) {
             children.entry((env, root)).or_default().push(thread);
@@ -553,6 +603,25 @@ fn tagged(windows: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Whether a session, as `session inspect --json` prints it, has a window tr3x made: one with
+/// a tagged conversation pane.
+fn holds_tr3x(view: &Value) -> bool {
+    view["windows"]
+        .as_array()
+        .is_some_and(|windows| !tagged(windows).is_empty())
+}
+
+/// Makes `session`, a copy of the group's session, the group's. The old windows went with the
+/// old session, so none of them was closed by you: the group starts from no windows, and the
+/// copy's are adopted by their tags. Threads you closed stay closed.
+fn take_over(group: &mut Group, session: &str) {
+    *group = Group {
+        session_id: Some(session.to_string()),
+        windows: Default::default(),
+        dismissed: std::mem::take(&mut group.dismissed),
+    };
+}
+
 /// Whether a pane's `process` answer has tr3x running in it, by the program's file name
 /// against `exe`'s, or `None` when it doesn't say. Rex can bring a session back after a
 /// restart with a shell where the conversation was, under the same label.
@@ -854,8 +923,9 @@ pub struct Syncer {
     pub disk: Disk,
     /// Put the merged session, or this Mac's, first in Rex's list when it's made.
     pub first: bool,
-    /// The `rex do` scripts that turn a New Tab in each session into a new thread, by session.
-    pub watchers: HashMap<String, tokio::process::Child>,
+    /// The `rex do` scripts that turn a New Tab in each session into a new thread, by session,
+    /// with when each started.
+    pub watchers: HashMap<String, (tokio::process::Child, Instant)>,
     /// Threads whose window the user closed since the last reconcile, for `follow` to settle.
     pub closed: Vec<ThreadRef>,
     /// Conversation panes seen running tr3x, by session, so each is asked only once.
@@ -890,8 +960,16 @@ impl Syncer {
         {
             return Ok(id.clone());
         }
+        // Only a session this sync had and lost is looked for: a sync with no record of one, as a
+        // fresh state directory, would otherwise take over another sync's session by its label.
+        if group.session_id.is_some()
+            && let Some(id) = self.taken_over(spec, &sessions).await?
+        {
+            return Ok(id);
+        }
         let id = self.rex.create_session(&spec.label).await?;
         // Recorded before anything else can fail, so a retry never makes a second session.
+        let group = self.state.groups.entry(spec.key.clone()).or_default();
         *group = Group {
             session_id: Some(id.clone()),
             ..Group::default()
@@ -906,10 +984,54 @@ impl Syncer {
         Ok(id)
     }
 
+    /// A session with the group's label that holds tr3x's windows, which no other group has,
+    /// made the group's own.
+    async fn taken_over(
+        &mut self,
+        spec: &SessionSpec,
+        sessions: &[Value],
+    ) -> Result<Option<String>> {
+        // Gone, but maybe only renamed: a session tool such as rexurrect replaces the sessions
+        // Rex carries over at its start with copies that have new ids, and closes the originals.
+        // A copy keeps the windows' tagged panes, so take it over rather than open a second
+        // session beside it. Its shell panes become conversations again as the pass goes on.
+        let owned: HashSet<String> = self
+            .state
+            .groups
+            .iter()
+            .filter(|(key, _)| **key != spec.key)
+            .filter_map(|(_, g)| g.session_id.clone())
+            .collect();
+        for candidate in sessions.iter().filter(|s| {
+            s["label"].as_str() == Some(spec.label.as_str())
+                && s["session_id"]
+                    .as_str()
+                    .is_some_and(|id| !owned.contains(id))
+        }) {
+            let Some(id) = candidate["session_id"].as_str() else {
+                continue;
+            };
+            // Not knowing what it holds isn't knowing it's free: the pass fails and tries again,
+            // rather than open a second session beside it.
+            let view = self.rex.inspect(id).await?;
+            if !holds_tr3x(&view) {
+                continue;
+            }
+            eprintln!("tr3x: taking over {id}, a copy of the session made after Rex restarted");
+            take_over(self.state.groups.entry(spec.key.clone()).or_default(), id);
+            self.persist()?;
+            return Ok(Some(id.to_string()));
+        }
+        Ok(None)
+    }
+
     /// Keeps the New Tab watcher running for `session`.
     fn watch(&mut self, session: &str, env: Option<&str>) {
-        if let Some(child) = self.watchers.get_mut(session)
-            && matches!(child.try_wait(), Ok(None))
+        if let Some((child, started)) = self.watchers.get_mut(session)
+            && (matches!(child.try_wait(), Ok(None))
+                // One that ended as it started isn't started again for a few seconds, however
+                // often sync passes: each that ends wakes sync.
+                || started.elapsed() < WATCHER_RETRY)
         {
             return;
         }
@@ -924,6 +1046,7 @@ impl Syncer {
             .spawn();
         match child {
             Ok(mut child) => {
+                let started = Instant::now();
                 if let Some(mut stdin) = child.stdin.take() {
                     let script = watcher_script(&exe, env);
                     tokio::spawn(async move {
@@ -940,9 +1063,15 @@ impl Syncer {
                                 CLOSED.notify_one();
                             }
                         }
+                        // The watcher ended: Rex quit or restarted, or the session went. The
+                        // next pass looks at Rex and starts it again, so a tab closed meanwhile
+                        // is read while what it should do still holds. Not before it may be
+                        // started again, so one that ended as it started is retried then.
+                        tokio::time::sleep_until((started + WATCHER_RETRY).into()).await;
+                        CLOSED.notify_one();
                     });
                 }
-                self.watchers.insert(session.to_string(), child);
+                self.watchers.insert(session.to_string(), (child, started));
             }
             Err(e) => eprintln!("tr3x: couldn't watch for new windows: {e:#}"),
         }
@@ -1356,6 +1485,11 @@ async fn follow(
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut next_reconcile = tokio::time::Instant::now();
+    // Whether the next pass has to look at Rex whatever the shells say, what the last pass that
+    // did saw, and when.
+    let mut rex_due = true;
+    let mut last_print: Option<Print> = None;
+    let mut last_rex = Instant::now();
     loop {
         let take = |env: String, event: WatchEvent, tracks: &mut BTreeMap<String, Track>| {
             let Some(track) = tracks.get_mut(&env) else {
@@ -1364,6 +1498,24 @@ async fn follow(
             match event {
                 WatchEvent::Item(item) => {
                     track.shell.apply(&item);
+                    // Sync keeps every thread T3 lists for as long as it runs: each row it
+                    // takes in keeps only what's read.
+                    match item["kind"].as_str() {
+                        Some("snapshot") => {
+                            for row in &mut track.shell.threads {
+                                take_in(row, &env);
+                            }
+                        }
+                        Some("thread.updated") => {
+                            let id = &item["thread"]["id"];
+                            if let Some(row) =
+                                track.shell.threads.iter_mut().find(|t| t["id"] == *id)
+                            {
+                                take_in(row, &env);
+                            }
+                        }
+                        _ => {}
+                    }
                     if item["kind"] == "synchronized" {
                         if track.synced != Some(track.generation) && !track.reason.is_empty() {
                             eprintln!("tr3x: {} is back", name_of(&hub, &env));
@@ -1403,8 +1555,14 @@ async fn follow(
                 dirty = true;
             }
             _ = tick.tick() => dirty = true,
-            _ = wake.recv() => dirty = true,
-            _ = CLOSED.notified() => dirty = true,
+            _ = wake.recv() => {
+                dirty = true;
+                rex_due = true;
+            }
+            _ = CLOSED.notified() => {
+                dirty = true;
+                rex_due = true;
+            }
             _ = tokio::time::sleep_until(next_reconcile), if dirty => {},
         }
         // Drain a burst before acting, so a snapshot's items reconcile once.
@@ -1422,6 +1580,7 @@ async fn follow(
         let now = Instant::now();
         // Find Thread brought these back: a window closed while they worked no longer hides them.
         for key in take_restores() {
+            rex_due = true;
             for group in syncer.state.groups.values_mut() {
                 group.dismissed.remove(&key);
             }
@@ -1429,6 +1588,7 @@ async fn follow(
 
         // A machine paired, renamed or forgotten while sync runs.
         if machines_stamp(&hub) != stamp {
+            rex_due = true;
             stamp = machines_stamp(&hub);
             // Reloaded in place: a fresh `Env` has no descriptor until it connects, and only
             // the subscriptions connect, so replacing every machine's left them all unready.
@@ -1483,16 +1643,6 @@ async fn follow(
             })
             .collect();
         let wants = wanted(&shells, &mut inbox, t3::now_ms());
-        let known: HashSet<String> = wants
-            .iter()
-            .map(Want::key)
-            .chain(shells.iter().flat_map(|m| {
-                m.shell
-                    .threads
-                    .iter()
-                    .filter_map(|t| Some(format!("{}/{}", m.env, t["id"].as_str()?)))
-            }))
-            .collect();
         let envs: Vec<String> = hub.envs().iter().map(|e| e.id().to_string()).collect();
         let health = |env: &str| match tracks.get(env) {
             Some(track) => {
@@ -1504,8 +1654,36 @@ async fn follow(
             None => Health::READY,
         };
 
-        // The sessions the setting asks for, and the threads each holds.
+        // Rex is asked for the session's view, and changed, only when something a window shows
+        // changed, Rex said something happened, or a while has passed. Most shell changes, such
+        // as a working thread's progress, change nothing there.
         let mode = crate::machines::sessions();
+        let print = Print {
+            wants: wants.iter().map(|w| w.print(&syncer.state)).collect(),
+            health: envs.iter().map(|e| (e.clone(), health(e))).collect(),
+            mode,
+            own_pane: crate::reply::own_pane(),
+        };
+        if !rex_due && last_print.as_ref() == Some(&print) && last_rex.elapsed() < REX_BACKSTOP {
+            last = wants;
+            continue;
+        }
+        rex_due = false;
+        last_rex = Instant::now();
+        // Every thread the shells list, for telling tr3x's windows from others: only a pass that
+        // reconciles reads it.
+        let known: HashSet<String> = wants
+            .iter()
+            .map(Want::key)
+            .chain(shells.iter().flat_map(|m| {
+                m.shell
+                    .threads
+                    .iter()
+                    .filter_map(|t| Some(format!("{}/{}", m.env, t["id"].as_str()?)))
+            }))
+            .collect();
+
+        // The sessions the setting asks for, and the threads each holds.
         let mut specs: Vec<(SessionSpec, Vec<Want>)> = Vec::new();
         match mode {
             Sessions::Merged => specs.push((
@@ -1568,12 +1746,20 @@ async fn follow(
                 .await
             {
                 Ok(c) => changed |= c,
-                Err(e) => eprintln!("tr3x: {e:#}"),
+                Err(e) => {
+                    eprintln!("tr3x: {e:#}");
+                    // Tried again on the next pass, whatever the shells say by then.
+                    rex_due = true;
+                }
             }
         }
+        // What a pass changed, the next one checks took.
+        rex_due |= changed;
+        last_print = Some(print);
+        // A count, not every title: the log is read for what went wrong, and a line naming each
+        // thread on every change grew it by megabytes.
         if changed || wants.len() != last.len() {
-            let names: Vec<&str> = wants.iter().map(|w| w.label.as_str()).collect();
-            eprintln!("tr3x: {} thread(s): {}", wants.len(), names.join(" | "));
+            eprintln!("tr3x: {} thread(s)", wants.len());
         }
         // Where ⌃⌘I goes: the first window in T3's order, on any machine.
         let next = wants.iter().find_map(|w| {
@@ -1646,6 +1832,14 @@ fn name_of(hub: &Hub, env: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_row_taken_in_keeps_its_machine() {
+        let mut row = json!({"id": "t", "title": "x", "branch": null});
+        take_in(&mut row, "studio");
+        assert_eq!(row["tr3xEnv"], "studio");
+        assert_eq!(row["id"], "t");
+    }
+
     use super::*;
 
     /// Pairing a machine while sync runs reloads the registry. The machines already followed
@@ -1734,6 +1928,31 @@ mod tests {
         } else {
             Health::READY
         }
+    }
+
+    /// A working thread's `updatedAt` moves with every event, which is no reason to look at
+    /// Rex, unless the user closed its window, which comes back once the thread changes.
+    #[test]
+    fn a_thread_that_only_moved_on_reconciles_the_same() {
+        let mut state = State::default();
+        let a = want("a", "A");
+        let later = Want {
+            updated_at: "u2".into(),
+            ..a.clone()
+        };
+        assert_eq!(a.print(&state), later.print(&state));
+        let relabelled = Want {
+            label: "A2".into(),
+            ..a.clone()
+        };
+        assert_ne!(a.print(&state), relabelled.print(&state));
+        state
+            .groups
+            .entry(String::new())
+            .or_default()
+            .dismissed
+            .insert("h/a".into(), "u1".into());
+        assert_ne!(a.print(&state), later.print(&state));
     }
 
     #[test]
@@ -1895,6 +2114,49 @@ mod tests {
             {"block_id": "b1", "label": format!("t3:{tag}")},
             {"block_id": "b2", "label": "Reply"}
         ]}]})
+    }
+
+    /// After a Rex restart, rexurrect closes the session Rex carried over and opens a copy with
+    /// new ids. Taking the copy over keeps every thread's tab, opens no second one, settles
+    /// nothing, and keeps a thread you closed closed.
+    #[test]
+    fn a_copy_of_the_session_is_taken_over_whole() {
+        let mut group = Group {
+            session_id: Some("s-old".into()),
+            ..Group::default()
+        };
+        group.windows.insert("home-env/a".into(), win("w-a", "A"));
+        group.windows.insert("home-env/b".into(), win("w-b", "B"));
+        group.dismissed.insert("home-env/c".into(), "u1".into());
+        let copy = json!({"session_id": "s-new", "windows": [
+            tagged_window("n-a", "home-env/a"),
+            tagged_window("n-b", "home-env/b"),
+        ]});
+        assert!(holds_tr3x(&copy));
+        assert!(!holds_tr3x(&json!({"session_id": "s", "windows": [
+            {"window_id": "w", "layers": [{"blocks": [{"block_id": "b", "label": "zsh"}]}]}
+        ]})));
+        assert!(!holds_tr3x(&json!({"session_id": "s"})));
+
+        take_over(&mut group, "s-new");
+        assert_eq!(group.session_id.as_deref(), Some("s-new"));
+        let windows = copy["windows"].as_array().unwrap();
+        let wants = [
+            want("home-env/a", "A"),
+            want("home-env/b", "B"),
+            want("home-env/c", "C"),
+        ];
+        let known: HashSet<String> = wants.iter().map(Want::key).collect();
+        let envs = vec!["home-env".to_string()];
+        assert!(adopt(windows, &mut group, &known, &envs, "home-env").is_empty());
+        let present = vec![("n-a".into(), "A".into()), ("n-b".into(), "B".into())];
+        let plan = plan(&wants, &present, None, &mut group, &ready);
+        assert!(plan.settle.is_empty());
+        assert!(plan.create.is_empty());
+        assert!(plan.close.is_empty());
+        assert_eq!(group.windows["home-env/a"].window_id, "n-a");
+        assert_eq!(group.windows["home-env/b"].window_id, "n-b");
+        assert!(group.dismissed.contains_key("home-env/c"));
     }
 
     #[test]
