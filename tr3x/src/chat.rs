@@ -3057,6 +3057,7 @@ mod tests {
             media: Some(&media),
             link: "",
             files: &crate::link::FileLinks::default(),
+            output: None,
         };
         let lines = markdown_with_pictures(&format!("Here:\n\n![shot]({})\n", png.display()), &ctx);
         let at = lines.iter().position(|l| l.contains("\x1b_G")).unwrap();
