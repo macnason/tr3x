@@ -51,6 +51,8 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const BLUE: &str = "\x1b[34m";
 pub const MAGENTA: &str = "\x1b[35m";
 
+/// How many lines of a command's output show under its row.
+const OUTPUT_TAIL: usize = 3;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// The terminal's size and what this pane has written to it.
@@ -106,6 +108,8 @@ struct Pane {
     live: Vec<String>,
     /// The folder last reported with OSC 7, empty for none.
     folder: String,
+    /// The running command whose output this follows, and that output so far.
+    output: Option<(String, String)>,
 }
 
 struct Display {
@@ -450,6 +454,8 @@ struct Ctx<'a> {
     /// Opens the thread in T3, where it's clicked.
     link: &'a str,
     files: &'a crate::link::FileLinks,
+    /// A running command's output as it streams: its item and the text so far.
+    output: Option<(&'a str, &'a str)>,
 }
 
 /// A picture's lines: its kitty sequence on the first, then a blank row for each row it covers.
@@ -630,21 +636,15 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
                 tool_glyph(block),
                 fit(&tool_text(block, tool), room)
             ));
-            if failed(block) && !block.body.trim().is_empty() {
-                for line in block
-                    .body
-                    .lines()
-                    .rev()
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                {
-                    lines.push(format!(
-                        "    {DIM}{RED}{}{RESET}",
-                        fit(&transcript::plain(line), width.saturating_sub(6))
-                    ));
-                }
+            // The end of its output: why a call failed, or what a command running now is up to.
+            let live = is_running(block) && block.item_type == "command_execution";
+            if failed(block) || live {
+                let color = if failed(block) { RED } else { "" };
+                let output = match ctx.output {
+                    Some((id, text)) if live && id == block.item_id => text,
+                    _ => &block.body,
+                };
+                lines.extend(output_tail(output, width, color));
             }
         }
         BlockKind::Request => {
@@ -677,7 +677,27 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
         BlockKind::Plan => {
             lines.push(String::new());
             lines.push(format!("{MAGENTA}{BOLD}Plan{RESET}"));
-            lines.extend(render::markdown_with_links(&block.body, width, ctx.files).lines);
+            if block.item_type == "todo_list" {
+                lines.extend(checklist(&block.body, width));
+            } else {
+                lines.extend(render::markdown_with_links(&block.body, width, ctx.files).lines);
+            }
+        }
+        // What the turn changed: its counts in green and red, as T3's card shows them.
+        BlockKind::Notice if block.item_type == "checkpoint" => {
+            let (what, counts) = block
+                .header
+                .rsplit_once("  ")
+                .unwrap_or((&block.header, ""));
+            let counts = match counts.split_once(' ') {
+                Some((added, removed)) => format!("  {GREEN}{added}{RESET} {RED}{removed}{RESET}"),
+                None => String::new(),
+            };
+            lines.push(String::new());
+            lines.push(format!(
+                "{DIM}{}{RESET}{counts}",
+                fit(what, width.saturating_sub(16))
+            ));
         }
         BlockKind::Notice => {
             let text = one_line(if block.body.is_empty() {
@@ -701,6 +721,69 @@ fn block_lines(block: &Block, ctx: &Ctx) -> Vec<String> {
             {
                 lines.push(format!("{RED}│{RESET} {line}"));
             }
+        }
+    }
+    lines
+}
+
+/// The last lines of a tool's output under its row, as `└ …`: at most `OUTPUT_TAIL` of them,
+/// blank ones left out, each cut to the column.
+fn output_tail(output: &str, width: usize, color: &str) -> Vec<String> {
+    // A terminal shows what follows a line's last carriage return, as a progress bar redraws.
+    let shown: Vec<String> = output
+        .lines()
+        .rev()
+        .map(|l| {
+            l.trim_end_matches('\r')
+                .rsplit('\r')
+                .next()
+                .unwrap_or_default()
+        })
+        .map(|l| transcript::plain(&render::strip_ansi(l)).trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(OUTPUT_TAIL)
+        .collect();
+    shown
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, line)| {
+            let lead = if i == 0 { "└ " } else { "  " };
+            let line = fit(line, width.saturating_sub(6));
+            format!("  {DIM}{lead}{color}{line}{RESET}")
+        })
+        .collect()
+}
+
+/// The command a pane follows the output of: the last one running, by its item id.
+fn running_command(blocks: &[Block]) -> Option<&str> {
+    blocks
+        .iter()
+        .rev()
+        .find(|b| b.item_type == "command_execution" && is_running(b))
+        .map(|b| b.item_id.as_str())
+}
+
+/// The most of a command's output a pane keeps: its tail is all it shows.
+const OUTPUT_KEEP: usize = 16 * 1024;
+
+/// An agent's checklist, one step a row: done ones ticked and dimmed, the one in hand in
+/// bold. The body is `transcript`'s `[x] `, `[>] ` or `[ ] ` and the step's text, a line each.
+fn checklist(body: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for step in body.lines() {
+        let (mark, style, text) = match step.split_at_checked(4) {
+            Some(("[x] ", text)) => (format!("{GREEN}✓{RESET}"), DIM, text),
+            Some(("[>] ", text)) => (format!("{BLUE}◐{RESET}"), BOLD, text),
+            Some(("[ ] ", text)) => (format!("{DIM}○{RESET}"), "", text),
+            _ => (" ".to_string(), "", step),
+        };
+        for (i, row) in wrap_plain(text, width.saturating_sub(2), 3)
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if i == 0 { mark.as_str() } else { " " };
+            lines.push(format!("{lead} {style}{row}{RESET}"));
         }
     }
     lines
@@ -1263,6 +1346,7 @@ impl Pane {
             folder: String::new(),
             ranked: None,
             live: Vec::new(),
+            output: None,
         }
     }
 
@@ -1358,6 +1442,10 @@ impl Pane {
             media: Some(&self.media),
             link: &self.link,
             files: &self.files,
+            output: self
+                .output
+                .as_ref()
+                .map(|(id, text)| (id.as_str(), text.as_str())),
         };
         let moving = Ctx {
             frame: self.frame,
@@ -1638,7 +1726,29 @@ impl Pane {
     /// by it. The project and status are on the line under it.
     /// Lets go of the thread as drawn, for a pane that dozes. Rex keeps what's on screen; on
     /// waking the thread prints again in full.
+    /// Takes a frame of the followed command's output. Whether it changed what shows.
+    fn command_output(&mut self, frame: &Value) -> bool {
+        let Some((_, text)) = self.output.as_mut() else {
+            return false;
+        };
+        let chunk = frame["text"].as_str().unwrap_or_default();
+        match frame["kind"].as_str() {
+            Some("replace") => *text = chunk.to_string(),
+            Some("append") if !chunk.is_empty() => text.push_str(chunk),
+            _ => return false,
+        }
+        if text.len() > OUTPUT_KEEP {
+            let mut cut = text.len() - OUTPUT_KEEP;
+            while !text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            text.drain(..cut);
+        }
+        true
+    }
+
     fn forget(&mut self) {
+        self.output = None;
         self.display = None;
         self.ranked = None;
         self.live = Vec::new();
@@ -1926,6 +2036,8 @@ async fn event_loop(
     let mut perf = crate::perf::Frames::new();
     let (file_tx, mut file_rx) = mpsc::channel(4);
     let mut files_checked = tokio::time::Instant::now();
+    // The running command's output, which T3 streams apart from the thread.
+    let mut output_events: Option<mpsc::Receiver<WatchEvent>> = None;
 
     loop {
         // Sync keeps this thread's tab past the tab budget while closing it would lose
@@ -1990,6 +2102,22 @@ async fn event_loop(
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
                     pane.set_status(&shell, thread, composer.state.as_ref(), app_now(&composer, &mut app));
                 }
+            },
+            event = async {
+                match output_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match event {
+                Some(WatchEvent::Item(frame)) => {
+                    dirty |= pane.command_output(&frame);
+                    // Its last frame: the thread has the rest once the command finishes.
+                    if frame["running"] == false {
+                        output_events = None;
+                    }
+                }
+                Some(WatchEvent::Reconnecting { .. }) => {}
+                Some(WatchEvent::Failed(_)) | None => output_events = None,
             },
             Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
                 fit.finished(ok);
@@ -2373,6 +2501,22 @@ async fn event_loop(
             text.push_str(&pane.draw(s, thread));
             dirty = false;
         }
+        // Follows the output of the command running now, while the pane is on screen. A
+        // machine too old to stream it is asked once a command.
+        if role != Role::Reply {
+            let display = pane.display.clone().filter(|_| visible && !dozing);
+            let running = display.as_ref().and_then(|d| running_command(&d.blocks));
+            if running != pane.output.as_ref().map(|(id, _)| id.as_str()) {
+                output_events = running
+                    .filter(|_| client.has_capability("commandOutputStreaming"))
+                    .map(|id| client.watch_command_output(thread_id, id));
+                pane.output = running.map(|id| (id.to_string(), String::new()));
+            }
+            // A pane that dozed forgot what it followed: its stream goes too.
+            if pane.output.is_none() {
+                output_events = None;
+            }
+        }
         if role != Role::Reply
             && let Some(s) = composer.state.as_ref()
             && files_checked.elapsed() >= Duration::from_secs(1)
@@ -2723,6 +2867,109 @@ mod tests {
     }
 
     #[test]
+    fn a_running_command_shows_the_end_of_its_output() {
+        let tail = output_tail(
+            "   Compiling a\n\x1b[32m   Finished\x1b[0m in 4s\n\nprogress 10%\rprogress 90%\r\nrunning 4 tests\n",
+            80,
+            "",
+        );
+        let plain: Vec<String> = tail.iter().map(|l| render::strip_ansi(l)).collect();
+        assert_eq!(
+            plain,
+            [
+                "  └ Finished in 4s",
+                "    progress 90%",
+                "    running 4 tests"
+            ]
+        );
+        assert!(output_tail("\n  \n", 80, "").is_empty());
+        // A line too long for the column is cut to it.
+        let long = output_tail(&"x".repeat(200), 40, "");
+        assert!(visible_width(&long[0]) <= 40);
+    }
+
+    #[test]
+    fn streamed_output_replaces_appends_and_keeps_only_its_tail() {
+        let mut p = pane(20, 1, 0);
+        let frame = |kind: &str, text: &str| serde_json::json!({"kind": kind, "text": text, "truncated": false, "running": true});
+        // Nothing is followed yet.
+        assert!(!p.command_output(&frame("append", "lost")));
+        p.output = Some(("c1".into(), String::new()));
+        assert!(p.command_output(&frame("replace", "one\n")));
+        assert!(p.command_output(&frame("append", "two\n")));
+        assert!(!p.command_output(&frame("append", "")));
+        assert_eq!(p.output.as_ref().unwrap().1, "one\ntwo\n");
+        assert!(p.command_output(&frame("append", &"é".repeat(OUTPUT_KEEP))));
+        let kept = &p.output.as_ref().unwrap().1;
+        assert!(kept.len() <= OUTPUT_KEEP && kept.ends_with('é'));
+        assert!(p.command_output(&frame("replace", "fresh")));
+        assert_eq!(p.output.as_ref().unwrap().1, "fresh");
+    }
+
+    #[test]
+    fn the_running_command_draws_what_streamed() {
+        let mut running = tool("command_execution", "$ cargo test", "cargo test", "");
+        running.item_id = "c1".into();
+        running.status = "inProgress".into();
+        running.exit_code = None;
+        let blocks = vec![running];
+        assert_eq!(running_command(&blocks), Some("c1"));
+        let embeds = HashMap::new();
+        let files = crate::link::FileLinks::default();
+        let mut ctx = Ctx {
+            width: 80,
+            frame: 0,
+            offset: 0,
+            embeds: &embeds,
+            media: None,
+            link: "",
+            files: &files,
+            output: Some(("c1", "running 412 tests\n")),
+        };
+        let lines: Vec<String> = block_lines(&blocks[0], &ctx)
+            .iter()
+            .map(|l| render::strip_ansi(l))
+            .collect();
+        assert_eq!(lines[1], "  └ running 412 tests");
+        // Another command's output isn't this one's.
+        ctx.output = Some(("c2", "other\n"));
+        assert_eq!(block_lines(&blocks[0], &ctx).len(), 1);
+    }
+
+    #[test]
+    fn a_checklist_shows_a_step_a_row() {
+        let lines: Vec<String> = checklist("[x] Read the log\n[>] Fix it\n[ ] Ship it", 40)
+            .iter()
+            .map(|l| render::strip_ansi(l))
+            .collect();
+        assert_eq!(lines, ["✓ Read the log", "◐ Fix it", "○ Ship it"]);
+        // A long step wraps under its text.
+        let long = checklist(&format!("[ ] {}", "word ".repeat(12)), 20);
+        assert!(long.len() > 1 && render::strip_ansi(&long[1]).starts_with("  word"));
+    }
+
+    #[test]
+    fn a_turn_says_what_it_changed() {
+        let mut block = tool("checkpoint", "2 files changed  +7 -2", "", "");
+        block.kind = BlockKind::Notice;
+        let embeds = HashMap::new();
+        let files = crate::link::FileLinks::default();
+        let ctx = Ctx {
+            width: 80,
+            frame: 0,
+            offset: 0,
+            embeds: &embeds,
+            media: None,
+            link: "",
+            files: &files,
+            output: None,
+        };
+        let lines = block_lines(&block, &ctx);
+        assert_eq!(render::strip_ansi(&lines[1]), "2 files changed  +7 -2");
+        assert!(lines[1].contains(&format!("{GREEN}+7{RESET} {RED}-2{RESET}")));
+    }
+
+    #[test]
     fn a_run_shows_one_line_and_only_running_calls_draw_rows() {
         let mut running = tool("command_execution", "$ sleep 9", "sleep 9", "");
         running.status = "inProgress".into();
@@ -2740,6 +2987,7 @@ mod tests {
             media: None,
             link: "",
             files: &crate::link::FileLinks::default(),
+            output: None,
         };
         assert!(lines_at(&blocks, 0, &ctx).is_empty());
         assert_eq!(lines_at(&blocks, 2, &ctx).len(), 1);
@@ -2778,6 +3026,7 @@ mod tests {
             media: None,
             link: "",
             files: &crate::link::FileLinks::default(),
+            output: None,
         };
         assert!(lines_at(&blocks, 0, &ctx).is_empty());
         assert!(
@@ -2848,6 +3097,7 @@ mod tests {
                 media: Some(&media),
                 link: "https://t3/env/thread",
                 files: &crate::link::FileLinks::default(),
+                output: None,
             };
             block_lines(&block, &ctx).join("\n")
         };

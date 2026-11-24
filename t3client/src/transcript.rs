@@ -764,6 +764,34 @@ fn file_change(item: &Value, counts: String) -> FileChange {
     }
 }
 
+/// A checkpoint's files as one line, `2 files changed  +14 -3`, from its `filesTotal`, which
+/// covers every file when T3 sends only some of them, else from the files it lists. None when
+/// it changed no file.
+fn checkpoint_summary(item: &Value) -> Option<String> {
+    let count = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let (files, added, removed) = match item.get("filesTotal").filter(|t| t.is_object()) {
+        Some(total) => (
+            count(total, "count"),
+            count(total, "additions"),
+            count(total, "deletions"),
+        ),
+        None => {
+            let files = item
+                .get("files")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let sum = |key| files.iter().map(|f| count(f, key)).sum();
+            (files.len() as u64, sum("additions"), sum("deletions"))
+        }
+    };
+    if files == 0 {
+        return None;
+    }
+    let noun = if files == 1 { "file" } else { "files" };
+    Some(format!("{files} {noun} changed  +{added} -{removed}"))
+}
+
 /// One entry of a file change's `changes` as the nightly's `V2ItemInspector.tsx` lists it,
 /// such as `move /repo/old.ts → /repo/new.ts (text)`. `None` when it isn't a record with a
 /// path.
@@ -1148,8 +1176,11 @@ fn describe_as(item: &Value, runs: &[Value], with_change: bool) -> Option<Block>
             };
             block(BlockKind::Notice, header, String::new())
         }
-        // Checkpoints and interrupt requests carry nothing worth a line.
-        "checkpoint" | "run_interrupt_request" => return None,
+        // What the turn changed in the project, as T3's changed-files card sums it up:
+        // `2 files changed  +14 -3`. A turn that changed nothing says nothing.
+        "checkpoint" => block(BlockKind::Notice, checkpoint_summary(item)?, String::new()),
+        // Interrupt requests carry nothing worth a line.
+        "run_interrupt_request" => return None,
         _ => {
             if title.is_empty() {
                 return None;
@@ -1436,6 +1467,28 @@ mod tests {
             item["afterTokenCount"] = count;
         }
         item
+    }
+
+    #[test]
+    fn a_checkpoint_sums_up_what_the_turn_changed() {
+        let header = |item: Value| describe_plain(&item, &[]).map(|b| (b.kind, b.header));
+        let files = json!([
+            {"path": "a.rs", "kind": "modified", "additions": 6, "deletions": 2},
+            {"path": "b.rs", "kind": "added", "additions": 1, "deletions": 0}
+        ]);
+        let item = json!({"id": "k", "type": "checkpoint", "files": files});
+        assert_eq!(
+            header(item),
+            Some((BlockKind::Notice, "2 files changed  +7 -2".into()))
+        );
+        // The totals cover files T3 left off the list.
+        let item = json!({"id": "k", "type": "checkpoint", "files": [],
+            "filesTotal": {"count": 120, "additions": 900, "deletions": 4}});
+        assert_eq!(header(item).unwrap().1, "120 files changed  +900 -4");
+        let item = json!({"id": "k", "type": "checkpoint", "files": []});
+        assert!(header(item).is_none());
+        let item = json!({"id": "k", "type": "checkpoint", "files": [files[1]]});
+        assert_eq!(header(item).unwrap().1, "1 file changed  +1 -0");
     }
 
     #[test]

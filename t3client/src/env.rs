@@ -808,6 +808,27 @@ impl Env {
         )
     }
 
+    /// Streams a running command's output, as T3 Code's expanded command row follows it:
+    /// frames of `{kind: "replace" | "append", text, truncated, running}`, the last with
+    /// `running: false`. The output never enters the thread's projection while the command
+    /// runs. Only a server with the `commandOutputStreaming` capability offers it.
+    pub fn watch_command_output(
+        self: &Arc<Self>,
+        thread_id: &str,
+        item_id: &str,
+    ) -> mpsc::Receiver<WatchEvent> {
+        let client = self.clone();
+        watch(
+            Box::new(move || {
+                let client = client.clone();
+                Box::pin(async move { client.rpc().await })
+            }),
+            "orchestration.subscribeCommandOutput",
+            json!({"threadId": thread_id, "itemId": item_id}),
+            Resume::Latest,
+        )
+    }
+
     /// Streams the server's configuration, as `spawn_config_watch` describes.
     pub fn watch_config(self: &Arc<Self>) -> mpsc::Receiver<WatchEvent> {
         let client = self.clone();

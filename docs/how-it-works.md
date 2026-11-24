@@ -148,6 +148,14 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - Reply grows one row per input line, up to 8, within half the pane.
 - A run of tool calls folds past the first three into one "more" line, but an HTML embed
   always shows.
+- A running command shows the last three lines of its output under its row, `└ …`. T3 keeps
+  that output out of the thread while the command runs, so the pane follows it with
+  `orchestration.subscribeCommandOutput`, one command at a time and only while on screen, on a
+  T3 that offers `commandOutputStreaming`. Codex streams it; a provider that doesn't shows the
+  row alone.
+- An agent's plan (`todo_list`) shows a step a row: `✓` done, `◐` in hand, `○` to do.
+- A turn that changed files ends on T3's checkpoint for it, `2 files changed  +14 -3`, which
+  stays when the turn folds.
 - A finished turn folds to `▸ Worked for 2m 14s` above its last reply, by the rule T3 Code's
   timeline uses: tool calls, thinking, approvals and the messages between them fold; your
   messages, the last reply, questions, plans, errors and embeds stay. A failed or running turn
