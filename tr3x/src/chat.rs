@@ -2116,8 +2116,9 @@ async fn event_loop(
                         output_events = None;
                     }
                 }
-                Some(WatchEvent::Reconnecting { .. }) => {}
-                Some(WatchEvent::Failed(_)) | None => output_events = None,
+                // A stream that ends or drops isn't asked for again: the output is a
+                // glimpse, and the thread has it once the command finishes.
+                Some(_) | None => output_events = None,
             },
             Some(ok) = fitted.recv() => if let Some(fit) = fit.as_mut() {
                 fit.finished(ok);
