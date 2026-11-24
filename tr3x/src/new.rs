@@ -94,6 +94,9 @@ struct NewThread {
     /// over that project's defaults.
     picked: Picked,
     mode: Mode,
+    /// The folder last reported to Rex with OSC 7, so a split opened beside this screen starts
+    /// in the project, or the worktree picked. Empty for none.
+    reported: String,
     /// The project's branches, by project id, and whether its folder is a git repository.
     branches: HashMap<String, (Vec<Value>, bool)>,
     base: Option<String>,
@@ -568,6 +571,7 @@ impl NewThread {
             settings: Settings::default(),
             picked: Picked::default(),
             mode: Mode::Local,
+            reported: String::new(),
             branches: HashMap::new(),
             base: None,
             icons: HashMap::new(),
@@ -901,7 +905,29 @@ return {{}}"#,
         }
     }
 
+    /// The folder the thread would start in, on this machine: the worktree picked, else the
+    /// project's folder. A new worktree doesn't exist yet, so the project's folder until then.
+    fn start_folder(&self) -> Option<&str> {
+        if !self.client.is_local() {
+            return None;
+        }
+        match &self.mode {
+            Mode::Existing(path) => Some(path.as_str()),
+            Mode::Local | Mode::New => self.project_value()?["workspaceRoot"].as_str(),
+        }
+    }
+
+    fn report_folder(&mut self) {
+        let Some(dir) = self.start_folder() else {
+            return;
+        };
+        if dir != self.reported && crate::chat::report_folder(dir) {
+            self.reported = dir.to_string();
+        }
+    }
+
     fn draw(&mut self) {
+        self.report_folder();
         // The column a thread's conversation reads in, as T3 lines its composer up with it.
         let (left, width) = self.chat_width.column(self.cols);
         let pad = " ".repeat(left);
@@ -1836,11 +1862,7 @@ pub async fn run(welcome: bool, env: Option<String>, start: Start) -> Result<()>
         return Ok(());
     };
     // A project on another machine is a folder there, not here.
-    let cwd = ui
-        .project_value()
-        .and_then(|p| p["workspaceRoot"].as_str())
-        .filter(|_| ui.client.is_local())
-        .map(str::to_string);
+    let cwd = ui.start_folder().map(str::to_string);
     let program = icons::real_exe();
     if crate::reply::own_pane()
         && let Err(e) = open_reply(&thread, cwd.as_deref(), &program).await

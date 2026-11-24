@@ -102,6 +102,8 @@ struct Pane {
     files: crate::link::FileLinks,
     display: Option<std::sync::Arc<Display>>,
     live: Vec<String>,
+    /// The folder last reported with OSC 7, empty for none.
+    folder: String,
 }
 
 struct Display {
@@ -1047,6 +1049,25 @@ fn project_name<'a>(shell: &'a ShellState, thread: &Value) -> Option<&'a str> {
     shell.projects.iter().find(|p| p["id"] == id)?["title"].as_str()
 }
 
+/// The folder a thread works in: its worktree, else its project's folder.
+fn thread_folder<'a>(shell: &'a ShellState, thread: &'a Value) -> Option<&'a str> {
+    thread["worktreePath"].as_str().or_else(|| {
+        let id = thread["projectId"].as_str()?;
+        shell.projects.iter().find(|p| p["id"] == id)?["workspaceRoot"].as_str()
+    })
+}
+
+/// Moves this process to `dir` and tells Rex with OSC 7, so a tab or split opened from the
+/// pane starts there. Only a folder on this machine: a thread on another machine works in a
+/// folder there. Returns whether it moved.
+pub fn report_folder(dir: &str) -> bool {
+    if !std::path::Path::new(dir).is_dir() || std::env::set_current_dir(dir).is_err() {
+        return false;
+    }
+    out(&format!("\x1b]7;file://localhost{}\x1b\\", percent(dir)));
+    true
+}
+
 /// How this machine's T3 runs, from `serverSelfUpdate` in the last descriptor it sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LocalT3 {
@@ -1198,6 +1219,7 @@ impl Pane {
             limit: String::new(),
             files: crate::link::FileLinks::default(),
             display: None,
+            folder: String::new(),
             live: Vec::new(),
         }
     }
@@ -1577,6 +1599,17 @@ impl Pane {
         self.reflow = true;
     }
 
+    /// Follows the thread's folder: T3 moves a thread into its worktree once the worktree is
+    /// made, after the pane started in the project's folder.
+    fn set_folder(&mut self, shell: &ShellState, thread: Option<&Value>, local: bool) {
+        let Some(dir) = thread.and_then(|t| thread_folder(shell, t)) else {
+            return;
+        };
+        if local && dir != self.folder && report_folder(dir) {
+            self.folder = dir.to_string();
+        }
+    }
+
     fn set_title(&mut self, title: Option<&str>, project: Option<&str>) {
         let title = terminal_title(title, project);
         if title != self.title {
@@ -1646,10 +1679,7 @@ pub async fn run(thread: String, passive: bool, role: Role) -> Result<()> {
         out(paste::ON);
     }
     if let Ok(cwd) = std::env::current_dir() {
-        out(&format!(
-            "\x1b]7;file://localhost{}\x1b\\",
-            percent(&cwd.to_string_lossy())
-        ));
+        report_folder(&cwd.to_string_lossy());
     }
     let keys = crate::scheme::keys();
     let result = event_loop(passive, role, &client, &thread_id, scheme, clipboard).await;
@@ -1800,6 +1830,10 @@ async fn event_loop(
     // Only the conversation forwards ports: Reply alone watches the same thread.
     let mut forwards = (role != Role::Reply).then(|| crate::forward::Forwards::of(client));
     let mut pane = Pane::new(Media::new(client.state_dir().as_deref()), link, snap_tx);
+    pane.folder = std::env::current_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let here = client.is_local();
     let mut shell = ShellState::default();
     let mut input = EventStream::new();
     // The spinner's frames, and a clock for what reads differently as time passes: each runs
@@ -1902,6 +1936,7 @@ async fn event_loop(
             } => if let Some(WatchEvent::Item(item)) = event {
                 shell.apply(&item);
                 composer.slash.set_projects(&shell.projects);
+                pane.set_folder(&shell, t3client::inbox::find_thread(&shell, thread_id), here);
                 if role != Role::Reply {
                     let thread = t3client::inbox::find_thread(&shell, thread_id);
                     pane.set_status(&shell, thread, composer.state.as_ref(), app_now(&composer, &mut app));
@@ -2037,6 +2072,7 @@ async fn event_loop(
             } => match note {
                 Some(Note::Shell(slice)) => {
                     composer.slash.set_projects(&slice.projects);
+                    pane.set_folder(&slice, t3client::inbox::find_thread(&slice, thread_id), here);
                     waits_on_you = needs_you(t3client::inbox::find_thread(&slice, thread_id));
                     if dozing && waits_on_you {
                         wake(&mut dozing, &mut thread_events, &mut composer, client, thread_id);
@@ -2406,6 +2442,25 @@ pub async fn dump(thread: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread works in its worktree once it has one, else in its project's folder.
+    #[test]
+    fn thread_folder_prefers_the_worktree() {
+        let shell = ShellState {
+            sequence: 0,
+            threads: Vec::new(),
+            projects: vec![serde_json::json!({"id": "p", "workspaceRoot": "/src/app"})],
+            synchronized: true,
+        };
+        let plain = serde_json::json!({"projectId": "p", "worktreePath": null});
+        assert_eq!(thread_folder(&shell, &plain), Some("/src/app"));
+        let moved = serde_json::json!({"projectId": "p", "worktreePath": "/src/app-wt/x"});
+        assert_eq!(thread_folder(&shell, &moved), Some("/src/app-wt/x"));
+        assert_eq!(
+            thread_folder(&shell, &serde_json::json!({"projectId": "q"})),
+            None
+        );
+    }
 
     fn tool(item_type: &str, header: &str, detail: &str, title: &str) -> Block {
         Block {
