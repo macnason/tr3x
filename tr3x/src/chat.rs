@@ -101,6 +101,8 @@ struct Pane {
     limit: String,
     files: crate::link::FileLinks,
     display: Option<std::sync::Arc<Display>>,
+    /// What the pictures were last ranked for: the display's sequence and snapshot count.
+    ranked: Option<(u64, usize)>,
     live: Vec<String>,
     /// The folder last reported with OSC 7, empty for none.
     folder: String,
@@ -466,6 +468,9 @@ fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
         return render::markdown_with_links(text, ctx.width, ctx.files).lines;
     };
     let mut lines = Vec::new();
+    // Rows a picture covers are blank but not spare: without them a picture that ends the
+    // message spills over what prints under it, Reply's rows too.
+    let mut reserved = 0;
     let mut chunk = String::new();
     let mut in_fence = false;
     for line in text.split_inclusive('\n') {
@@ -481,6 +486,7 @@ fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
                 }
                 chunk.clear();
                 lines.extend(pictures);
+                reserved = lines.len();
                 continue;
             }
         }
@@ -489,10 +495,45 @@ fn markdown_with_pictures(text: &str, ctx: &Ctx) -> Vec<String> {
     if !chunk.trim().is_empty() {
         lines.extend(render::markdown_with_links(&chunk, ctx.width, ctx.files).lines);
     }
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.len() > reserved && lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
     lines
+}
+
+/// The pictures a thread's blocks draw, oldest first, for `Media::rank`.
+fn picture_sources(
+    blocks: &[Block],
+    embeds: &HashMap<String, Embed>,
+    media: &Media,
+) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for block in blocks {
+        if let Some(embed) = embeds.get(&block.item_id) {
+            out.extend(media.snapshots.get(&embed.attachment).cloned());
+            continue;
+        }
+        match block.kind {
+            BlockKind::User => {
+                if let Some(dir) = media.attachments.as_ref() {
+                    out.extend(block.images.iter().map(|image| dir.join(&image.file)));
+                }
+            }
+            BlockKind::Assistant => {
+                let mut in_fence = false;
+                for line in block.body.lines() {
+                    if line.trim_start().starts_with("```") {
+                        in_fence = !in_fence;
+                    }
+                    if !in_fence && let Some((_, path)) = media::local_image(line) {
+                        out.push(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// What one block looks like, at `ctx.width` columns before the left padding.
@@ -1220,6 +1261,7 @@ impl Pane {
             files: crate::link::FileLinks::default(),
             display: None,
             folder: String::new(),
+            ranked: None,
             live: Vec::new(),
         }
     }
@@ -1301,6 +1343,12 @@ impl Pane {
             for embed in embeds.values() {
                 self.media.ask(embed, self.snapshots.clone());
             }
+        }
+        let ranked = Some((display.sequence, self.media.snapshots.len()));
+        if self.ranked != ranked {
+            self.ranked = ranked;
+            let sources = picture_sources(blocks, embeds, &self.media);
+            self.media.rank(sources.into_iter());
         }
         let fixed = Ctx {
             width,
@@ -1592,6 +1640,7 @@ impl Pane {
     /// waking the thread prints again in full.
     fn forget(&mut self) {
         self.display = None;
+        self.ranked = None;
         self.live = Vec::new();
         self.committed = Vec::new();
         self.media.forget();
@@ -2740,6 +2789,40 @@ mod tests {
             run_line(&blocks, &embeds, 80)
                 .unwrap()
                 .contains("Ran 2 commands")
+        );
+    }
+
+    #[test]
+    fn a_picture_ending_a_message_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("end.png");
+        image::RgbaImage::new(320, 320).save(&png).unwrap();
+        let mut media = Media::new(None);
+        media.rank([png.clone()].into_iter());
+        let embeds = HashMap::new();
+        let ctx = Ctx {
+            width: 80,
+            frame: 0,
+            offset: 0,
+            embeds: &embeds,
+            media: Some(&media),
+            link: "",
+            files: &crate::link::FileLinks::default(),
+        };
+        let lines = markdown_with_pictures(&format!("Here:\n\n![shot]({})\n", png.display()), &ctx);
+        let at = lines.iter().position(|l| l.contains("\x1b_G")).unwrap();
+        let rows: usize = lines[at]
+            .split(",r=")
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            lines.len() - at > rows,
+            "every row the picture covers is printed"
         );
     }
 

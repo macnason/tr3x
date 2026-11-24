@@ -4,7 +4,7 @@
 //! link that opens the thread in T3 Code, where the page is interactive.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
 use std::time::Duration;
@@ -18,7 +18,11 @@ use t3client::projection::ThreadState;
 /// How much picture a pane holds at once. The terminal keeps each picture as RGBA pixels in
 /// the snapshot it sends when Rex's app connects, and the app shows a pane whose snapshot is
 /// past about 64 MiB as Stale. Past this the oldest pictures are freed.
-const PICTURE_BUDGET: u64 = 16 << 20;
+const PICTURE_BUDGET: u64 = 24 << 20;
+/// How much of it the newest pictures take at full density. The rest draw at half, a
+/// quarter of the pixels, so a thread of many embeds keeps them all instead of freeing the
+/// oldest to blank rows.
+const SHARP_BUDGET: u64 = 10 << 20;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_AFTER: Duration = Duration::from_secs(10);
 
@@ -100,6 +104,8 @@ pub struct Media {
     generation: u64,
     chrome: Option<PathBuf>,
     held: RefCell<Held>,
+    /// The pictures that draw at full density, the newest; see `rank`.
+    sharp: HashSet<PathBuf>,
 }
 
 /// A headless Chromium: Playwright's, or a Chrome or Chromium the machine has.
@@ -157,6 +163,7 @@ impl Media {
             generation: 0,
             chrome: find_chrome(),
             held: RefCell::default(),
+            sharp: HashSet::new(),
         }
     }
 
@@ -288,6 +295,28 @@ impl Media {
         self.asked.insert(attachment, Some(job));
     }
 
+    /// Picks which of a thread's pictures, given oldest first, draw at full density: the
+    /// newest, while they fit `SHARP_BUDGET`, and always the very newest.
+    pub fn rank(&mut self, pictures: impl DoubleEndedIterator<Item = PathBuf>) {
+        let mut sharp = HashSet::new();
+        let mut bytes = 0;
+        for path in pictures.rev() {
+            if sharp.contains(&path) {
+                continue;
+            }
+            let Some((w, h)) = png_size(&path).or_else(|| jpeg_size(&path)) else {
+                continue;
+            };
+            let scale = (1536.0 / w as f64).min(1920.0 / h as f64).min(1.0);
+            bytes += (w as f64 * scale * h as f64 * scale * 4.0) as u64;
+            if !sharp.is_empty() && bytes > SHARP_BUDGET {
+                break;
+            }
+            sharp.insert(path);
+        }
+        self.sharp = sharp;
+    }
+
     /// A picture `cols` columns wide, as the kitty graphics sequence and the rows it takes.
     /// The terminal reads the file itself, so nothing large goes through the pty. None for a
     /// picture bigger than a pane holds.
@@ -338,7 +367,12 @@ impl Media {
         h: u32,
         cols: usize,
     ) -> Option<(PathBuf, (u32, u32))> {
-        let bounds = ((cols.saturating_mul(16) as u32).clamp(16, 1536), 1920);
+        // 2x for the newest pictures, 1x for the rest.
+        let density = if self.sharp.contains(path) { 16 } else { 8 };
+        let bounds = (
+            (cols.saturating_mul(density) as u32).clamp(16, density as u32 * 96),
+            density as u32 * 120,
+        );
         if w <= bounds.0 && h <= bounds.1 {
             return Some((path.to_path_buf(), (w, h)));
         }
@@ -642,23 +676,67 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_pictures_are_sharp_within_their_budget() {
+        let mut media = Media::new(None);
+        // 1456x1600 at 2x is about 9 MiB: the newest is sharp alone, older ones at half.
+        let embeds: Vec<PathBuf> = (0..4)
+            .map(|i| png(&format!("rank{i}"), 1456, 1600))
+            .collect();
+        media.rank(embeds.clone().into_iter());
+        assert_eq!(media.sharp, HashSet::from([embeds[3].clone()]));
+        // Small ones fit several.
+        let small: Vec<PathBuf> = (0..4)
+            .map(|i| png(&format!("small{i}"), 800, 600))
+            .collect();
+        media.rank(small.clone().into_iter());
+        assert_eq!(media.sharp.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn older_pictures_draw_at_half_density() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut media = Media::new(None);
+        media.cache = dir.path().join("cache");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        media.listen(tx);
+        let (old, new) = (dir.path().join("old.png"), dir.path().join("new.png"));
+        for path in [&old, &new] {
+            image::RgbaImage::from_pixel(1456, 1600, image::Rgba([1, 2, 3, 255]))
+                .save(path)
+                .unwrap();
+        }
+        media.rank([old.clone(), new.clone()].into_iter());
+        let (seq, _) = media.picture(&new, 91).unwrap();
+        assert_eq!(submitted_path(&seq), new, "the newest goes as it is");
+        assert!(media.picture(&old, 91).is_none());
+        let ready = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(media.ready(ready));
+        let (w, h) = png_size(&submitted_path(&media.picture(&old, 91).unwrap().0)).unwrap();
+        assert_eq!((w, h), (728, 800));
+    }
+
+    #[test]
     fn pictures_past_the_budget_free_the_oldest() {
-        let media = Media::new(None);
-        // 3 MiB each; the sixth exceeds the 16 MiB budget.
+        let mut media = Media::new(None);
+        // 3 MiB each, at full density; the ninth exceeds the 24 MiB budget.
         let picture = png("budget", 1024, 768);
-        for id in 1..=5 {
+        media.rank([picture.clone()].into_iter());
+        for id in 1..=8 {
             let seq = media.picture(&picture, 80).unwrap().0;
             assert!(seq.starts_with(&format!("\x1b_Ga=T,i={id},")));
         }
-        let sixth = media.picture(&picture, 80).unwrap().0;
-        assert!(sixth.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b_Ga=T,i=6,"));
+        let ninth = media.picture(&picture, 80).unwrap().0;
+        assert!(ninth.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b_Ga=T,i=9,"));
         assert_eq!(media.free_all(), FREE_ALL);
         assert!(
             media
                 .picture(&picture, 80)
                 .unwrap()
                 .0
-                .starts_with("\x1b_Ga=T,i=7,")
+                .starts_with("\x1b_Ga=T,i=10,")
         );
         std::fs::remove_file(picture).unwrap();
     }

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A picture that ends a message no longer draws over Reply. Its blank rows were trimmed as trailing space, so the text under it and Reply printed over the picture.
+- Threads with many HTML embeds keep all their pictures. A pane holds 16 MiB of pictures and a full-density snapshot takes up to 9, so scrolling back showed older embeds as blank rows. The newest pictures now draw at full density and older ones at half (a quarter of the pixels), within 24 MiB.
+
 ## 0.1.8
 
 - A thread started from New Thread opens in one tab again with the latest Rex. Rex no longer tells a pane its session (`REX_SESSION`), only its block, so the composer couldn't tag its tab as the thread's: the tab stayed **New Thread** and sync opened a second one for the same thread. tr3x now asks Rex which session holds the pane. The same fix brings back the model picker from Reply's chip, `/update`, pairing from New Thread, the Reply pane opening with a new thread, and Reply's pane sizing itself.
