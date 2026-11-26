@@ -46,7 +46,8 @@ machine it's paired with, and draws what T3 says into one Rex session.
 - A subagent follows its parent's window: close the parent and its subagents close too. One
   that waits on an approval or an answer, or whose parent has no window because it's settled,
   snoozed or archived, gets a window of its own with the attention threads,
-  `↳ title · for Parent`. A failed one doesn't: nothing waits on it.
+  `↳ title · for Parent`. A failed one doesn't: nothing waits on it. Nor does one T3 has
+  settled, under its parent or alone.
 - A subagent that only works has a steady `updatedAt` as far as a closed window goes, so a
   closed window stays closed until the subagent needs you, not until its next tool call.
 - `state.json` also keeps `parents`, each shown subagent's thread to its parent's, which ⌃⌘[

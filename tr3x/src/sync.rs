@@ -364,14 +364,17 @@ pub fn park(
 const SUMMON_GRACE_MS: i64 = 60_000;
 
 /// A subagent gets a window only while it works or needs you. Once it finishes, its result
-/// belongs to the parent thread, which is where T3 shows it.
+/// belongs to the parent thread, which is where T3 shows it. A failure T3 has settled is
+/// history too: the parent was told, and nothing waits on it.
 fn shown_subagent(thread: &Value, now: i64) -> bool {
-    thread["lineage"]["relationshipToParent"] == "subagent"
-        && thread["archivedAt"].is_null()
-        && matches!(
-            t3client::inbox::status_label(thread, now),
-            Some("Approval" | "Input" | "Working" | "Goal" | "Failed" | "Limited")
-        )
+    if thread["lineage"]["relationshipToParent"] != "subagent" || !thread["archivedAt"].is_null() {
+        return false;
+    }
+    match t3client::inbox::status_label(thread, now) {
+        Some("Approval" | "Input" | "Working" | "Goal") => true,
+        Some("Failed" | "Limited") => thread["settledOverride"] != "settled",
+        _ => false,
+    }
 }
 
 /// The thread a subagent works for at the top of its chain: the first ancestor that isn't a
@@ -2824,6 +2827,18 @@ mod tests {
                     "b",
                     json!({"creationSource": "mcp", "settledAt": "2026-10-30T00:00:00.000Z"}),
                 ),
+                // A failed delegated task T3 settled: history, not shown.
+                child(
+                    "failed",
+                    "b",
+                    json!({"creationSource": "mcp", "status": "failed", "latestRunId": "r", "settledOverride": "settled", "settledAt": "2026-10-30T00:00:00.000Z"}),
+                ),
+                // A failed one not yet settled: shown under b.
+                child(
+                    "broke",
+                    "b",
+                    json!({"creationSource": "mcp", "status": "failed", "latestRunId": "r"}),
+                ),
                 // A cancelled delegated task: never settles, not shown.
                 child(
                     "cancelled",
@@ -2842,7 +2857,10 @@ mod tests {
                 && !ids.contains(&"done")
                 && !ids.contains(&"cancelled")
                 && !ids.contains(&"finished")
+                && !ids.contains(&"failed")
         );
+        let b = ids.iter().position(|i| *i == "b").unwrap();
+        assert_eq!(ids[b + 1], "broke");
         assert_eq!(wants[a + 1].label, "↳ task");
     }
 
